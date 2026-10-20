@@ -346,7 +346,8 @@ akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写
 块内包含：
 
 - 当前本地时间、时区和 epoch。
-- KDE 焦点窗口标题、应用名和 PID（通过 KWin DBus；非 KDE 或失败时省略）。
+- KDE 焦点窗口标题、应用名和 PID（通过 KWin scripting 读取 `workspace.activeWindow`，
+  非交互式、不抓取鼠标；非 KDE 或失败时省略）。
 - 按 `ps` 报告的 `%CPU` 排序的前 5 个进程。
 - `$HISTFILE` 或 `~/.zsh_history` 中最近 20 条命令及时间戳；支持 zsh 扩展历史和多行命令。
 - 截图成功时的路径、尺寸、后端和采集时间；图片字节不会附在提示词里，模型需要看画面时

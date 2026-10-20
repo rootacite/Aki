@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import json
 import os
 import re
 import shutil
+import tempfile
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,6 +87,8 @@ class LiveContextSnapshot:
 class LiveContextOptions:
     ps_bin: str = "ps"
     qdbus_bin: str | None = None
+    journalctl_bin: str = "journalctl"
+    kwin_script_dir: Path | None = None
     history_path: Path | None = None
     history_limit: int = 20
     process_limit: int = 5
@@ -227,37 +233,49 @@ def parse_ps_output(text: str, limit: int = 5) -> list[ProcessInfo]:
     return processes[:limit]
 
 
-def parse_window_info(text: str) -> WindowInfo | None:
-    values: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line.strip():
+def build_kwin_probe_script(marker: str) -> str:
+    return f'''(function () {{
+    try {{
+        var w = workspace.activeWindow;
+        print("{marker} " + JSON.stringify(w ? {{
+            caption: String(w.caption || ""),
+            resourceClass: String(w.resourceClass || ""),
+            pid: Number(w.pid || 0)
+        }} : null));
+    }} catch (e) {{
+        print("{marker}_ERROR " + String(e));
+    }}
+}})();
+'''
+
+
+def parse_kwin_journal_line(text: str, marker: str) -> WindowInfo | None:
+    for line in reversed(text.splitlines()):
+        if marker not in line:
             continue
-        key, separator, value = line.partition(": ")
-        if not separator:
-            key, separator, value = line.partition(":")
-        if not separator:
-            continue
-        values[key.strip()] = value.strip()
-    title = (
-        values.get("caption")
-        or values.get("resourceName")
-        or values.get("desktopFile")
-        or values.get("resourceClass")
-        or ""
-    ).strip()
-    if not title:
-        return None
-    app = (
-        values.get("desktopFile")
-        or values.get("resourceClass")
-        or values.get("resourceName")
-    )
-    pid: int | None = None
-    try:
-        pid = int(values.get("pid", ""))
-    except ValueError:
-        pass
-    return WindowInfo(title=title, app=app or None, pid=pid)
+        payload = line.split(marker, 1)[1].strip()
+        if payload.startswith("_ERROR"):
+            raise RuntimeError(payload.removeprefix("_ERROR").strip())
+        try:
+            value, _ = json.JSONDecoder().raw_decode(payload)
+        except ValueError as exc:
+            raise RuntimeError("invalid KWin probe output") from exc
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            return None
+        title = str(value.get("caption") or "").strip()
+        if not title:
+            return None
+        app_value = str(value.get("resourceClass") or "").strip()
+        pid_value = value.get("pid")
+        pid = (
+            pid_value
+            if isinstance(pid_value, int) and not isinstance(pid_value, bool)
+            else None
+        )
+        return WindowInfo(title=title, app=app_value or None, pid=pid)
+    return None
 
 
 def screenshot_from_mapping(
@@ -350,14 +368,89 @@ async def _collect_window(options: LiveContextOptions) -> WindowInfo | None:
     qdbus = options.qdbus_bin or shutil.which("qdbus") or shutil.which("qdbus6")
     if not qdbus:
         raise RuntimeError("qdbus is unavailable")
-    returncode, stdout, stderr = await _run_command(
-        [qdbus, "org.kde.KWin", "/KWin", "queryWindowInfo"],
-        timeout=options.timeout,
-        env=desktop_environment(),
+    script_dir = options.kwin_script_dir or (
+        Path(tempfile.gettempdir()) / "aki" / "live"
     )
-    if returncode != 0:
-        raise RuntimeError(stderr.strip() or f"qdbus exited {returncode}")
-    return parse_window_info(stdout)
+    try:
+        script_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.chmod(script_dir, 0o700)
+    except OSError:
+        pass
+    nonce = uuid.uuid4().hex
+    marker = f"AKI_ACTIVE_WINDOW_{nonce}"
+    plugin = f"aki-live-context-{nonce}"
+    script_path = script_dir / f"kwin-active-window-{nonce}.js"
+    env = desktop_environment()
+    try:
+        script_path.write_text(build_kwin_probe_script(marker), encoding="utf-8")
+        try:
+            os.chmod(script_path, 0o600)
+        except OSError:
+            pass
+        returncode, _stdout, stderr = await _run_command(
+            [
+                qdbus,
+                "org.kde.KWin",
+                "/Scripting",
+                "org.kde.kwin.Scripting.loadScript",
+                str(script_path),
+                plugin,
+            ],
+            timeout=options.timeout,
+            env=env,
+        )
+        if returncode != 0:
+            raise RuntimeError(stderr.strip() or f"qdbus loadScript exited {returncode}")
+        returncode, _stdout, stderr = await _run_command(
+            [
+                qdbus,
+                "org.kde.KWin",
+                "/Scripting",
+                "org.kde.kwin.Scripting.start",
+            ],
+            timeout=options.timeout,
+            env=env,
+        )
+        if returncode != 0:
+            raise RuntimeError(stderr.strip() or f"qdbus start exited {returncode}")
+        deadline = asyncio.get_running_loop().time() + min(1.0, options.timeout)
+        while True:
+            await asyncio.sleep(0.1)
+            returncode, stdout, stderr = await _run_command(
+                [
+                    options.journalctl_bin,
+                    "--user",
+                    "-n",
+                    "500",
+                    "--no-pager",
+                    "-o",
+                    "cat",
+                ],
+                timeout=options.timeout,
+            )
+            if returncode != 0:
+                raise RuntimeError(
+                    stderr.strip() or f"journalctl exited {returncode}"
+                )
+            if marker in stdout:
+                return parse_kwin_journal_line(stdout, marker)
+            if asyncio.get_running_loop().time() >= deadline:
+                raise RuntimeError("KWin probe produced no journal output")
+    finally:
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await _run_command(
+                [
+                    qdbus,
+                    "org.kde.KWin",
+                    "/Scripting",
+                    "org.kde.kwin.Scripting.unloadScript",
+                    plugin,
+                ],
+                timeout=min(1.0, options.timeout),
+                env=env,
+            )
+        with contextlib.suppress(OSError):
+            script_path.unlink()
 
 
 async def _collect_history(options: LiveContextOptions) -> list[HistoryEntry]:

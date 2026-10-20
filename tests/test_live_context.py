@@ -15,11 +15,12 @@ from engine.live_context import (
     ScreenshotInfo,
     WindowInfo,
     apply_live_context,
+    build_kwin_probe_script,
     clear_live_context,
     desktop_environment,
     estimate_tokens,
     parse_ps_output,
-    parse_window_info,
+    parse_kwin_journal_line,
     parse_zsh_history_text,
     render_live_context,
 )
@@ -61,16 +62,23 @@ class LiveContextParsingTests(unittest.TestCase):
         self.assertEqual([process.pid for process in processes], [12, 13, 10, 14, 15])
         self.assertNotIn(11, [process.pid for process in processes])
 
-    def test_window_info_parser(self) -> None:
-        window = parse_window_info(
-            "caption: A: B\nresourceClass: firefox\npid: 42\n"
+    def test_kwin_probe_script_and_journal_parser(self) -> None:
+        script = build_kwin_probe_script("AKI_MARKER")
+        self.assertIn("workspace.activeWindow", script)
+        self.assertIn("AKI_MARKER", script)
+        window = parse_kwin_journal_line(
+            'kwin_wayland[1]: AKI_MARKER '
+            '{"caption":"A: B","resourceClass":"firefox","pid":42}',
+            "AKI_MARKER",
         )
         self.assertIsNotNone(window)
         assert window is not None
         self.assertEqual(window.title, "A: B")
         self.assertEqual(window.app, "firefox")
         self.assertEqual(window.pid, 42)
-        self.assertIsNone(parse_window_info("caption: \npid: 42\n"))
+        self.assertIsNone(
+            parse_kwin_journal_line("kwin_wayland[1]: AKI_MARKER null", "AKI_MARKER")
+        )
 
 
 class LiveContextRenderTests(unittest.TestCase):

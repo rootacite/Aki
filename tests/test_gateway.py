@@ -17,6 +17,7 @@ from unittest import mock
 
 from engine.akid import GatewayConfig, GatewayServer, _b64url
 from engine.letta_process import LettaProcess
+from engine.live_context import WindowInfo
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from tests.fake_mqtt_broker import FakeMqttBroker
 
@@ -229,13 +230,21 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         os.symlink(self.outside, self.memory / "escape.md")
         self.server: GatewayServer | None = None
         self.clients: list[AsyncClient] = []
+        self._window_patch = mock.patch(
+            "engine.live_context._collect_window", new=self._fake_window
+        )
+        self._window_patch.start()
 
     async def asyncTearDown(self) -> None:
         for client in self.clients:
             await client.close()
         if self.server is not None:
             await self.server.stop()
+        self._window_patch.stop()
         self.tempdir.cleanup()
+
+    async def _fake_window(self, _options) -> WindowInfo:
+        return WindowInfo(title="Fake Window <test>", app="firefox", pid=102)
 
     async def start_server(
         self,
@@ -1220,18 +1229,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         path.chmod(0o755)
         return path
 
-    def _fake_qdbus(self) -> Path:
-        path = self.root / "fake-qdbus"
-        path.write_text(
-            "#!/usr/bin/python3\n"
-            "print('caption: Fake Window <test>')\n"
-            "print('resourceClass: firefox')\n"
-            "print('pid: 102')\n",
-            encoding="utf-8",
-        )
-        path.chmod(0o755)
-        return path
-
     def _write_test_agent(self, system: str = "BASE PROMPT\n") -> Path:
         agents = self.root / "backend" / "agents"
         agents.mkdir(parents=True, exist_ok=True)
@@ -1472,7 +1469,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 server = await self.start_server(
                     live_context_enabled=True,
                     ps_bin=str(self._fake_ps()),
-                    qdbus_bin=str(self._fake_qdbus()),
                     zsh_history_path=history,
                     spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
                     screenshot_output_dir=self.root / "live-shots",
@@ -1545,7 +1541,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 server = await self.start_server(
                     live_context_enabled=True,
                     ps_bin=str(self._fake_ps()),
-                    qdbus_bin=str(self._fake_qdbus()),
                     zsh_history_path=history,
                     spectacle_bin=str(failure),
                     screenshot_output_dir=self.root / "live-shots-failure",
@@ -1598,7 +1593,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     live_context_enabled=True,
                     live_context_budget_tokens=2048,
                     ps_bin=str(self._fake_ps()),
-                    qdbus_bin=str(self._fake_qdbus()),
                     zsh_history_path=history,
                     spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
                     screenshot_output_dir=self.root / "live-shots-budget",
@@ -1656,7 +1650,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 server = await self.start_server(
                     live_context_enabled=True,
                     ps_bin=str(self._fake_ps()),
-                    qdbus_bin=str(self._fake_qdbus()),
                     zsh_history_path=history,
                     spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
                     screenshot_output_dir=self.root / "live-shots-channel",

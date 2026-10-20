@@ -1395,7 +1395,7 @@ class GatewayServer:
             if qdbus:
                 try:
                     result = subprocess.run(
-                        [qdbus, "org.kde.KWin", "/KWin", "queryWindowInfo"],
+                        [qdbus, "org.kde.KWin", "/Scripting"],
                         env=desktop_environment(),
                         stdout=subprocess.DEVNULL,
                         stderr=subprocess.DEVNULL,
