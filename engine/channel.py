@@ -351,6 +351,7 @@ class TokifactorChannel:
             sender=self.sender_name,
             sender_id=self.sender_id,
             avatar_hash=self._avatar_hash,
+            caption=caption or "",
         )
         semaphore = asyncio.Semaphore(8)
 
@@ -371,8 +372,6 @@ class TokifactorChannel:
                     )
                     await client.publish(PICTURE_TOPIC, abort.encode("utf-8"), qos=1)
                 raise
-            if caption:
-                await self.publish_text(caption)
         self._images_sent += 1
         self._last_image_at = time.time()
         return {

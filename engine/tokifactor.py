@@ -306,6 +306,7 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
                 "senderId",
                 "avatarHash",
                 "size",
+                "caption",
                 "status",
                 "reason",
                 *STRUCTURED_FIELDS,
@@ -356,6 +357,7 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
         "sender_id": sender_id,
         "metadata": metadata,
         "size": size,
+        "caption": str(value.get("caption") or ""),
     }
 
 
@@ -506,27 +508,34 @@ def encode_picture_payloads(
     sender: str,
     sender_id: str,
     avatar_hash: str = "",
+    caption: str = "",
 ) -> tuple[str, list[str]]:
     if not data:
         raise ValueError("image is empty")
     transfer_id = str(uuid.uuid4())
     digest = hashlib.sha256(data).hexdigest()
+    caption_cipher = (
+        base64.b64encode(encrypt_bytes(caption.encode("utf-8"), magic_string)).decode("ascii")
+        if caption
+        else ""
+    )
     total = max(1, (len(data) + TEXT_CHUNK_BYTES - 1) // TEXT_CHUNK_BYTES)
     payloads: list[str] = []
     for index in range(total):
         part = data[index * TEXT_CHUNK_BYTES : (index + 1) * TEXT_CHUNK_BYTES]
         encrypted = base64.b64encode(encrypt_bytes(part, magic_string)).decode("ascii")
-        chunk = _encode_object(
-            [
-                ("id", f"{transfer_id}:{index}:{total}"),
-                ("hash", digest),
-                ("encrypted_data", encrypted),
-                ("sender", sender),
-                ("senderId", sender_id),
-                ("avatarHash", avatar_hash),
-                ("size", str(len(data))),
-            ]
-        )
+        pairs = [
+            ("id", f"{transfer_id}:{index}:{total}"),
+            ("hash", digest),
+            ("encrypted_data", encrypted),
+            ("sender", sender),
+            ("senderId", sender_id),
+            ("avatarHash", avatar_hash),
+            ("size", str(len(data))),
+        ]
+        if caption_cipher:
+            pairs.append(("caption", caption_cipher))
+        chunk = _encode_object(pairs)
         payloads.append(chunk)
     return transfer_id, payloads
 

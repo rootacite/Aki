@@ -155,17 +155,26 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.peer.connect()
         await self.peer.subscribe(PICTURE_TOPIC, qos=1)
+        await self.peer.subscribe(TOPIC, qos=1)
 
-        result = await self.channel.publish_image(PNG_1X1, mime="image/png")
+        result = await self.channel.publish_image(
+            PNG_1X1, caption="lab desk", mime="image/png"
+        )
         await wait_until(lambda: bool(self.picture_payloads))
         chunk = parse_text_chunk(self.picture_payloads[0])
         self.assertIsNotNone(chunk)
         assert chunk is not None
         encrypted = base64.b64decode(chunk["encrypted_data"], validate=True)
         self.assertEqual(decrypt_bytes(encrypted, MAGIC), PNG_1X1)
+        self.assertEqual(
+            decrypt_bytes(base64.b64decode(chunk["caption"], validate=True), MAGIC),
+            b"lab desk",
+        )
         self.assertEqual(result["mime"], "image/png")
         self.assertEqual(result["bytes"], len(PNG_1X1))
         self.assertEqual(self.channel.health()["images_sent"], 1)
+        await asyncio.sleep(0.2)
+        self.assertEqual(self.peer_messages, [])
 
     async def test_avatar_have_want_and_message_hash(self) -> None:
         self.channel = TokifactorChannel(

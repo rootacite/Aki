@@ -195,7 +195,7 @@ class TokifactorWireTests(unittest.TestCase):
     def test_picture_payload_round_trip(self) -> None:
         data = PNG_1X1 + b"x" * (9 * 1024)
         transfer_id, payloads = encode_picture_payloads(
-            data, MAGIC, sender="akid", sender_id="akid"
+            data, MAGIC, sender="akid", sender_id="akid", caption="lab desk"
         )
         self.assertTrue(transfer_id)
         self.assertGreaterEqual(len(payloads), 2)
@@ -208,6 +208,10 @@ class TokifactorWireTests(unittest.TestCase):
             self.assertEqual(chunk["sender"], "akid")
             self.assertEqual(chunk["total"], len(payloads))
             self.assertEqual(chunk["size"], len(data))
+            self.assertEqual(
+                decrypt_bytes(base64.b64decode(chunk["caption"], validate=True), MAGIC),
+                b"lab desk",
+            )
             digests.add(chunk["hash"])
             encrypted = base64.b64decode(chunk["encrypted_data"], validate=True)
             pieces.append(decrypt_bytes(encrypted, MAGIC))
