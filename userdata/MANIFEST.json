@@ -1,0 +1,73 @@
+{
+  "source": "~/.letta/lc-local-backend/memfs/agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc/memory",
+  "memfs_commit": "1133055ebea971636f5020a70f3dc63febb9e8be",
+  "username": "Master",
+  "placeholder": "{{USERNAME}}",
+  "synced_at": "2026-10-20T08:25:09.656468Z",
+  "templates": {
+    "persona.md": {
+      "sha256": "145a2473b8bc299b99ce2ccd25eaf0a07335dac1e4a40941f9024519787b71fb",
+      "bytes": 2917
+    },
+    "memory-policy.md": {
+      "sha256": "63839e44f6a4b7cc361ccddcac9ca5c1da21a094d20673ddb2563b41a91c243a",
+      "bytes": 1248
+    },
+    "character/MEMORY.md": {
+      "sha256": "8024cafdf721b28566241fc88d763730ee90d8a4be34c8e6f82faa554a087830",
+      "bytes": 410
+    },
+    "character/voice.md": {
+      "sha256": "13a453c7ece230623c3a8300247f2c3215760bf8bb3c4e13b9749a71e1cf5b91",
+      "bytes": 2047
+    },
+    "character/relationship.md": {
+      "sha256": "c824173a797d133162486bed7d46b749583c1c055f5efd62c5d8e7885c886e36",
+      "bytes": 1572
+    },
+    "character/boundaries.md": {
+      "sha256": "c5b10478bbcd2ead1debac48b07906e8523a37a8d2a4a74f790957c7b151901e",
+      "bytes": 1166
+    },
+    "character/examples.md": {
+      "sha256": "0d000e4238b1b79a7a0398644193d1fff71970c03a6dd92b809195b1aa8a8deb",
+      "bytes": 1610
+    }
+  },
+  "rendered": {
+    "persona.md": {
+      "sha256": "b47eaa58c9542c80a6d08e34cd721bd73122019327958043680efea2ed76caeb",
+      "bytes": 2881
+    },
+    "memory-policy.md": {
+      "sha256": "c77a761ff3f42d1dc1680e4d2b7dd994751f9cc1674ff35e91d99ef9c55663d2",
+      "bytes": 1236
+    },
+    "character/MEMORY.md": {
+      "sha256": "8024cafdf721b28566241fc88d763730ee90d8a4be34c8e6f82faa554a087830",
+      "bytes": 410
+    },
+    "character/voice.md": {
+      "sha256": "dffed7cfc79f491a86e0072f795ec26268afeecf1144763124b3b7825d42ac5f",
+      "bytes": 2041
+    },
+    "character/relationship.md": {
+      "sha256": "7d99e85fa38cc2eddbc9b4e88c4e12be1da11547b167781b1208d4d1cdd31832",
+      "bytes": 1536
+    },
+    "character/boundaries.md": {
+      "sha256": "c5b10478bbcd2ead1debac48b07906e8523a37a8d2a4a74f790957c7b151901e",
+      "bytes": 1166
+    },
+    "character/examples.md": {
+      "sha256": "e211310fcca00cbebf7a088b34b634b782b515f2adfb85a8a8810880732f1367",
+      "bytes": 1598
+    }
+  },
+  "excluded": [
+    "MEMORY.md (contains user identity)",
+    "human.md (private user profile)",
+    "profile/** (private user/profile data)",
+    ".git/**"
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "KPackageStructure": "Plasma/Applet",
+  "KPlugin": {
+    "Authors": [
+      {
+        "Name": "Acite"
+      }
+    ],
+    "Category": "Utilities",
+    "Description": "Chat with Aki from the Plasma panel",
+    "Description[zh_CN]": "在 Plasma 面板中与 Aki 对话",
+    "Icon": "dialog-messages",
+    "Id": "org.acite.aki.chat",
+    "Name": "Aki",
+    "Name[zh_CN]": "Aki",
+    "Version": "0.1.0"
+  },
+  "X-Plasma-API-Minimum-Version": "6.0",
+  "X-Plasma-MainScript": "ui/main.qml"
+}

@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Local runtime state
+.letta/
+akid.service
+*.log
+*.tmp
+.env
+.env.*
+
+# OS
+.DS_Store
