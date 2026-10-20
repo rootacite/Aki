@@ -85,6 +85,70 @@ akid 的设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文
 
 Letta 只连接 `http://127.0.0.1:7721/v1`。akid 按请求里的模型把调用转到 conf 里的上游，并换上对应的密钥。`[proxy] upstream_proxy` 非空时，访问上游先走这台 HTTP 代理（HTTPS 用 CONNECT）；单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连，本地 llama.cpp/OpenAI 兼容服务应这样配置。留空则所有上游直连。聊天客户端仍然只走 Unix socket。
 
+### 复用 Grok Build 的 xAI OAuth
+
+如果本机已经用 `grok login` 登录，akid 可以直接复用 `~/.grok/auth.json` 里的 xAI OAuth
+凭据，不需要把访问 token 复制进 `aki.conf`。配置示例：
+
+```ini
+[upstream.xai-oauth]
+base_url = https://cli-chat-proxy.grok.com/v1
+auth = grok-oauth
+use_proxy = true
+
+[model.grok-4.6]
+upstream = xai-oauth
+upstream_model = grok-4.6
+api = openai-responses
+path = /responses
+context_window = 500000
+max_tokens = 65536
+input = text,image
+```
+
+`auth = grok-oauth` 的上游不要求 `api_key`。akid 会在 token 临近过期时通过 OAuth
+refresh token 续期，并在 `auth.json.lock` 保护下把轮换后的 refresh token 原子写回
+`~/.grok/auth.json`；请求会自动携带 Grok Build 需要的 `X-XAI-Token-Auth`、
+`x-grok-client-mode` 和用户标识头。`~/.grok` 仍应保持仅当前用户可读。
+
+启用后切换模型和 reasoning：
+
+```bash
+akictl model set grok-4.6
+akictl reasoning set low
+```
+
+### 上下文压缩阈值
+
+Letta 本地后端默认在 `context_window - 16,384` tokens 时触发 compaction。Aki 提供补丁脚本，
+把阈值改为窗口的 50%：
+
+```bash
+sudo python3 scripts/patch-letta-compaction.py --ratio 0.5
+python3 scripts/patch-letta-compaction.py --status
+sudo python3 scripts/patch-letta-compaction.py --restore   # 恢复 Letta 原始逻辑
+```
+
+脚本会保留 `letta.js.aki-original` 备份，并且可以重复执行。升级或重装 Letta 后需要重新
+运行一次。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction；压缩完成后，
+`reflectionTrigger = compaction-event` 会继续触发 MemFS 记忆整理。
+
+### 基础 system prompt
+
+Aki 的基础 prompt 是仓库内自有文件 `prompts/aki-system.md`，不再跟随 Letta 上游自动更新。
+它仍保留 memory、skills 和核心循环说明，但身份与 Letta 产品框架已改为 Aki。
+
+```bash
+python3 scripts/install-system-prompt.py --status
+python3 scripts/install-system-prompt.py --dry-run
+python3 scripts/install-system-prompt.py
+systemctl --user restart akid.service
+```
+
+脚本会保留现有 core memory 和 `<aki-live-context>`，并先备份到
+`~/.letta/backups/system-prompt-install-<timestamp>/`。修改 `prompts/aki-system.md` 后重新运行
+即可；`{CORE_MEMORY}` 占位符必须保留。
+
 默认 socket 为 `$XDG_RUNTIME_DIR/aki/akid.sock`。手动运行时：
 
 ```bash

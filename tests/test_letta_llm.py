@@ -7,7 +7,7 @@ from pathlib import Path
 
 from engine.aki_config import atomic_write, load_config, set_key, template_text
 from engine.aki_config import ModelRoute
-from engine.letta_llm import prepare_letta, supported_reasoning_efforts
+from engine.letta_llm import _compat, prepare_letta, supported_reasoning_efforts
 
 
 class ReasoningEffortTests(unittest.TestCase):
@@ -25,6 +25,49 @@ class ReasoningEffortTests(unittest.TestCase):
             api_key="secret",
         )
         self.assertEqual(supported_reasoning_efforts(route), ("low", "medium", "high"))
+
+    def test_grok_oauth_responses_route_uses_xai_reasoning_levels(self) -> None:
+        route = ModelRoute(
+            model_id="grok-4.6",
+            upstream_name="xai-oauth",
+            upstream_model="grok-4.6",
+            api="openai-responses",
+            path="/responses",
+            context_window=500000,
+            max_tokens=65536,
+            inputs=("text", "image"),
+            url="https://cli-chat-proxy.grok.com/v1/responses",
+            api_key="",
+            auth="grok-oauth",
+        )
+        self.assertEqual(
+            supported_reasoning_efforts(route),
+            ("low", "medium", "high", "xhigh"),
+        )
+
+    def test_cli_proxy_compat_avoids_unsupported_chat_fields(self) -> None:
+        route = ModelRoute(
+            model_id="gemini-3.8-flash",
+            upstream_name="cli-proxy-api",
+            upstream_model="gemini-3.8-flash",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=1_000_000,
+            max_tokens=65_536,
+            inputs=("text", "image"),
+            url="http://127.0.0.1:8317/v1/chat/completions",
+            api_key="secret",
+            use_proxy=False,
+        )
+        self.assertEqual(
+            _compat(route),
+            {
+                "supportsStore": False,
+                "supportsDeveloperRole": False,
+                "maxTokensField": "max_tokens",
+                "supportsStrictMode": False,
+            },
+        )
 
 
 class LettaProviderMigrationTests(unittest.TestCase):

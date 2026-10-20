@@ -106,6 +106,44 @@ class AkiConfigTests(unittest.TestCase):
         self.assertEqual(local.url, "http://127.0.0.1:10001/v1/chat/completions")
         self.assertIn('"maxTokensField": "max_tokens"', render_provider_mod(config))
 
+    def test_grok_oauth_upstream_needs_no_static_key(self) -> None:
+        atomic_write(self.path, template_text())
+        set_key(self.path, "proxy", "token", "loopback-token")
+        text = self.path.read_text(encoding="utf-8")
+        text += (
+            "\n[upstream.xai]\n"
+            "base_url = https://cli-chat-proxy.grok.com/v1\n"
+            "auth = grok-oauth\n"
+            "\n[model.grok-4.6]\n"
+            "upstream = xai\n"
+            "upstream_model = grok-4.6\n"
+            "api = openai-responses\n"
+            "path = /responses\n"
+            "context_window = 500000\n"
+            "max_tokens = 65536\n"
+            "input = text,image\n"
+        )
+        atomic_write(self.path, text)
+        config = load_config(self.path)
+        route = next(model for model in config.enabled_models if model.model_id == "grok-4.6")
+        self.assertEqual(route.auth, "grok-oauth")
+        self.assertEqual(route.api_key, "")
+        self.assertEqual(route.context_window, 500_000)
+        self.assertEqual(route.url, "https://cli-chat-proxy.grok.com/v1/responses")
+        self.assertIn('"id": "grok-4.6"', render_provider_mod(config))
+
+    def test_unknown_auth_provider_is_rejected(self) -> None:
+        atomic_write(self.path, template_text())
+        text = self.path.read_text(encoding="utf-8")
+        text += (
+            "\n[upstream.bad]\n"
+            "base_url = https://example.test/v1\n"
+            "auth = magic\n"
+        )
+        atomic_write(self.path, text)
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
     def test_legacy_files_move_and_line_edit_keeps_secrets(self) -> None:
         legacy = self.root / "share"
         legacy.mkdir()

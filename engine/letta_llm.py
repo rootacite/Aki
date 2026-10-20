@@ -63,8 +63,11 @@ def _compat(route: ModelRoute) -> dict[str, object] | None:
             "thinkingFormat": "deepseek",
             "supportsStrictMode": True,
         }
-    if route.upstream_name == "xai" and route.api == "openai-responses":
-        return {"supportsLongCacheRetention": False}
+    if _is_xai(route) and route.api == "openai-responses":
+        return {
+            "supportsLongCacheRetention": False,
+            "supportsStrictMode": False,
+        }
     if route.upstream_name == "openrouter" and route.api == "openai-completions":
         return {
             "supportsDeveloperRole": False,
@@ -72,6 +75,13 @@ def _compat(route: ModelRoute) -> dict[str, object] | None:
             "supportsStrictMode": True,
         }
     if route.upstream_name == "local-llama" and route.api == "openai-completions":
+        return {
+            "supportsStore": False,
+            "supportsDeveloperRole": False,
+            "maxTokensField": "max_tokens",
+            "supportsStrictMode": False,
+        }
+    if route.upstream_name == "cli-proxy-api" and route.api == "openai-completions":
         return {
             "supportsStore": False,
             "supportsDeveloperRole": False,
@@ -101,7 +111,7 @@ def supported_reasoning_efforts(route: ModelRoute | None) -> tuple[str, ...]:
 
 
 def _thinking_level_map(route: ModelRoute) -> dict[str, str | None] | None:
-    if route.upstream_name == "xai" and route.api == "openai-responses":
+    if _is_xai(route) and route.api == "openai-responses":
         return {
             "off": None,
             "minimal": None,
@@ -122,6 +132,10 @@ def _thinking_level_map(route: ModelRoute) -> dict[str, str | None] | None:
             "max": None,
         }
     return None
+
+
+def _is_xai(route: ModelRoute) -> bool:
+    return route.upstream_name == "xai" or route.auth == "grok-oauth"
 
 
 def write_provider_mod(letta_home: Path, config: AkiConfig) -> Path:

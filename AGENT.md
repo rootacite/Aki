@@ -225,9 +225,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：Letta 里是 `aki/deepseek-flash`。akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
+- 模型：当前是 `aki/grok-4.6`（reasoning `low`，上下文 500,000）；其他已启用模型可在
+  `aki/deepseek-flash`、`aki/gemini-3.8-flash` 和 `aki/gemma-4-26b-a4b-it` 之间切换。
+  akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
+- 基础 system prompt：`prompts/aki-system.md`，由
+  `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
 - 设置：`~/.aki/aki.conf`。Letta 只保存回环代理地址和回环令牌。
-- 上下文预算：400,000 tokens；约 383,616 tokens 触发 compaction。
+- 上下文预算：500,000 tokens；达到 50%（250,000 tokens）触发 compaction。
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。

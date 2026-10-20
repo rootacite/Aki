@@ -774,6 +774,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         client = await self.client()
         await client.hello()
+        self.server.last_usage = {"context_tokens": 83_364, "prompt_tokens": 76_903}
         result = await client.call("aki.conversation.reset", {})
         self.assertTrue(result["backend_ready"])
         self.assertEqual(result["conversation_id"], "default")
@@ -786,6 +787,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["in_context_message_ids"], [])
         self.assertIsNone(record["last_message_at"])
         self.assertIsNone(record["summary"])
+        self.assertIsNone(self.server.last_usage)
+        self.assertEqual(self.server._channel_control_metadata()["contextTokens"], "0")
 
     async def test_conversation_reset_interrupts_active_and_drops_queue(self) -> None:
         await self.start_server()

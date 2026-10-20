@@ -25,6 +25,7 @@ _KNOWN_SECTIONS = {
     "proxy",
 }
 _APIS = {"openai-completions", "openai-responses"}
+_AUTH_PROVIDERS = {"", "grok-oauth"}
 
 
 class ConfigError(ValueError):
@@ -37,6 +38,7 @@ class Upstream:
     base_url: str
     api_key: str
     use_proxy: bool = True
+    auth: str = ""
 
 
 @dataclass(frozen=True)
@@ -52,10 +54,11 @@ class ModelRoute:
     url: str
     api_key: str
     use_proxy: bool = True
+    auth: str = ""
 
     @property
     def enabled(self) -> bool:
-        return bool(self.api_key)
+        return bool(self.api_key) or self.auth == "grok-oauth"
 
 
 @dataclass
@@ -381,11 +384,18 @@ def load_config(path: Path) -> AkiConfig:
         if not base_url:
             raise ConfigError(f"[{section}] base_url is required")
         join_url(base_url, "/")
+        auth = parser.get(section, "auth", fallback="").strip()
+        if auth not in _AUTH_PROVIDERS:
+            raise ConfigError(
+                f"[{section}] auth must be empty or grok-oauth"
+            )
+        api_key = parser.get(section, "api_key", fallback="").strip()
         upstreams[name] = Upstream(
             name=name,
             base_url=base_url,
-            api_key=_require(parser, section, "api_key").strip(),
+            api_key=api_key,
             use_proxy=_bool_or(parser, section, "use_proxy", True),
+            auth=auth,
         )
 
     models: list[ModelRoute] = []
@@ -418,6 +428,7 @@ def load_config(path: Path) -> AkiConfig:
                 url=join_url(upstream.base_url, route_path),
                 api_key=upstream.api_key,
                 use_proxy=upstream.use_proxy,
+                auth=upstream.auth,
             )
         )
 

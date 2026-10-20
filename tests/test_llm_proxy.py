@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 from engine.aki_config import ModelRoute
+from engine.grok_oauth import GrokCredentials
 from engine.llm_proxy import LlmProxy, ProxyBindError
 
 
@@ -210,6 +211,110 @@ class LocalBypassProxyTests(unittest.IsolatedAsyncioTestCase):
         payload = await asyncio.wait_for(reader.read(4096), timeout=2)
         self.assertIn(b"200 OK", payload)
         self.assertEqual(self.captured["body"]["model"], "gemma.gguf")
+
+
+class GrokOAuthProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.captured: dict[str, object] = {}
+
+        async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            self.captured["headers"] = headers
+            self.captured["body"] = json.loads(rest[:length])
+            payload = b'{"id":"resp_1","object":"response","output":[]}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + payload
+            )
+            await writer.drain()
+            writer.close()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = self.upstream.sockets[0].getsockname()[1]
+        route = ModelRoute(
+            model_id="grok-4.6",
+            upstream_name="xai",
+            upstream_model="grok-4.6",
+            api="openai-responses",
+            path="/responses",
+            context_window=500_000,
+            max_tokens=65_536,
+            inputs=("text", "image"),
+            url=f"http://127.0.0.1:{port}/responses",
+            api_key="",
+            use_proxy=False,
+            auth="grok-oauth",
+        )
+        self.proxy = LlmProxy(
+            "127.0.0.1",
+            0,
+            "loopback-token",
+            (route,),
+            grok_oauth=_FakeGrokOAuth(),
+        )
+        await self.proxy.start()
+        self.client: asyncio.StreamWriter | None = None
+
+    async def asyncTearDown(self) -> None:
+        if self.client is not None:
+            self.client.close()
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+
+    async def test_adds_grok_build_headers_and_bearer(self) -> None:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        self.client = writer
+        body = json.dumps(
+            {"model": "grok-4.6", "input": [], "reasoning": {"effort": "low"}}
+        ).encode()
+        writer.write(
+            (
+                "POST /v1/responses HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode()
+            + body
+        )
+        await writer.drain()
+        payload = await asyncio.wait_for(reader.read(4096), timeout=2)
+        self.assertIn(b"200 OK", payload)
+        headers = self.captured["headers"]
+        self.assertEqual(headers["authorization"], "Bearer fresh-oauth-token")
+        self.assertEqual(headers["x-xai-token-auth"], "xai-grok-cli")
+        self.assertEqual(headers["x-authenticateresponse"], "authenticate-response")
+        self.assertEqual(headers["x-grok-client-mode"], "headless")
+        self.assertEqual(headers["x-userid"], "user-123")
+        self.assertEqual(headers["x-email"], "aki@example.test")
+        self.assertEqual(headers["x-grok-client-version"], "1.0.62")
+        self.assertEqual(self.captured["body"]["model"], "grok-4.6")
+
+
+class _FakeGrokOAuth:
+    def credentials(self) -> GrokCredentials:
+        return GrokCredentials(
+            access_token="fresh-oauth-token",
+            user_id="user-123",
+            email="aki@example.test",
+            client_version="1.0.62",
+        )
 
 
 class UpstreamProxyTests(unittest.IsolatedAsyncioTestCase):

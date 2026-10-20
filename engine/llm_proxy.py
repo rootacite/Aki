@@ -13,6 +13,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from engine.aki_config import ModelRoute, parse_upstream_proxy
+from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
 
 LOGGER = logging.getLogger("akid.llm_proxy")
 
@@ -75,6 +76,7 @@ class LlmProxy:
         routes: tuple[ModelRoute, ...] | list[ModelRoute],
         upstream_proxy: str = "",
         ssl_context: ssl.SSLContext | None = None,
+        grok_oauth: GrokOAuthProvider | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -84,6 +86,10 @@ class LlmProxy:
         self.routes = {route.model_id: route for route in routes if route.enabled}
         self.upstream_proxy = parse_upstream_proxy(upstream_proxy)
         self.ssl_context = ssl_context
+        needs_grok_oauth = any(route.auth == "grok-oauth" for route in self.routes.values())
+        self.grok_oauth = grok_oauth
+        if needs_grok_oauth and self.grok_oauth is None:
+            self.grok_oauth = GrokOAuthProvider(upstream_proxy=self.upstream_proxy)
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -203,16 +209,31 @@ class LlmProxy:
         forwarded = json.dumps(payload).encode("utf-8")
         parsed = urlsplit(route.url)
         upstream_host = parsed.hostname or "-"
+        api_key = route.api_key
+        extra_headers: dict[str, str] = {}
+        if route.auth == "grok-oauth":
+            if self.grok_oauth is None:
+                writer.write(_status_json(502, "grok oauth is not configured"))
+                return 502, model_id, upstream_host
+            try:
+                credentials = await asyncio.to_thread(self.grok_oauth.credentials)
+            except GrokOAuthError as exc:
+                LOGGER.warning("grok oauth unavailable: %s", exc)
+                writer.write(_status_json(502, "grok oauth unavailable"))
+                return 502, model_id, upstream_host
+            api_key = credentials.access_token
+            extra_headers = credentials.extra_headers()
         try:
             status = await _forward(
                 parsed,
                 headers,
                 forwarded,
-                route.api_key,
+                api_key,
                 writer,
                 upstream_proxy=self.upstream_proxy,
                 ssl_context=self.ssl_context,
                 use_proxy=route.use_proxy,
+                extra_headers=extra_headers,
             )
         except OSError as exc:
             LOGGER.warning("upstream connect failed host=%s error=%s", upstream_host, exc)
@@ -280,6 +301,7 @@ async def _forward(
     upstream_proxy: str = "",
     ssl_context: ssl.SSLContext | None = None,
     use_proxy: bool = True,
+    extra_headers: Mapping[str, str] | None = None,
 ) -> int:
     host = parsed.hostname
     if not host:
@@ -301,13 +323,18 @@ async def _forward(
         header_lines = [
             f"POST {request_target} HTTP/1.1",
             f"Host: {host if port in (80, 443) else f'{host}:{port}'}",
-            f"Authorization: Bearer {api_key}",
             "Content-Type: application/json",
             f"Content-Length: {len(body)}",
             "Connection: close",
         ]
+        if api_key:
+            header_lines.append(f"Authorization: Bearer {api_key}")
+        extra_headers = extra_headers or {}
+        for name, value in extra_headers.items():
+            header_lines.append(f"{name}: {value}")
+        reserved = {name.lower() for name in extra_headers}
         for name, value in request_headers.items():
-            if name in _HOP_BY_HOP or name == "content-type":
+            if name in _HOP_BY_HOP or name in reserved or name == "content-type":
                 continue
             header_lines.append(f"{name}: {value}")
         upstream_writer.write(("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1"))

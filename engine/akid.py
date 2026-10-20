@@ -4815,6 +4815,8 @@ class GatewayServer:
                     await self.backend.stop()
                 backup_path = self._backup_conversation(conversation_dir)
                 cleared_bytes = self._clear_conversation_messages(conversation_dir)
+                self.last_usage = None
+                self._schedule_status_refresh()
                 self.backend.start()
                 ready = await self._wait_backend_ready(20.0)
                 if not ready:
