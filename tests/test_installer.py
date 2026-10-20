@@ -121,6 +121,11 @@ class InstallerTests(unittest.TestCase):
             "AKI_SANDBOX_ENABLED=1",
             "AKI_BWRAP_BIN=",
             "AKI_WRITABLE_STATE=",
+            'Environment="XDG_RUNTIME_DIR=%t"',
+            'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"',
+            'Environment="AKI_LIVE_CONTEXT_ENABLED=1"',
+            'Environment="AKI_LIVE_CONTEXT_BUDGET_TOKENS=65536"',
+            'Environment="AKI_ZSH_HISTORY=',
         ):
             self.assertIn(fragment, unit)
 

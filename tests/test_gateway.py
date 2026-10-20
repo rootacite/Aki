@@ -266,6 +266,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         spectacle_bin: str = "spectacle",
         screenshot_output_dir: Path | None = None,
         screenshot_wayland_display: str | None = None,
+        live_context_enabled: bool = False,
+        live_context_budget_tokens: int = 65536,
+        zsh_history_path: Path | None = None,
+        live_context_timeout: float = 2.0,
+        ps_bin: str = "ps",
+        qdbus_bin: str | None = None,
         memory_dir: Path | None = None,
         cwd: Path | None = None,
         backup_dir: Path | None = None,
@@ -303,6 +309,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             spectacle_bin=spectacle_bin,
             screenshot_output_dir=screenshot_output_dir or (self.root / "screenshots"),
             screenshot_wayland_display=screenshot_wayland_display,
+            live_context_enabled=live_context_enabled,
+            live_context_budget_tokens=live_context_budget_tokens,
+            zsh_history_path=zsh_history_path,
+            live_context_timeout=live_context_timeout,
+            ps_bin=ps_bin,
+            qdbus_bin=qdbus_bin,
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -1194,6 +1206,59 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         path.chmod(0o755)
         return path
 
+    def _fake_ps(self) -> Path:
+        path = self.root / "fake-ps"
+        path.write_text(
+            "#!/usr/bin/python3\n"
+            "print('101 python 40.0 1.5')\n"
+            "print('102 firefox 20.0 2.5')\n"
+            "print('103 plasmashell 10.0 1.0')\n"
+            "print('104 zsh 5.0 0.2')\n"
+            "print('105 ps 99.0 0.0')\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def _fake_qdbus(self) -> Path:
+        path = self.root / "fake-qdbus"
+        path.write_text(
+            "#!/usr/bin/python3\n"
+            "print('caption: Fake Window <test>')\n"
+            "print('resourceClass: firefox')\n"
+            "print('pid: 102')\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o755)
+        return path
+
+    def _write_test_agent(self, system: str = "BASE PROMPT\n") -> Path:
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        path = agents / "test-agent.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "name": "Test",
+                    "description": "test agent",
+                    "system": system,
+                    "tags": [],
+                    "model": "test/model",
+                    "model_settings": {},
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        path.chmod(0o600)
+        return path
+
+    @staticmethod
+    def _agent_system(path: Path) -> str:
+        return json.loads(path.read_text(encoding="utf-8"))["system"]
+
     def _wayland_runtime(self) -> tuple[Path, list[socket.socket]]:
         runtime = self.root / "wayland-runtime"
         runtime.mkdir(mode=0o700, exist_ok=True)
@@ -1380,6 +1445,229 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     list((self.root / "screenshots-kde-fallback").glob("*.png")), []
                 )
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    async def test_live_context_refreshes_single_block_per_turn(self) -> None:
+        runtime, sockets = self._wayland_runtime()
+        history = self.root / "zsh_history"
+        history.write_text(
+            ": 1792500000:0;echo old\n"
+            ": 1792500001:0;echo {CORE_MEMORY}\n",
+            encoding="utf-8",
+        )
+        agent_path = self._write_test_agent()
+        agent_path.chmod(0o644)
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "XDG_CURRENT_DESKTOP": "KDE",
+                    "XDG_SESSION_DESKTOP": "KDE",
+                },
+                clear=False,
+            ):
+                server = await self.start_server(
+                    live_context_enabled=True,
+                    ps_bin=str(self._fake_ps()),
+                    qdbus_bin=str(self._fake_qdbus()),
+                    zsh_history_path=history,
+                    spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
+                    screenshot_output_dir=self.root / "live-shots",
+                    screenshot_wayland_display="wayland-1",
+                    live_context_timeout=2.0,
+                )
+                client = await self.client()
+                await client.hello()
+                first = await client.call("aki.chat.send", {"message": "hello"})
+                first_events = await client.collect_turn(first["turn_id"])
+                self.assertNotIn(
+                    "approval_request", [event["type"] for event in first_events]
+                )
+                first_final = next(
+                    event
+                    for event in first_events
+                    if event["type"] == "assistant_message"
+                )
+                self.assertIn("echo: hello", first_final["data"]["content"])
+                first_system = self._agent_system(agent_path)
+                self.assertEqual(first_system.count("<aki-live-context"), 1)
+                self.assertEqual(first_system.count("</aki-live-context>"), 1)
+                self.assertEqual(first_system.count("{CORE_MEMORY}"), 1)
+                self.assertEqual(stat.S_IMODE(agent_path.stat().st_mode), 0o600)
+                self.assertIn("Fake Window &lt;test&gt;", first_system)
+                self.assertIn("firefox", first_system)
+                self.assertIn("python", first_system)
+                self.assertIn("echo { CORE_MEMORY }", first_system)
+                self.assertIn("live/desktop.png", first_system)
+                self.assertTrue((self.root / "live-shots" / "live" / "desktop.png").is_file())
+
+                await asyncio.sleep(1.05)
+                second = await client.call("aki.chat.send", {"message": "again"})
+                second_events = await client.collect_turn(second["turn_id"])
+                second_final = next(
+                    event
+                    for event in second_events
+                    if event["type"] == "assistant_message"
+                )
+                self.assertIn("echo: again", second_final["data"]["content"])
+                second_system = self._agent_system(agent_path)
+                self.assertEqual(second_system.count("<aki-live-context"), 1)
+                self.assertEqual(second_system.count("</aki-live-context>"), 1)
+                self.assertNotEqual(first_system, second_system)
+                health = await client.call("aki.status", {})
+                self.assertTrue(health["live_context"]["updated"])
+                self.assertTrue(health["live_context"]["last_sections"]["screenshot"])
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    async def test_live_context_screenshot_failure_omits_section(self) -> None:
+        runtime, sockets = self._wayland_runtime()
+        history = self.root / "zsh_history-failure"
+        history.write_text(": 1792500000:0;echo hi\n", encoding="utf-8")
+        agent_path = self._write_test_agent()
+        failure = self.root / "fake-spectacle-failure"
+        failure.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        failure.chmod(0o755)
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "XDG_CURRENT_DESKTOP": "KDE",
+                    "XDG_SESSION_DESKTOP": "KDE",
+                },
+                clear=False,
+            ):
+                server = await self.start_server(
+                    live_context_enabled=True,
+                    ps_bin=str(self._fake_ps()),
+                    qdbus_bin=str(self._fake_qdbus()),
+                    zsh_history_path=history,
+                    spectacle_bin=str(failure),
+                    screenshot_output_dir=self.root / "live-shots-failure",
+                    screenshot_wayland_display="wayland-1",
+                    live_context_timeout=2.0,
+                )
+                client = await self.client()
+                await client.hello()
+                turn = await client.call("aki.chat.send", {"message": "hello"})
+                events = await client.collect_turn(turn["turn_id"])
+                self.assertNotIn(
+                    "approval_request", [event["type"] for event in events]
+                )
+                system = self._agent_system(agent_path)
+                self.assertIn("<aki-live-context", system)
+                self.assertNotIn("<screenshot", system)
+                self.assertIn("echo hi", system)
+                status = await client.call("aki.status", {})
+                self.assertFalse(status["live_context"]["last_sections"]["screenshot"])
+                self.assertTrue(status["live_context"]["last_sections"]["processes"])
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    async def test_live_context_budget_and_disable_clears_stale_block(self) -> None:
+        runtime, sockets = self._wayland_runtime()
+        history = self.root / "zsh_history-budget"
+        history.write_text(
+            "\n".join(
+                f": {1792500000 + index}:0;{'x' * 800}{index}"
+                for index in range(20)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        agent_path = self._write_test_agent(
+            "BASE\n\n<aki-live-context refreshed_at=\"old\">stale</aki-live-context>\n"
+        )
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "XDG_CURRENT_DESKTOP": "KDE",
+                    "XDG_SESSION_DESKTOP": "KDE",
+                },
+                clear=False,
+            ):
+                server = await self.start_server(
+                    live_context_enabled=True,
+                    live_context_budget_tokens=2048,
+                    ps_bin=str(self._fake_ps()),
+                    qdbus_bin=str(self._fake_qdbus()),
+                    zsh_history_path=history,
+                    spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
+                    screenshot_output_dir=self.root / "live-shots-budget",
+                    screenshot_wayland_display="wayland-1",
+                    live_context_timeout=2.0,
+                )
+                client = await self.client()
+                await client.hello()
+                turn = await client.call("aki.chat.send", {"message": "hello"})
+                await client.collect_turn(turn["turn_id"])
+                system = self._agent_system(agent_path)
+                block = system[
+                    system.index("<aki-live-context") : system.index(
+                        "</aki-live-context>"
+                    )
+                    + len("</aki-live-context>")
+                ]
+                self.assertLessEqual(len(block.encode("utf-8")), 2048)
+                self.assertNotIn("stale", system)
+
+                disabled_path = self._write_test_agent(
+                    "BASE\n\n<aki-live-context refreshed_at=\"old\">stale</aki-live-context>\n"
+                )
+                await server.stop()
+                self.server = None
+                server = await self.start_server(live_context_enabled=False)
+                cleared = self._agent_system(disabled_path)
+                self.assertNotIn("<aki-live-context", cleared)
+                client = await self.client()
+                await client.hello()
+                turn = await client.call("aki.chat.send", {"message": "hello"})
+                await client.collect_turn(turn["turn_id"])
+                self.assertNotIn(
+                    "<aki-live-context", self._agent_system(disabled_path)
+                )
+        finally:
+            for sock in sockets:
+                sock.close()
+
+    async def test_live_context_refreshes_for_channel_turn(self) -> None:
+        runtime, sockets = self._wayland_runtime()
+        history = self.root / "zsh_history-channel"
+        history.write_text(": 1792500000:0;echo channel\n", encoding="utf-8")
+        agent_path = self._write_test_agent()
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "XDG_CURRENT_DESKTOP": "KDE",
+                    "XDG_SESSION_DESKTOP": "KDE",
+                },
+                clear=False,
+            ):
+                server = await self.start_server(
+                    live_context_enabled=True,
+                    ps_bin=str(self._fake_ps()),
+                    qdbus_bin=str(self._fake_qdbus()),
+                    zsh_history_path=history,
+                    spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
+                    screenshot_output_dir=self.root / "live-shots-channel",
+                    screenshot_wayland_display="wayland-1",
+                    live_context_timeout=2.0,
+                )
+                server._enqueue_channel_turn("channel hello", "sender")
+                await wait_until(lambda: server.active is None and not server.queue)
+                system = self._agent_system(agent_path)
+                self.assertEqual(system.count("<aki-live-context"), 1)
+                self.assertIn("echo channel", system)
         finally:
             for sock in sockets:
                 sock.close()

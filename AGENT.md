@@ -230,5 +230,6 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
+- 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
 - 长期记忆规则见 MemFS 中的 `memory-policy.md`；普通测试对话不得写入长期记忆。
 

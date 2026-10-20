@@ -60,6 +60,8 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
 - **人格与 userdata。** 人格模板、称呼占位符、MemFS 渲染、备份和 git 提交。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
+- **桌面实况上下文。** 每个 turn 在系统提示词中原地刷新唯一的 `<aki-live-context>` 块，
+  包含当前时间、焦点窗口、CPU top 5、最近 20 条 zsh 命令和截图路径；不写入消息历史。
 
 ---
 
@@ -334,6 +336,31 @@ akid 通过 Letta external tool 注册 `desktop_take_screenshot`：
 相关环境变量：`AKI_SCREENSHOT_ENABLED`、`AKI_SCREENSHOT_REQUIRE_APPROVAL`、
 `AKI_GRIM_BIN`、`AKI_SPECTACLE_BIN`、`AKI_SCREENSHOT_OUTPUT_DIR`、
 `AKI_SCREENSHOT_WAYLAND_DISPLAY`。
+
+### 桌面实况上下文
+
+akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写入 agent 系统提示词末尾的
+唯一 `<aki-live-context>` 块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
+请求只看到一份当前快照，历史中没有重复副本。
+
+块内包含：
+
+- 当前本地时间、时区和 epoch。
+- KDE 焦点窗口标题、应用名和 PID（通过 KWin DBus；非 KDE 或失败时省略）。
+- 按 `ps` 报告的 `%CPU` 排序的前 5 个进程。
+- `$HISTFILE` 或 `~/.zsh_history` 中最近 20 条命令及时间戳；支持 zsh 扩展历史和多行命令。
+- 截图成功时的路径、尺寸、后端和采集时间；图片字节不会附在提示词里，模型需要看画面时
+  自行 `Read`/`ViewImage` 该路径。
+
+截图走静默采集路径，不触发审批。任一来源失败只省略对应部分，不影响 turn。总块大小有
+64K token 的保守上限（按 UTF-8 字节估算），默认启用；MQTT 来源的 turn 同样会获得该
+上下文，因此不要在公共频道里逐字复述桌面信息。
+
+相关环境变量和参数：`AKI_LIVE_CONTEXT_ENABLED`、`AKI_LIVE_CONTEXT_BUDGET_TOKENS`、
+`AKI_ZSH_HISTORY`、`AKI_PS_BIN`、`AKI_QDBUS_BIN`、`AKI_LIVE_CONTEXT_TIMEOUT`；
+`--no-live-context`、`--live-context-budget-tokens`、`--zsh-history`、`--ps-bin`、
+`--qdbus-bin`、`--live-context-timeout`。`aki.health` 和 `aki.status` 的
+`live_context` 字段只暴露采集状态和错误，不暴露块内容。
 
 ---
 

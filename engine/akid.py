@@ -19,6 +19,7 @@ import signal
 import socket
 import stat
 import struct
+import subprocess
 import sys
 import time
 import uuid
@@ -33,6 +34,16 @@ if __package__ in (None, ""):
 from engine.letta_process import BackendProtocolError, BackendUnavailable, LettaProcess
 from engine.avatar import AvatarAsset, AvatarError, default_avatar_path, load_avatar
 from engine.channel import DEFAULT_MAGIC, TEXT_TOPIC, ChannelUnavailable, TokifactorChannel
+from engine.live_context import (
+    DEFAULT_BUDGET_TOKENS as DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS,
+    LiveContextOptions,
+    apply_live_context,
+    clamp_budget_tokens,
+    clear_live_context,
+    collect_live_context,
+    desktop_environment,
+    render_live_context,
+)
 from engine.mqtt_settings import (
     DEFAULT_MQTT_HOST,
     DEFAULT_MQTT_PORT,
@@ -89,6 +100,9 @@ MAX_SCREENSHOT_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_HISTORY_TEXT_CHARS = 32 * 1024
 HISTORY_MAX_BYTES = 768 * 1024
 HISTORY_IMAGE_PLACEHOLDER = "[image data omitted from history]"
+DEFAULT_LIVE_CONTEXT_TIMEOUT = 3.0
+DEFAULT_LIVE_CONTEXT_HISTORY_LIMIT = 20
+DEFAULT_LIVE_CONTEXT_PROCESS_LIMIT = 5
 CHANNEL_EVENT_QUEUE_MAX = 256
 BACKEND_HISTORY_PAGE = 32
 
@@ -451,6 +465,14 @@ class GatewayConfig:
     spectacle_bin: str = "spectacle"
     screenshot_output_dir: Path | None = None
     screenshot_wayland_display: str | None = None
+    live_context_enabled: bool = True
+    live_context_budget_tokens: int = DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS
+    zsh_history_path: Path | None = None
+    live_context_history_limit: int = DEFAULT_LIVE_CONTEXT_HISTORY_LIMIT
+    live_context_process_limit: int = DEFAULT_LIVE_CONTEXT_PROCESS_LIMIT
+    live_context_timeout: float = DEFAULT_LIVE_CONTEXT_TIMEOUT
+    ps_bin: str = "ps"
+    qdbus_bin: str | None = None
     avatar_path: Path | None = field(default_factory=default_avatar_path)
 
 
@@ -844,6 +866,22 @@ class GatewayServer:
         self._reset_lock = asyncio.Lock()
         self._username_lock = asyncio.Lock()
         self._recompile_lock = asyncio.Lock()
+        self._live_context_lock = asyncio.Lock()
+        self._kde_detected_at = 0.0
+        self._kde_detected = False
+        self.config.live_context_budget_tokens = clamp_budget_tokens(
+            self.config.live_context_budget_tokens
+        )
+        self._live_context_status: dict[str, Any] = {
+            "enabled": self.config.live_context_enabled,
+            "budget_tokens": self.config.live_context_budget_tokens,
+            "last_captured_at": None,
+            "last_sections": {},
+            "last_errors": [],
+            "block_bytes": 0,
+            "agent_path": None,
+            "updated": False,
+        }
         self._recompiling = False
         self._resetting = False
         self._policy_restarting = False
@@ -980,6 +1018,7 @@ class GatewayServer:
             limit=MAX_LINE_BYTES + 2,
         )
         os.chmod(path, 0o600)
+        self._clear_live_context_block()
         sandbox_available = True
         if self.config.sandbox_enabled:
             self.writable.ensure_runtime_dirs()
@@ -1029,6 +1068,7 @@ class GatewayServer:
                 await self.channel.stop()
         with contextlib.suppress(Exception):
             await self.backend.stop()
+        self._clear_live_context_block()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
         LOGGER.info("akid stopped")
@@ -1333,6 +1373,9 @@ class GatewayServer:
         return candidates
 
     def _desktop_is_kde(self) -> bool:
+        now = time.monotonic()
+        if now - self._kde_detected_at < 30.0:
+            return self._kde_detected
         desktop = " ".join(
             value
             for value in (
@@ -1342,9 +1385,28 @@ class GatewayServer:
             )
             if value
         ).lower()
-        return "kde" in desktop or "plasma" in desktop or os.environ.get(
+        detected = "kde" in desktop or "plasma" in desktop or os.environ.get(
             "KDE_FULL_SESSION", ""
         ).lower() in ("1", "true")
+        if not detected and not desktop:
+            qdbus = self.config.qdbus_bin or shutil.which("qdbus") or shutil.which(
+                "qdbus6"
+            )
+            if qdbus:
+                try:
+                    result = subprocess.run(
+                        [qdbus, "org.kde.KWin", "/KWin", "queryWindowInfo"],
+                        env=desktop_environment(),
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=1.0,
+                    )
+                    detected = result.returncode == 0
+                except (OSError, subprocess.TimeoutExpired):
+                    detected = False
+        self._kde_detected_at = now
+        self._kde_detected = detected
+        return detected
 
     def _screenshot_backends(self) -> list[tuple[str, str]]:
         if self._desktop_is_kde():
@@ -1444,10 +1506,156 @@ class GatewayServer:
             "channel": channel,
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
+            "live_context": self._live_context_health(),
             "avatar": self._avatar_health(),
             "connections": len(self.connection_set),
             "queue_depth": len(self.queue),
         }
+
+    def _live_context_health(self) -> dict[str, Any]:
+        status = dict(self._live_context_status)
+        status["enabled"] = bool(self.config.live_context_enabled)
+        status["budget_tokens"] = self.config.live_context_budget_tokens
+        return status
+
+    def _agent_record_path(self) -> Path | None:
+        folder = self.config.backend_dir / "agents"
+        try:
+            paths = sorted(folder.glob("*.json"))
+        except OSError:
+            return None
+        for path in paths:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("id") == self.config.agent_id:
+                return path
+        return None
+
+    def _write_agent_record(
+        self, path: Path, record: Mapping[str, Any], system: str
+    ) -> None:
+        payload = dict(record)
+        payload["system"] = system
+        try:
+            previous_mtime_ns = path.stat().st_mtime_ns
+        except OSError:
+            previous_mtime_ns = 0
+        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, path)
+            now_ns = time.time_ns()
+            os.utime(
+                path,
+                ns=(now_ns, max(now_ns, previous_mtime_ns + 1_000_000)),
+            )
+        finally:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+
+    def _clear_live_context_block(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                return
+            system = record.get("system")
+            if not isinstance(system, str) or not system:
+                return
+            cleared = clear_live_context(system)
+            if cleared == system:
+                return
+            self._write_agent_record(path, record, cleared)
+            self._live_context_status["updated"] = False
+            self._live_context_status["agent_path"] = str(path)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("failed to clear live context block: %s", exc)
+
+    async def _capture_live_screenshot(self) -> dict[str, Any] | None:
+        output_dir = self.config.screenshot_output_dir or default_screenshot_dir()
+        output = output_dir / "live" / "desktop.png"
+        return await self._execute_screenshot_capture(
+            {"include_cursor": False},
+            output_path=output,
+            timeout=min(self.config.live_context_timeout, 2.5),
+        )
+
+    async def _refresh_live_context(self) -> None:
+        if not self.config.live_context_enabled:
+            return
+        path = self._agent_record_path()
+        if path is None:
+            self._live_context_status["last_errors"] = [
+                f"agent record not found for {self.config.agent_id}"
+            ]
+            self._live_context_status["updated"] = False
+            return
+        captured_at = datetime.now().astimezone()
+        options = LiveContextOptions(
+            ps_bin=self.config.ps_bin,
+            qdbus_bin=self.config.qdbus_bin,
+            history_path=self.config.zsh_history_path,
+            history_limit=self.config.live_context_history_limit,
+            process_limit=self.config.live_context_process_limit,
+            timeout=self.config.live_context_timeout,
+            screenshot_timeout=min(self.config.live_context_timeout, 2.5),
+            include_screenshot=self.config.screenshot_enabled,
+        )
+        try:
+            snapshot = await collect_live_context(
+                options,
+                screenshot_capture=(
+                    self._capture_live_screenshot
+                    if self.config.screenshot_enabled
+                    else None
+                ),
+                now=captured_at,
+            )
+            block = render_live_context(
+                snapshot,
+                budget_tokens=self.config.live_context_budget_tokens,
+            )
+            async with self._live_context_lock:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict):
+                    raise ValueError("agent record is not a JSON object")
+                system = record.get("system")
+                if not isinstance(system, str) or not system:
+                    raise ValueError("agent system prompt is not a string")
+                updated = apply_live_context(system, block)
+                self._write_agent_record(path, record, updated)
+            self._live_context_status.update(
+                {
+                    "enabled": True,
+                    "budget_tokens": self.config.live_context_budget_tokens,
+                    "last_captured_at": snapshot.captured_at.isoformat(
+                        timespec="seconds"
+                    ),
+                    "last_sections": snapshot.sections(),
+                    "last_errors": list(snapshot.errors),
+                    "block_bytes": len(block.encode("utf-8")),
+                    "agent_path": str(path),
+                    "updated": True,
+                }
+            )
+        except Exception as exc:
+            LOGGER.warning("live context refresh failed: %s", exc)
+            self._live_context_status.update(
+                {
+                    "last_captured_at": captured_at.isoformat(timespec="seconds"),
+                    "last_errors": [str(exc)],
+                    "agent_path": str(path),
+                    "updated": False,
+                }
+            )
 
     def _agent_info(self) -> tuple[str | None, str | None, int | None]:
         try:
@@ -1509,6 +1717,7 @@ class GatewayServer:
             "channel": channel,
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
+            "live_context": self._live_context_health(),
             "avatar": self._avatar_health(),
             "backend_ready": backend_ready,
             "channel_ready": channel_ready,
@@ -1614,6 +1823,7 @@ class GatewayServer:
                 )
                 await self._finish_turn(turn, "backend_unavailable")
                 return
+            await self._refresh_live_context()
             try:
                 await self.backend.send_user(turn.message)
             except BackendUnavailable:
@@ -2061,7 +2271,9 @@ class GatewayServer:
             "details. If no reply is warranted, reply with exactly [NO_REPLY]. Never publish "
             "secrets or private memory on the channel. If you send an image, leave its caption "
             "empty or use only a short label; your final assistant text is published separately, "
-            "so do not repeat your reply in the caption."
+            "so do not repeat your reply in the caption. If the system prompt includes a private "
+            "desktop live-context block, use it only to decide whether and how to reply; never "
+            "quote or reveal its contents on the shared channel."
         )
 
     def _enqueue_channel_turn(self, prompt: str, sender_id: str = "") -> None:
@@ -2667,6 +2879,13 @@ class GatewayServer:
                 stderr=asyncio.subprocess.DEVNULL,
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5.0)
+        except asyncio.CancelledError:
+            if proc is not None:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                with contextlib.suppress(Exception):
+                    await proc.wait()
+            raise
         except (OSError, asyncio.TimeoutError):
             if proc is not None:
                 with contextlib.suppress(ProcessLookupError):
@@ -2790,7 +3009,11 @@ class GatewayServer:
         return width, height
 
     async def _execute_screenshot_capture(
-        self, args: Mapping[str, Any]
+        self,
+        args: Mapping[str, Any],
+        *,
+        output_path: Path | None = None,
+        timeout: float = 10.0,
     ) -> dict[str, Any]:
         output_name = args.get("output")
         if output_name is not None:
@@ -2817,10 +3040,16 @@ class GatewayServer:
         runtime_dir = Path(
             os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
         ).expanduser()
-        output_dir = self.config.screenshot_output_dir or default_screenshot_dir()
-        prepare_private_output_dir(output_dir, "screenshot")
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        output = output_dir / f"screenshot-{stamp}-{uuid.uuid4().hex[:8]}.png"
+        if output_path is not None:
+            output = output_path.expanduser()
+            prepare_private_output_dir(output.parent, "screenshot")
+        else:
+            output_dir = (
+                self.config.screenshot_output_dir or default_screenshot_dir()
+            )
+            prepare_private_output_dir(output_dir, "screenshot")
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            output = output_dir / f"screenshot-{stamp}-{uuid.uuid4().hex[:8]}.png"
         errors: list[str] = []
         for backend, executable in backends:
             for display in candidates:
@@ -2850,7 +3079,16 @@ class GatewayServer:
                         stdout=asyncio.subprocess.DEVNULL,
                         stderr=asyncio.subprocess.PIPE,
                     )
-                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+                    _, stderr = await asyncio.wait_for(
+                        proc.communicate(), timeout=timeout
+                    )
+                except asyncio.CancelledError:
+                    if proc is not None:
+                        with contextlib.suppress(ProcessLookupError):
+                            proc.kill()
+                        with contextlib.suppress(Exception):
+                            await proc.wait()
+                    raise
                 except asyncio.TimeoutError:
                     if proc is not None:
                         with contextlib.suppress(ProcessLookupError):
@@ -3835,6 +4073,20 @@ def build_config_from_env() -> GatewayConfig:
     screenshot_require_approval = os.environ.get(
         "AKI_SCREENSHOT_REQUIRE_APPROVAL", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
+    live_context_enabled = os.environ.get(
+        "AKI_LIVE_CONTEXT_ENABLED", "1"
+    ).strip().lower() not in ("0", "false", "no", "off")
+    try:
+        live_context_budget_tokens = clamp_budget_tokens(
+            int(
+                os.environ.get(
+                    "AKI_LIVE_CONTEXT_BUDGET_TOKENS",
+                    str(DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS),
+                )
+            )
+        )
+    except ValueError:
+        live_context_budget_tokens = DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS
     mqtt_state = (
         Path(os.environ["AKI_MQTT_STATE"]).expanduser()
         if os.environ.get("AKI_MQTT_STATE")
@@ -3904,6 +4156,20 @@ def build_config_from_env() -> GatewayConfig:
         screenshot_wayland_display=(
             os.environ.get("AKI_SCREENSHOT_WAYLAND_DISPLAY", "").strip() or None
         ),
+        live_context_enabled=live_context_enabled,
+        live_context_budget_tokens=live_context_budget_tokens,
+        zsh_history_path=(
+            Path(os.environ["AKI_ZSH_HISTORY"]).expanduser()
+            if os.environ.get("AKI_ZSH_HISTORY")
+            else None
+        ),
+        live_context_timeout=float(
+            os.environ.get(
+                "AKI_LIVE_CONTEXT_TIMEOUT", DEFAULT_LIVE_CONTEXT_TIMEOUT
+            )
+        ),
+        ps_bin=os.environ.get("AKI_PS_BIN", "ps"),
+        qdbus_bin=(os.environ.get("AKI_QDBUS_BIN", "").strip() or None),
         avatar_path=(
             Path(os.environ["AKI_AVATAR_PATH"]).expanduser()
             if os.environ.get("AKI_AVATAR_PATH")
@@ -3947,6 +4213,22 @@ def main(argv: list[str] | None = None) -> int:
         "--screenshot-require-approval",
         action="store_true",
         help="require approval for desktop_take_screenshot (default: auto-approve)",
+    )
+    parser.add_argument(
+        "--no-live-context", action="store_true", help="disable desktop live context"
+    )
+    parser.add_argument(
+        "--live-context-budget-tokens",
+        type=int,
+        help="live context token ceiling (default: 65536)",
+    )
+    parser.add_argument("--zsh-history", help="path to the zsh history file")
+    parser.add_argument("--ps-bin", help="Path to the ps executable")
+    parser.add_argument("--qdbus-bin", help="Path to qdbus6/qdbus")
+    parser.add_argument(
+        "--live-context-timeout",
+        type=float,
+        help="per-source timeout for live context collection",
     )
     parser.add_argument("--no-sandbox", action="store_true", help="disable the OS sandbox (unsafe)")
     parser.add_argument(
@@ -4022,6 +4304,20 @@ def main(argv: list[str] | None = None) -> int:
         config.screenshot_wayland_display = args.screenshot_wayland_display
     if args.screenshot_require_approval:
         config.screenshot_require_approval = True
+    if args.no_live_context:
+        config.live_context_enabled = False
+    if args.live_context_budget_tokens is not None:
+        config.live_context_budget_tokens = clamp_budget_tokens(
+            args.live_context_budget_tokens
+        )
+    if args.zsh_history:
+        config.zsh_history_path = Path(args.zsh_history).expanduser()
+    if args.ps_bin:
+        config.ps_bin = args.ps_bin
+    if args.qdbus_bin:
+        config.qdbus_bin = args.qdbus_bin
+    if args.live_context_timeout is not None:
+        config.live_context_timeout = args.live_context_timeout
     if args.no_sandbox:
         config.sandbox_enabled = False
     if args.tokifactor_image_require_approval:
