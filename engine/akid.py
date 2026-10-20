@@ -76,7 +76,7 @@ NO_REPLY_MARKERS = {"[NO_REPLY]", "NO_REPLY", "NO-REPLY"}
 TOKIFACTOR_IMAGE_TOOL_NAME = "tokifactor_send_image"
 CAMERA_TOOL_NAME = "camera_take_photo"
 SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
-MAX_IMAGE_CAPTION_CHARS = 2000
+MAX_IMAGE_CAPTION_CHARS = 200
 MAX_CAMERA_DIMENSION = 4096
 MIN_CAMERA_DIMENSION = 160
 MAX_CAMERA_OUTPUT_BYTES = 32 * 1024 * 1024
@@ -84,7 +84,6 @@ MAX_SCREENSHOT_OUTPUT_BYTES = 32 * 1024 * 1024
 MAX_HISTORY_TEXT_CHARS = 32 * 1024
 HISTORY_MAX_BYTES = 768 * 1024
 HISTORY_IMAGE_PLACEHOLDER = "[image data omitted from history]"
-CHANNEL_PROGRESS_INTERVAL = 4.0
 CHANNEL_EVENT_QUEUE_MAX = 256
 BACKEND_HISTORY_PAGE = 32
 
@@ -107,7 +106,12 @@ TOKIFACTOR_IMAGE_TOOL = {
             },
             "caption": {
                 "type": "string",
-                "description": "Optional short text caption to send after the image.",
+                "description": (
+                    "Optional terse label sent right after the image, for example "
+                    "'lab desk'. Do not put your reply here: akid publishes your "
+                    "final assistant text to the channel separately, so a "
+                    "conversational caption would appear as a second message."
+                ),
             },
         },
         "required": ["path"],
@@ -584,8 +588,6 @@ class ChannelConnection:
             return
         self._enqueue_turn(turn_id, seq, phase, state.text.rstrip(), segment=state.segment)
         state.last_text = text
-        state.sent_any = True
-        state.last_emit = asyncio.get_running_loop().time()
 
     async def _publish_loop(self) -> None:
         while True:
@@ -633,14 +635,6 @@ class ChannelConnection:
             if not delta:
                 return
             state.text += delta
-            now = asyncio.get_running_loop().time()
-            should_emit = (
-                not state.sent_any
-                or "\n\n" in delta
-                or (now - state.last_emit >= CHANNEL_PROGRESS_INTERVAL)
-            )
-            if should_emit:
-                self._flush_progress(turn_id, seq, state)
             return
         if event_type == "assistant_message":
             full = str(data.get("content") or data.get("text") or "")
@@ -673,9 +667,7 @@ class ChannelConnection:
             state.segment += 1
             state.text = ""
             state.last_text = ""
-            state.sent_any = False
             state.finalized = False
-            state.last_emit = asyncio.get_running_loop().time()
             return
         if event_type == "tool_result":
             status = str(data.get("status") or "success").lower()
@@ -780,8 +772,6 @@ class ChannelTurnState:
     segment: int = 0
     text: str = ""
     last_text: str = ""
-    last_emit: float = 0.0
-    sent_any: bool = False
     finalized: bool = False
     no_reply: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
@@ -2064,7 +2054,9 @@ class GatewayServer:
             "send tools. Just answer directly. If it is addressed to you or you can add clear "
             "value, reply concisely for the shared channel and do not mention internal gateway "
             "details. If no reply is warranted, reply with exactly [NO_REPLY]. Never publish "
-            "secrets or private memory on the channel."
+            "secrets or private memory on the channel. If you send an image, leave its caption "
+            "empty or use only a short label; your final assistant text is published separately, "
+            "so do not repeat your reply in the caption."
         )
 
     def _enqueue_channel_turn(self, prompt: str, sender_id: str = "") -> None:

@@ -17,7 +17,7 @@ from unittest import mock
 
 from engine.akid import GatewayConfig, GatewayServer, _b64url
 from engine.letta_process import LettaProcess
-from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError
+from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from tests.fake_mqtt_broker import FakeMqttBroker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -809,11 +809,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             for event in fake_channel.events_of("turn")
         ]
         self.assertEqual(phases[0], "started")
-        self.assertIn("progress", phases)
         self.assertIn("final", phases)
         self.assertEqual(phases[-1], "ended")
         turn_ids = {event.get("turnId") for event in fake_channel.events_of("turn")}
         self.assertEqual(len(turn_ids), 1)
+        progress = [
+            event
+            for event in fake_channel.events_of("turn")
+            if event.get("phase") == "progress"
+        ]
+        self.assertEqual(progress, [])
 
     async def test_channel_no_reply_marker_is_suppressed(self) -> None:
         server = await self.start_server()
@@ -829,6 +834,74 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 for event in fake_channel.events_of("turn")
             )
         )
+
+    async def test_channel_publishes_each_segment_once(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        conn = server.channel_conn
+        stamp = "2026-01-01T00:00:00Z"
+
+        await conn.send(make_event("turn-x", 1, "turn_started", {}, stamp))
+        await conn.send(
+            make_event(
+                "turn-x",
+                2,
+                "assistant_delta",
+                {"text": "先拍一张。"},
+                stamp,
+            )
+        )
+        await conn.send(
+            make_event(
+                "turn-x",
+                3,
+                "tool_call",
+                {"name": "camera_take_photo", "tool_call_id": "call-1"},
+                stamp,
+            )
+        )
+        await conn.send(
+            make_event(
+                "turn-x",
+                4,
+                "tool_result",
+                {"tool_call_id": "call-1", "status": "success"},
+                stamp,
+            )
+        )
+        await conn.send(
+            make_event(
+                "turn-x",
+                5,
+                "assistant_delta",
+                {"text": "拍好了。"},
+                stamp,
+            )
+        )
+        await conn.send(
+            make_event(
+                "turn-x",
+                6,
+                "assistant_message",
+                {"content": "先拍一张。拍好了。"},
+                stamp,
+            )
+        )
+        await conn.send(make_event("turn-x", 7, "turn_end", {}, stamp))
+        await wait_until(
+            lambda: any(
+                event.get("phase") == "ended"
+                for event in fake_channel.events_of("turn")
+            )
+        )
+
+        progress = [
+            event["text"]
+            for event in fake_channel.events_of("turn")
+            if event.get("phase") == "progress"
+        ]
+        self.assertEqual(progress, ["先拍一张。"])
+        self.assertEqual(fake_channel.final_texts(), ["拍好了。"])
 
     async def test_channel_approval_commands_allow_and_deny(self) -> None:
         server = await self.start_server(approval_timeout=5.0)
