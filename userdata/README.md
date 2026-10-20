@@ -12,7 +12,7 @@
 - `character/relationship.md` — 与用户的关系定位模板
 - `character/boundaries.md` — 身份与安全边界
 - `character/examples.md` — 原创语气示例模板
-- `username.txt` — 当前称呼（默认“先生”）
+- `username.txt` — 当前称呼（默认“Master”）
 - `MANIFEST.json` — 同步来源、MemFS commit 和模板哈希
 
 ## 占位符
@@ -44,7 +44,7 @@
 
 ```bash
 akictl username                 # 查看当前称呼
-akictl set-username Master      # 修改并立即渲染到 MemFS
+akictl set-username Master      # 修改、渲染并重编译当前会话
 ```
 
 也可以手动编辑 `username.txt`，然后运行同步脚本。
@@ -54,7 +54,7 @@ akictl set-username Master      # 修改并立即渲染到 MemFS
 ```bash
 python3 scripts/sync-persona.py --dry-run   # 只显示会更新哪些文件
 python3 scripts/sync-persona.py             # 渲染、备份、写入并提交 MemFS
-python3 scripts/sync-persona.py --restart   # 同步后立即重启 akid
+akictl recompile                            # 手动同步后重编译当前会话
 ```
 
 脚本行为：
@@ -63,6 +63,6 @@ python3 scripts/sync-persona.py --restart   # 同步后立即重启 akid
 - 校验 frontmatter 和文件编码
 - 把将被覆盖的旧文件备份到 `~/.letta/backups/userdata-sync-<timestamp>/`
 - 只写入白名单文件
-- 默认提交 MemFS git，使 system prompt 能在下一次 turn 检测到新 revision
+- 默认提交 MemFS git；`akictl set-username` 会自动重编译当前会话 prompt
 - `--no-commit` 只写文件，不提交，system prompt 可能不会重新编译
 - `--agent-id` / `--memory-dir` 可覆盖自动检测结果

@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import socket
@@ -847,6 +848,8 @@ class GatewayServer:
         self._mqtt_lock = asyncio.Lock()
         self._reset_lock = asyncio.Lock()
         self._username_lock = asyncio.Lock()
+        self._recompile_lock = asyncio.Lock()
+        self._recompiling = False
         self._resetting = False
         self._policy_restarting = False
         self._shutting_down = False
@@ -1180,6 +1183,8 @@ class GatewayServer:
             return self._username_get(), None
         if method == "aki.username.set":
             return await self._username_set(request.params), None
+        if method == "aki.conversation.recompile":
+            return await self._recompile_conversation(), None
         if method == "aki.approval.respond":
             return self._approval_respond(conn, request.params), None
         if method == "aki.memory.status":
@@ -1543,6 +1548,10 @@ class GatewayServer:
             raise RpcError(
                 ErrorCode.BACKEND_UNAVAILABLE, "conversation reset in progress"
             )
+        if self._recompiling:
+            raise RpcError(
+                ErrorCode.RECOMPILE_FAILED, "conversation recompile in progress"
+            )
         if not bool(getattr(self.backend, "ready", False)):
             raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "Letta backend is not ready")
 
@@ -1632,6 +1641,7 @@ class GatewayServer:
         if (
             self._policy_restarting
             or self._resetting
+            or self._recompiling
             or self.active is not None
             or not self.queue
         ):
@@ -3012,11 +3022,11 @@ class GatewayServer:
     def _read_username(self) -> str:
         path = self._username_path()
         if not path.is_file():
-            return "先生"
+            return "Master"
         try:
-            return path.read_text(encoding="utf-8").strip() or "先生"
+            return path.read_text(encoding="utf-8").strip() or "Master"
         except OSError:
-            return "先生"
+            return "Master"
 
     def _username_get(self) -> dict[str, Any]:
         return {
@@ -3039,6 +3049,17 @@ class GatewayServer:
             )
 
         async with self._username_lock:
+            if (
+                self._recompiling
+                or self._resetting
+                or self._policy_restarting
+                or self.active is not None
+                or self.queue
+            ):
+                raise RpcError(
+                    ErrorCode.RECOMPILE_FAILED,
+                    "cannot change username while a turn or maintenance operation is active",
+                )
             userdata = self._userdata_dir()
             script = self.config.cwd / "scripts" / "sync-persona.py"
             if not userdata.is_dir():
@@ -3100,7 +3121,233 @@ class GatewayServer:
                 result.get("changed"),
                 result.get("commit"),
             )
+            try:
+                recompiled = await self._recompile_conversation()
+            except RpcError as exc:
+                raise RpcError(
+                    ErrorCode.RECOMPILE_FAILED,
+                    "username saved but prompt recompile failed; run 'akictl recompile' to retry",
+                    {
+                        "username": username,
+                        "detail": exc.message,
+                        **(exc.data or {}),
+                    },
+                ) from exc
+            result.update(recompiled)
+            result["applies"] = "now"
             return result
+
+    # ---------------------------------------------------------- prompt rebuild
+    def _prompt_block(self, path: Path, tag: str) -> str | None:
+        if not path.is_file():
+            return None
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        if not text.startswith("---\n"):
+            return None
+        front, separator, body = text[3:].partition("\n---\n")
+        if not separator:
+            front, separator, body = text[3:].partition("\n---")
+            if not separator:
+                return None
+            body = body.lstrip("\n")
+        description = ""
+        for line in front.splitlines():
+            if line.startswith("description:"):
+                description = line[len("description:") :].strip()
+                break
+        if not description:
+            return None
+        return f"<{tag}>\n<description>{description}</description>\n{body.strip()}\n</{tag}>"
+
+    def _deferred_memory_block(self) -> str:
+        lines: list[str] = []
+        try:
+            children = sorted(self.memory_dir.iterdir())
+        except OSError:
+            children = []
+        for child in children:
+            if child.name.startswith(".") or not child.is_dir():
+                continue
+            if (child / "MEMORY.md").is_file():
+                lines.append(
+                    f'<directory path="{child.name}/" index="{child.name}/MEMORY.md" />'
+                )
+        if not lines:
+            return ""
+        return "<deferred-memory>\n" + "\n".join(lines) + "\n</deferred-memory>"
+
+    async def _memfs_revision(self) -> str | None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-C",
+                str(self.memory_dir),
+                "rev-parse",
+                "HEAD",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+        except OSError:
+            return None
+        if proc.returncode != 0:
+            return None
+        revision = stdout.decode("utf-8", "replace").strip()
+        return revision or None
+
+    async def _recompile_conversation(self) -> dict[str, Any]:
+        async with self._recompile_lock:
+            self._recompiling = True
+            try:
+                return await self._recompile_conversation_locked()
+            finally:
+                self._recompiling = False
+                if not self._shutting_down:
+                    await self._maybe_start_next()
+
+    async def _recompile_conversation_locked(self) -> dict[str, Any]:
+        if self._shutting_down:
+            raise RpcError(ErrorCode.RECOMPILE_FAILED, "gateway is shutting down")
+        if self._resetting or self._policy_restarting:
+            raise RpcError(
+                ErrorCode.RECOMPILE_FAILED,
+                "another maintenance operation is in progress",
+            )
+        if self.active is not None or self.queue:
+            raise RpcError(
+                ErrorCode.RECOMPILE_FAILED, "cannot recompile while a turn is active"
+            )
+        conversation_dir = self._conversation_dir()
+        prompt_path = conversation_dir / "system-prompt.json"
+        if not prompt_path.is_file():
+            raise RpcError(
+                ErrorCode.RECOMPILE_FAILED,
+                "compiled system prompt not found",
+                {"path": str(prompt_path)},
+            )
+
+        backup_root = self.config.backup_dir or (Path.home() / ".letta" / "backups")
+        backup_root.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        backup_path = backup_root / f"system-prompt-recompile-{stamp}.json"
+        suffix = 1
+        while backup_path.exists():
+            backup_path = backup_root / f"system-prompt-recompile-{stamp}-{suffix}.json"
+            suffix += 1
+
+        await self.backend.stop()
+        try:
+            try:
+                record = json.loads(prompt_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                raise RpcError(
+                    ErrorCode.RECOMPILE_FAILED,
+                    "cannot read compiled system prompt",
+                ) from exc
+            if not isinstance(record, dict):
+                raise RpcError(
+                    ErrorCode.RECOMPILE_FAILED,
+                    "compiled system prompt is not an object",
+                )
+            content = record.get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise RpcError(
+                    ErrorCode.RECOMPILE_FAILED,
+                    "compiled system prompt has no content",
+                )
+            shutil.copy2(prompt_path, backup_path)
+
+            blocks: dict[str, str | None] = {
+                "human": self._prompt_block(self.memory_dir / "human.md", "human"),
+                "memory-policy": self._prompt_block(
+                    self.memory_dir / "memory-policy.md", "memory-policy"
+                ),
+                "persona": self._prompt_block(self.memory_dir / "persona.md", "persona"),
+            }
+            memory_index_path = self.memory_dir / "MEMORY.md"
+            if memory_index_path.is_file():
+                try:
+                    memory_index = memory_index_path.read_text(encoding="utf-8").strip()
+                except OSError:
+                    memory_index = ""
+                if memory_index:
+                    deferred = self._deferred_memory_block()
+                    blocks["memory"] = (
+                        "<memory>\n" + memory_index + "\n" + deferred + "\n</memory>"
+                        if deferred
+                        else "<memory>\n" + memory_index + "\n</memory>"
+                    )
+
+            for tag, new_block in blocks.items():
+                if new_block is None:
+                    continue
+                content, count = re.subn(
+                    rf"<{tag}>.*?</{tag}>",
+                    lambda _match, value=new_block: value,
+                    content,
+                    count=1,
+                    flags=re.S,
+                )
+                if count != 1:
+                    raise RpcError(
+                        ErrorCode.RECOMPILE_FAILED,
+                        f"compiled system prompt is missing the <{tag}> block",
+                    )
+
+            old_core = str(record.get("coreMemory") or "")
+            core_parts: list[str] = []
+            for tag in ("human", "memory-policy", "persona"):
+                new_block = blocks.get(tag)
+                if new_block is not None:
+                    core_parts.append(new_block)
+                    continue
+                old_block = re.search(
+                    rf"<{tag}>.*?</{tag}>", old_core, re.S
+                )
+                if old_block:
+                    core_parts.append(old_block.group(0))
+            revision = await self._memfs_revision()
+            record["content"] = content
+            record["coreMemory"] = "\n\n".join(core_parts) + "\n"
+            record["compiledAt"] = now_iso()
+            if revision:
+                record["memfsRevision"] = revision
+            temp_path = prompt_path.with_name(prompt_path.name + ".tmp")
+            temp_path.write_text(
+                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            os.chmod(temp_path, 0o600)
+            os.replace(temp_path, prompt_path)
+        finally:
+            self.backend.start()
+            ready = await self._wait_backend_ready(20.0)
+        if not ready:
+            raise RpcError(
+                ErrorCode.RECOMPILE_FAILED,
+                "prompt rebuilt but backend did not become ready",
+                {
+                    "backup_path": str(backup_path),
+                    "backend_ready": False,
+                    "backend_error": getattr(self.backend, "last_error", None),
+                },
+            )
+        LOGGER.info(
+            "conversation prompt recompiled revision=%s backup=%s",
+            revision,
+            backup_path,
+        )
+        return {
+            "recompiled": True,
+            "conversation_id": self.config.conversation_id,
+            "memfs_revision": revision,
+            "compiled_at": record["compiledAt"],
+            "backup_path": str(backup_path),
+            "backend_ready": True,
+        }
 
     # ------------------------------------------------------------- conversation
     def _conversation_dir(self) -> Path:

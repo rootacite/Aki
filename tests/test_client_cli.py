@@ -26,7 +26,7 @@ class ClientCliTests(unittest.TestCase):
         self.writable_state = self.root / "writable.json"
         self.repo_cwd = self.root / "repo"
         shutil.copytree(ROOT / "userdata", self.repo_cwd / "userdata")
-        (self.repo_cwd / "userdata" / "username.txt").write_text("先生\n", encoding="utf-8")
+        (self.repo_cwd / "userdata" / "username.txt").write_text("OldName\n", encoding="utf-8")
         (self.repo_cwd / "scripts").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts" / "sync-persona.py", self.repo_cwd / "scripts" / "sync-persona.py")
         env = os.environ.copy()
@@ -186,6 +186,37 @@ class ClientCliTests(unittest.TestCase):
         self.assertTrue((self.root / "backups").is_dir())
 
     def test_akictl_username_get_and_set(self) -> None:
+        (self.memory / "human.md").write_text(
+            "---\nname: Human\ndescription: test human\n---\nHuman profile.\n",
+            encoding="utf-8",
+        )
+        conversation_dir = (
+            self.root / "backend" / "conversations" / _b64url("default:test-agent")
+        )
+        conversation_dir.mkdir(parents=True)
+        (conversation_dir / "system-prompt.json").write_text(
+            json.dumps(
+                {
+                    "content": (
+                        "<human>\n<description>old human</description>\nold\n</human>\n\n"
+                        "<memory-policy>\n<description>old policy</description>\nold OldName\n</memory-policy>\n\n"
+                        "<persona>\n<description>old persona</description>\nold OldName\n</persona>\n\n"
+                        "<memory>\n# Memory\nold\n</memory>"
+                    ),
+                    "coreMemory": (
+                        "<human>\n<description>old human</description>\nold\n</human>\n\n"
+                        "<memory-policy>\n<description>old policy</description>\nold OldName\n</memory-policy>\n\n"
+                        "<persona>\n<description>old persona</description>\nold OldName\n</persona>\n"
+                    ),
+                    "compiledAt": "2026-01-01T00:00:00Z",
+                    "rawSystemHash": "test",
+                    "memfsRevision": "old",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         subprocess.run(["git", "init", "-q", str(self.memory)], check=True)
         subprocess.run(["git", "-C", str(self.memory), "config", "user.name", "test"], check=True)
         subprocess.run(
@@ -195,18 +226,26 @@ class ClientCliTests(unittest.TestCase):
 
         before = self.run_akictl("username", "--socket", str(self.socket))
         self.assertEqual(before.returncode, 0, before.stderr)
-        self.assertEqual(json.loads(before.stdout)["username"], "先生")
+        self.assertEqual(json.loads(before.stdout)["username"], "OldName")
 
         changed = self.run_akictl("set-username", "Master", "--socket", str(self.socket))
         self.assertEqual(changed.returncode, 0, changed.stderr)
         data = json.loads(changed.stdout)
         self.assertEqual(data["username"], "Master")
         self.assertTrue(data["changed"])
+        self.assertTrue(data["recompiled"])
+        prompt = json.loads((conversation_dir / "system-prompt.json").read_text())
+        self.assertIn("Master", prompt["content"])
+        self.assertNotIn("OldName", prompt["content"])
 
         after = self.run_akictl("username", "--socket", str(self.socket))
         self.assertEqual(after.returncode, 0, after.stderr)
         self.assertEqual(json.loads(after.stdout)["username"], "Master")
         self.assertIn("Master", (self.memory / "persona.md").read_text(encoding="utf-8"))
+
+        recompiled = self.run_akictl("recompile", "--socket", str(self.socket))
+        self.assertEqual(recompiled.returncode, 0, recompiled.stderr)
+        self.assertTrue(json.loads(recompiled.stdout)["recompiled"])
         self.assertEqual(
             (self.repo_cwd / "userdata" / "username.txt").read_text(encoding="utf-8"),
             "Master\n",

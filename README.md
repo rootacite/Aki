@@ -134,7 +134,7 @@ bin/aki -p "你好"                 # 兼容别名
 
 REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
-`/set-username <name>`、`/reset`、`/quit`。
+`/set-username <name>`、`/recompile`、`/reset`、`/quit`。
 危险工具会显示工具名与参数并询问 `y/N`；非交互 stdin 默认拒绝。`Ctrl-C` 取消当前 turn。
 
 重置 `default` 会话：
@@ -162,7 +162,7 @@ Aki 的名字是 Aki，中文名是秋、小秋，日语名是秋（aki）。这
 - `character/relationship.md`
 - `character/boundaries.md`
 - `character/examples.md`
-- `username.txt` — 当前对用户的称呼（默认“先生”）
+- `username.txt` — 当前对用户的称呼（默认“Master”）
 
 模板中用 `{{USERNAME}}` 表示称呼。同步脚本会把占位符替换成 `username.txt`
 的值，再把渲染后的内容写入 MemFS；模型看到的是最终文本，不需要自己读配置文件。
@@ -171,7 +171,7 @@ Aki 的名字是 Aki，中文名是秋、小秋，日语名是秋（aki）。这
 
 ```bash
 akictl username                 # 查看当前称呼
-akictl set-username Master      # 修改并立即渲染到 MemFS
+akictl set-username Master      # 修改、渲染并重编译当前会话
 ```
 
 也可以手动编辑 `userdata/username.txt`，再运行同步脚本：
@@ -179,12 +179,12 @@ akictl set-username Master      # 修改并立即渲染到 MemFS
 ```bash
 python3 scripts/sync-persona.py --dry-run   # 预览
 python3 scripts/sync-persona.py             # 渲染、备份、写入、提交 MemFS
-python3 scripts/sync-persona.py --restart   # 同步后立即重启 akid
+akictl recompile                            # 手动同步后重编译当前会话
 ```
 
 脚本只接受上述白名单文件，会校验 frontmatter、检查未解析的占位符、备份旧版本到
 `~/.letta/backups/userdata-sync-<timestamp>/`，并提交 MemFS git。
-提交后下一次 turn 会检测到新的 MemFS revision 并注入人格更新；新会话会使用完整的新人格。
+`akictl set-username` 会在同步后自动重编译当前会话的 system prompt；手动修改 `userdata` 后运行 `akictl recompile` 也可以立即应用。
 
 `human.md`、`profile/**`、根 `MEMORY.md`、聊天记录和凭据不会同步到 `userdata`。
 
@@ -214,7 +214,8 @@ akictl disallow --all
 akictl mqtt                       # 查看当前 MQTT 服务器
 akictl mqtt set 192.168.3.1:1883  # 持久化并立即重连
 akictl username                   # 查看当前称呼
-akictl set-username Master        # 修改对用户的称呼
+akictl set-username Master        # 修改称呼并重编译当前会话
+akictl recompile                  # 从 MemFS 重编译当前会话 prompt
 akictl reset                      # 重置 default 会话（先备份）
 ```
 

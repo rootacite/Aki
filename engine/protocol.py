@@ -32,6 +32,7 @@ class ErrorCode:
     PATH_IS_DEFAULT = 1011
     RESET_FAILED = 1012
     USERNAME_FAILED = 1013
+    RECOMPILE_FAILED = 1014
 
 
 class RpcError(Exception):

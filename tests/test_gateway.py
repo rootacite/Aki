@@ -357,11 +357,42 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_username_get_and_set(self) -> None:
         repo = self.root / "repo"
         shutil.copytree(ROOT / "userdata", repo / "userdata")
-        (repo / "userdata" / "username.txt").write_text("先生\n", encoding="utf-8")
+        (repo / "userdata" / "username.txt").write_text("OldName\n", encoding="utf-8")
         (repo / "scripts").mkdir(parents=True)
         shutil.copy2(ROOT / "scripts" / "sync-persona.py", repo / "scripts" / "sync-persona.py")
         memfs = self.root / "memfs"
         memfs.mkdir()
+        (memfs / "human.md").write_text(
+            "---\nname: Human\ndescription: test human\n---\nHuman profile.\n",
+            encoding="utf-8",
+        )
+        conversation_dir = (
+            self.root / "backend" / "conversations" / _b64url("default:test-agent")
+        )
+        conversation_dir.mkdir(parents=True)
+        (conversation_dir / "system-prompt.json").write_text(
+            json.dumps(
+                {
+                    "content": (
+                        "<human>\n<description>old human</description>\nold\n</human>\n\n"
+                        "<memory-policy>\n<description>old policy</description>\nold OldName\n</memory-policy>\n\n"
+                        "<persona>\n<description>old persona</description>\nold OldName\n</persona>\n\n"
+                        "<memory>\n# Memory\nold\n</memory>"
+                    ),
+                    "coreMemory": (
+                        "<human>\n<description>old human</description>\nold\n</human>\n\n"
+                        "<memory-policy>\n<description>old policy</description>\nold OldName\n</memory-policy>\n\n"
+                        "<persona>\n<description>old persona</description>\nold OldName\n</persona>\n"
+                    ),
+                    "compiledAt": "2026-01-01T00:00:00Z",
+                    "rawSystemHash": "test",
+                    "memfsRevision": "old",
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
+            encoding="utf-8",
+        )
         subprocess.run(["git", "init", "-q", str(memfs)], check=True)
         subprocess.run(["git", "-C", str(memfs), "config", "user.name", "test"], check=True)
         subprocess.run(
@@ -376,10 +407,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         client = await self.client()
         await client.hello()
         before = await client.call("aki.username.get", {})
-        self.assertEqual(before["username"], "先生")
+        self.assertEqual(before["username"], "OldName")
         result = await client.call("aki.username.set", {"username": "Master"})
         self.assertTrue(result["changed"])
+        self.assertTrue(result["recompiled"])
         self.assertEqual(result["username"], "Master")
+        prompt = json.loads((conversation_dir / "system-prompt.json").read_text())
+        self.assertIn("Master", prompt["content"])
+        self.assertNotIn("OldName", prompt["content"])
+        self.assertNotEqual(prompt["compiledAt"], "2026-01-01T00:00:00Z")
         after = await client.call("aki.username.get", {})
         self.assertEqual(after["username"], "Master")
         self.assertIn("Master", (memfs / "persona.md").read_text(encoding="utf-8"))

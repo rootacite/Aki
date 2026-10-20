@@ -34,6 +34,7 @@ COMMANDS = {
     "reset",
     "username",
     "set-username",
+    "recompile",
 }
 
 
@@ -58,7 +59,7 @@ def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int
     print(
         "akictl REPL. Commands: /status /health /history [n] /allow <dir> "
         "/disallow <dir> /allowlist /memory ... /mqtt ... /avatar /username "
-        "/set-username <name> /reset /quit",
+        "/set-username <name> /recompile /reset /quit",
         file=sys.stderr,
     )
     while True:
@@ -119,6 +120,8 @@ def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int
                         {"username": prompt[14:].strip()},
                     )
                 )
+            elif prompt == "/recompile":
+                _print_json(_rpc_call(client, "aki.conversation.recompile"))
             else:
                 run_turn(
                     client,
@@ -337,6 +340,12 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     _add_common(parser)
     parser.add_argument("name")
     parsers["set-username"] = parser
+    parser = argparse.ArgumentParser(
+        prog="akictl recompile",
+        description="Rebuild the current conversation prompt from MemFS",
+    )
+    _add_common(parser)
+    parsers["recompile"] = parser
     return parsers
 
 
@@ -344,7 +353,7 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("-h", "--help"):
         print(
-            "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|avatar|reset|username|set-username] [options]\n"
+            "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|avatar|reset|username|set-username|recompile] [options]\n"
             "\n"
             "  akictl                     streaming chat REPL\n"
             "  akictl -p '...'            one-shot chat\n"
@@ -361,6 +370,7 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
             "  akictl reset               reset the default conversation (backs up first)\n"
             "  akictl username            show how Aki addresses the user\n"
             "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
+            "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
             "\nUse 'akictl <command> --help' for command-specific options."
         )
         return 0
@@ -400,6 +410,8 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return _management(args, "aki.username.get")
     if command == "set-username":
         return _management(args, "aki.username.set", {"username": args.name})
+    if command == "recompile":
+        return _management(args, "aki.conversation.recompile")
     print(f"unknown command: {command}", file=sys.stderr)
     return 2
 

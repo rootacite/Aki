@@ -19,7 +19,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 USERNAME_PLACEHOLDER = "{{USERNAME}}"
-DEFAULT_USERNAME = "先生"
+DEFAULT_USERNAME = "Master"
 USERNAME_FILE = "username.txt"
 ALLOWLIST = (
     "persona.md",
@@ -266,7 +266,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--message", default="sync persona from userdata", help="git commit message")
     parser.add_argument("--no-commit", action="store_true", help="write files without committing")
-    parser.add_argument("--restart", action="store_true", help="restart akid.service after syncing")
+    parser.add_argument("--restart", action="store_true", help="restart akid.service after syncing (does not rebuild the prompt)")
     parser.add_argument("--json", action="store_true", help="print a JSON result")
     parser.add_argument("--dry-run", action="store_true", help="show changes without writing")
     args = parser.parse_args(argv)
@@ -443,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print(f"akid restarted and ready on {socket_path}")
     elif not args.json:
-        print("changes apply on the next turn; use --restart to restart akid now")
+        print("changes are in MemFS; run 'akictl recompile' to refresh the current conversation now")
     return 0
 
 
