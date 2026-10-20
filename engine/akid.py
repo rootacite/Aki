@@ -76,6 +76,11 @@ NO_REPLY_MARKERS = {"[NO_REPLY]", "NO_REPLY", "NO-REPLY"}
 TOKIFACTOR_IMAGE_TOOL_NAME = "tokifactor_send_image"
 CAMERA_TOOL_NAME = "camera_take_photo"
 SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
+EXTERNAL_TOOL_NAMES = {
+    TOKIFACTOR_IMAGE_TOOL_NAME,
+    CAMERA_TOOL_NAME,
+    SCREENSHOT_TOOL_NAME,
+}
 MAX_IMAGE_CAPTION_CHARS = 200
 MAX_CAMERA_DIMENSION = 4096
 MIN_CAMERA_DIMENSION = 160
@@ -2329,10 +2334,14 @@ class GatewayServer:
         tool_input = request.get("input")
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
 
-        if tool_is_safe(tool_name) or (
-            tool_name == "Bash"
-            and self.config.sandbox_enabled
-            and self._sandbox_blocked_reason is None
+        if (
+            tool_is_safe(tool_name)
+            or tool_name in EXTERNAL_TOOL_NAMES
+            or (
+                tool_name == "Bash"
+                and self.config.sandbox_enabled
+                and self._sandbox_blocked_reason is None
+            )
         ):
             await self._safe_allow(request_id)
             return
@@ -2386,6 +2395,12 @@ class GatewayServer:
         if extra:
             data.update(extra)
         await self._emit(turn, "approval_request", data)
+        LOGGER.info(
+            "approval requested id=%s tool=%s turn=%s",
+            approval_id,
+            tool_name,
+            turn.turn_id,
+        )
         timed_out = False
         try:
             allow, reason = await asyncio.wait_for(

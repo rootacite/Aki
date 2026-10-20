@@ -85,6 +85,11 @@ class FakeLetta:
             marker = "EXTERNAL_IMAGE:"
             path_value = content.split(marker, 1)[1].splitlines()[0].strip()
             tool_call_id = f"image-tool-{number}"
+            self.request_tool(
+                "tokifactor_send_image",
+                {"path": path_value, "caption": "fake caption"},
+                tool_call_id,
+            )
             emit(
                 {
                     "type": "control_request",
@@ -119,6 +124,11 @@ class FakeLetta:
             return
         if "EXTERNAL_CAMERA" in content:
             tool_call_id = f"camera-tool-{number}"
+            self.request_tool(
+                "camera_take_photo",
+                {"device": "/dev/video0", "width": 320, "height": 240},
+                tool_call_id,
+            )
             emit(
                 {
                     "type": "control_request",
@@ -153,6 +163,11 @@ class FakeLetta:
             return
         if "EXTERNAL_SCREENSHOT" in content:
             tool_call_id = f"screenshot-tool-{number}"
+            self.request_tool(
+                "desktop_take_screenshot",
+                {"include_cursor": False},
+                tool_call_id,
+            )
             emit(
                 {
                     "type": "control_request",

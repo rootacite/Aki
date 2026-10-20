@@ -1404,6 +1404,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
             )
             events = await client.collect_turn(turn["turn_id"])
+            approvals = [approval] + [
+                event for event in events if event["type"] == "approval_request"
+            ]
+            self.assertEqual(len(approvals), 1)
+            self.assertTrue(
+                approvals[0]["data"]["approval_id"].startswith("external-")
+            )
             final = next(event for event in events if event["type"] == "assistant_message")
             self.assertIn("photo captured path=", final["data"]["content"])
         files = list(output_dir.glob("*.jpg"))
