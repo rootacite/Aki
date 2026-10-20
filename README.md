@@ -51,7 +51,8 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
   当前 turn 标记失败，队列保留。
 - **多客户端。** 状态、历史和只读记忆共享；实时事件只发给该 turn 的发起连接。
 - **审批工作流。** `Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、`Memory`、`ViewImage` 和
-  `mcp__tavily__*` 自动放行；其他工具需要发起客户端批准，默认 60 秒超时拒绝。
+  `mcp__tavily__*` 自动放行；`Bash` 在 sandbox 就绪时也默认放行。`Write`/`Edit`/
+  `ApplyPatch` 和未知工具需要发起客户端批准，默认 60 秒超时拒绝。
 - **tokifactor MQTT 频道。** 加密文本/图片、分片消息、头像发布、频道内审批，以及
   `akid.v1` 结构化事件。
 - **KDE Plasma 6 widget。** 历史分页、流式输出、Markdown、工具调用卡片、GUI 审批卡、

@@ -620,6 +620,19 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         tool_result = next(event for event in events if event["type"] == "tool_result")
         self.assertEqual(tool_result["data"]["status"], "success")
 
+    async def test_bash_auto_allowed_when_sandbox_enabled(self) -> None:
+        await self.start_server(approval_timeout=2.0)
+        assert self.server is not None
+        self.server.config.sandbox_enabled = True
+        self.server._sandbox_blocked_reason = None
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "dangerous"})
+        events = await client.collect_turn(turn["turn_id"])
+        self.assertNotIn("approval_request", [event["type"] for event in events])
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        self.assertEqual(tool_result["data"]["status"], "success")
+
     async def test_approval_timeout_denies_and_turn_continues(self) -> None:
         await self.start_server(approval_timeout=0.25)
         client = await self.client()
@@ -759,6 +772,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stat_mode(shared / "akid.sock"), 0o600)
         finally:
             await server.stop()
+
+    async def test_channel_prompt_says_reply_is_automatic(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        prompt = self.server._channel_prompt("Acite", "sender-1", "你好")
+        self.assertIn("automatically published", prompt)
+        self.assertIn("do not call any tool", prompt)
+        self.assertIn("[NO_REPLY]", prompt)
+
+    def test_default_backend_uses_standard_permission_mode(self) -> None:
+        config = GatewayConfig(
+            socket_path=self.root / "perm.sock",
+            agent_id="test-agent",
+            conversation_id="default",
+            cwd=ROOT,
+            memory_dir=self.memory,
+            backend_dir=self.root / "backend-perm",
+        )
+        server = GatewayServer(config)
+        command = server.backend.command
+        self.assertIn("--permission-mode", command)
+        self.assertEqual(command[command.index("--permission-mode") + 1], "standard")
 
     async def test_channel_message_gets_agent_reply(self) -> None:
         server = await self.start_server()
