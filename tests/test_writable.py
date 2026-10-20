@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import tempfile
 import unittest
 from pathlib import Path
 
+from engine.aki_config import read_writable, set_key
 from engine.protocol import ErrorCode, RpcError
 from engine.writable import WritableRegistry, probe_bwrap
 
@@ -20,7 +20,7 @@ class WritableRegistryTests(unittest.TestCase):
         self.letta_home.mkdir()
         self.backend = self.letta_home / "lc-local-backend"
         self.backend.mkdir()
-        self.state = self.home / ".local" / "share" / "aki" / "writable-dirs.json"
+        self.state = self.home / ".aki" / "aki.conf"
         self.registry = WritableRegistry(
             state_path=self.state,
             home=self.home,
@@ -60,7 +60,7 @@ class WritableRegistryTests(unittest.TestCase):
         removed = loaded.remove(str(allowed))
         self.assertTrue(removed["removed"])
         self.assertEqual(removed["revision"], 2)
-        self.assertEqual(json.loads(self.state.read_text())["roots"], [])
+        self.assertEqual(read_writable(self.state)[1], ())
 
     def test_rejects_root_missing_and_files(self) -> None:
         with self.assertRaises(RpcError) as ctx:
@@ -106,9 +106,7 @@ class WritableRegistryTests(unittest.TestCase):
     def test_invalid_persisted_path_is_reported_and_removable(self) -> None:
         missing = self.home / "gone"
         self.registry.save()
-        data = json.loads(self.state.read_text())
-        data["roots"] = [{"path": str(missing), "added_at": "now"}]
-        self.state.write_text(json.dumps(data))
+        set_key(self.state, "writable", "dirs", str(missing))
         loaded = WritableRegistry(
             state_path=self.state,
             home=self.home,

@@ -9,6 +9,7 @@ from engine.channel import TokifactorChannel
 from engine.mqtt_client import MqttClient
 from engine.tokifactor import (
     AVATAR_TOPIC,
+    CONTROL_TOPIC,
     PICTURE_TOPIC,
     decrypt_bytes,
     decode_single_payload,
@@ -17,6 +18,7 @@ from engine.tokifactor import (
     parse_avatar_envelope,
     parse_text_chunk,
 )
+from engine.tokifactor import TextEnvelope
 from tests.fake_mqtt_broker import FakeMqttBroker
 
 MAGIC = "unit-test-channel"
@@ -48,6 +50,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
             sender_name="akid",
             sender_id="akid",
             on_text=self._on_text,
+            on_control=self._on_control,
         )
         self.peer: MqttClient | None = None
         self.peer_messages: list[tuple[str, str, str]] = []
@@ -55,6 +58,8 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.peer_metadata: list[dict[str, str]] = []
         self.picture_payloads: list[str] = []
         self.avatar_messages: list[str] = []
+        self.control_messages: list[TextEnvelope] = []
+        self.control_payloads: list[TextEnvelope] = []
 
     async def asyncTearDown(self) -> None:
         await self.channel.stop()
@@ -65,12 +70,20 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
     async def _on_text(self, sender: str, sender_id: str, text: str) -> None:
         self.received.append((sender, sender_id, text))
 
+    async def _on_control(self, envelope: TextEnvelope) -> None:
+        self.control_messages.append(envelope)
+
     def _peer_message(self, topic: str, payload: bytes) -> None:
         if topic == AVATAR_TOPIC:
             self.avatar_messages.append(payload.decode("utf-8"))
             return
         if topic == PICTURE_TOPIC:
             self.picture_payloads.append(payload.decode("utf-8"))
+            return
+        if topic == CONTROL_TOPIC:
+            envelope = decode_single_payload(payload.decode("utf-8"), MAGIC)
+            if envelope is not None:
+                self.control_payloads.append(envelope)
             return
         envelope = decode_single_payload(payload.decode("utf-8"), MAGIC)
         if envelope is not None:
@@ -143,6 +156,70 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: bool(self.peer_metadata))
         self.assertEqual(self.peer_messages[-1][2], "**done**")
         self.assertEqual(self.peer_metadata[-1], metadata)
+
+    async def test_control_probe_is_separate_from_chat(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-control-test",
+            on_message=self._peer_message,
+        )
+        await self.peer.connect()
+        await self.peer.subscribe(CONTROL_TOPIC, qos=1)
+
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "probe",
+            "protocolVersion": "1",
+            "probeId": "probe-1",
+        }
+        for payload in encode_text_payloads(
+            "Aki probe",
+            MAGIC,
+            sender="tokifactor",
+            sender_id="peer-control",
+            metadata=metadata,
+        ):
+            await self.peer.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=1)
+        await wait_until(lambda: bool(self.control_messages))
+        self.assertEqual(self.control_messages[0].metadata, metadata)
+        self.assertEqual(self.received, [])
+
+        bad_magic = encode_text_payloads(
+            "Aki probe",
+            "wrong-magic",
+            sender="tokifactor",
+            sender_id="peer-control",
+            metadata={**metadata, "probeId": "probe-bad-magic"},
+        )
+        for payload in bad_magic:
+            await self.peer.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=1)
+        own_echo = encode_text_payloads(
+            "Aki probe",
+            MAGIC,
+            sender="akid",
+            sender_id="akid",
+            metadata={**metadata, "probeId": "probe-own-echo"},
+        )
+        for payload in own_echo:
+            await self.peer.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=1)
+        await asyncio.sleep(0.25)
+        self.assertEqual(len(self.control_messages), 1)
+
+        status = {
+            "schema": "akid.v1",
+            "kind": "status",
+            "agent": "aki",
+            "protocolVersion": "1",
+            "queueDepth": "2",
+        }
+        await self.channel.publish_control("Aki status", status)
+        await wait_until(lambda: bool(self.control_payloads))
+        self.assertEqual(self.control_payloads[-1].metadata, status)
+        self.assertEqual(self.peer_messages, [])
+        self.assertGreaterEqual(self.channel.health()["control"]["messages_sent"], 1)
 
     async def test_publish_image_round_trip(self) -> None:
         await self.channel.start()

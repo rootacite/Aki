@@ -225,11 +225,21 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：`deepseek/deepseek-flash`，reasoning `high`。
+- 模型：Letta 里是 `aki/deepseek-flash`。akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
+- 设置：`~/.aki/aki.conf`。Letta 只保存回环代理地址和回环令牌。
 - 上下文预算：400,000 tokens；约 383,616 tokens 触发 compaction。
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
 - 长期记忆规则见 MemFS 中的 `memory-policy.md`；普通测试对话不得写入长期记忆。
+
+## 13. GUI 与信道身份
+
+- **首选 GUI 是 tokifactor。** Aki 与 GUI 的信道身份统一为 `(broker host, port, magic)`；
+  不假设固定 IP，也不假设信道上一定有 Aki。
+- tokifactor 通过加密的 `tokifactor/control` 主题发送 probe；Aki 回复 presence，并用
+  status 心跳维持在线状态。控制消息不进入聊天历史、不创建 turn、不触发通知。
+- **KDE Plasma widget、`engine/gui_bridge.py` 和 `install-widget.py` 是 legacy。**
+  代码保留，但不属于推荐路径；安装必须显式传入 `--allow-deprecated`。
 

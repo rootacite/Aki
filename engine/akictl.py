@@ -30,11 +30,14 @@ COMMANDS = {
     "allowlist",
     "memory",
     "mqtt",
+    "mcp",
     "avatar",
     "reset",
     "username",
     "set-username",
     "recompile",
+    "reasoning",
+    "model",
 }
 
 
@@ -58,7 +61,9 @@ def _print_error(exc: BaseException) -> None:
 def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int:
     print(
         "akictl REPL. Commands: /status /health /history [n] /allow <dir> "
-        "/disallow <dir> /allowlist /memory ... /mqtt ... /avatar /username "
+        "/disallow <dir> /allowlist /memory ... /mqtt ... /mcp ... /model [set <id>] "
+        "/reasoning [set <level>] "
+        "/avatar /username "
         "/set-username <name> /recompile /reset /quit",
         file=sys.stderr,
     )
@@ -106,6 +111,15 @@ def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int
             elif prompt.startswith("/mqtt"):
                 rest = prompt.split()[1:]
                 _print_json(_mqtt_call(client, rest))
+            elif prompt.startswith("/mcp"):
+                rest = prompt.split()[1:]
+                _print_json(_mcp_call(client, rest))
+            elif prompt.startswith("/reasoning"):
+                rest = prompt.split()[1:]
+                _print_json(_reasoning_call(client, rest))
+            elif prompt.startswith("/model"):
+                rest = prompt.split()[1:]
+                _print_json(_model_call(client, rest))
             elif prompt == "/avatar":
                 _print_json(_rpc_call(client, "aki.avatar.status"))
             elif prompt == "/reset":
@@ -235,6 +249,25 @@ def _mqtt_call(client: GatewayClient, rest: list[str]) -> Any:
     return _rpc_call(client, "aki.mqtt.set", {"host": host, "port": port})
 
 
+def _mcp_call(client: GatewayClient, rest: list[str]) -> Any:
+    if not rest or rest[0] == "status":
+        return _rpc_call(client, "aki.mcp.status")
+    if rest[0] != "local":
+        raise ValueError("usage: /mcp [status] | /mcp local [on|off|status]")
+    state = rest[1].lower() if len(rest) > 1 else "status"
+    if state == "status":
+        return _rpc_call(client, "aki.mcp.status")
+    if state in ("on", "enable", "enabled"):
+        return _rpc_call(
+            client, "aki.mcp.set", {"server": "local", "enabled": True}
+        )
+    if state in ("off", "disable", "disabled"):
+        return _rpc_call(
+            client, "aki.mcp.set", {"server": "local", "enabled": False}
+        )
+    raise ValueError("usage: /mcp local [on|off|status]")
+
+
 def _parse_mqtt_server(values: list[str]) -> tuple[str, int]:
     if not values:
         raise ValueError("usage: mqtt set <host> [port] or <host:port>")
@@ -270,6 +303,76 @@ def _mqtt(args: argparse.Namespace) -> int:
     try:
         rest = ([args.mqtt_command] if args.mqtt_command else []) + args.mqtt_values
         _print_json(_mqtt_call(client, rest))
+        return 0
+    except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
+        _print_error(exc)
+        return 1
+    finally:
+        client.close()
+
+
+def _model_call(client: GatewayClient, rest: list[str]) -> Any:
+    if not rest or rest[0] == "status":
+        return _rpc_call(client, "aki.model.get")
+    if rest[0] != "set" or len(rest) < 2:
+        raise ValueError("usage: /model [status] | /model set <id>")
+    return _rpc_call(client, "aki.model.set", {"model": rest[1]})
+
+
+def _model(args: argparse.Namespace) -> int:
+    socket_path = _socket_from(args)
+    try:
+        client = _connect(socket_path, json_mode=False)
+    except (OSError, RpcError, ConnectionError) as exc:
+        print(f"cannot connect to akid at {socket_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        rest = ([args.model_command] if args.model_command else []) + args.model_values
+        _print_json(_model_call(client, rest))
+        return 0
+    except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
+        _print_error(exc)
+        return 1
+    finally:
+        client.close()
+
+
+def _reasoning_call(client: GatewayClient, rest: list[str]) -> Any:
+    if not rest or rest[0] == "status":
+        return _rpc_call(client, "aki.reasoning.get")
+    if rest[0] != "set":
+        raise ValueError("usage: /reasoning [status] | /reasoning set [low|medium|high]")
+    effort = rest[1] if len(rest) > 1 else "low"
+    return _rpc_call(client, "aki.reasoning.set", {"effort": effort})
+
+
+def _reasoning(args: argparse.Namespace) -> int:
+    socket_path = _socket_from(args)
+    try:
+        client = _connect(socket_path, json_mode=False)
+    except (OSError, RpcError, ConnectionError) as exc:
+        print(f"cannot connect to akid at {socket_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        rest = ([args.reasoning_command] if args.reasoning_command else []) + args.reasoning_values
+        _print_json(_reasoning_call(client, rest))
+        return 0
+    except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
+        _print_error(exc)
+        return 1
+    finally:
+        client.close()
+
+
+def _mcp(args: argparse.Namespace) -> int:
+    socket_path = _socket_from(args)
+    try:
+        client = _connect(socket_path, json_mode=False)
+    except (OSError, RpcError, ConnectionError) as exc:
+        print(f"cannot connect to akid at {socket_path}: {exc}", file=sys.stderr)
+        return 1
+    try:
+        _print_json(_mcp_call(client, list(args.mcp_args)))
         return 0
     except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
         _print_error(exc)
@@ -321,6 +424,20 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser.add_argument("mqtt_command", nargs="?")
     parser.add_argument("mqtt_values", nargs="*")
     parsers["mqtt"] = parser
+    parser = argparse.ArgumentParser(prog="akictl mcp")
+    _add_common(parser)
+    parser.add_argument("mcp_args", nargs="*")
+    parsers["mcp"] = parser
+    parser = argparse.ArgumentParser(prog="akictl reasoning")
+    _add_common(parser)
+    parser.add_argument("reasoning_command", nargs="?")
+    parser.add_argument("reasoning_values", nargs="*")
+    parsers["reasoning"] = parser
+    parser = argparse.ArgumentParser(prog="akictl model")
+    _add_common(parser)
+    parser.add_argument("model_command", nargs="?")
+    parser.add_argument("model_values", nargs="*")
+    parsers["model"] = parser
     parser = argparse.ArgumentParser(prog="akictl avatar")
     _add_common(parser)
     parsers["avatar"] = parser
@@ -353,7 +470,7 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("-h", "--help"):
         print(
-            "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|avatar|reset|username|set-username|recompile] [options]\n"
+            "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile] [options]\n"
             "\n"
             "  akictl                     streaming chat REPL\n"
             "  akictl -p '...'            one-shot chat\n"
@@ -366,6 +483,12 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
             "  akictl memory ...          read-only memory commands\n"
             "  akictl mqtt [status]       show the active MQTT broker\n"
             "  akictl mqtt set <server>   persist and reconnect to host:port\n"
+            "  akictl mcp                 show native MCP tool status\n"
+            "  akictl mcp local on|off    enable/disable local recon tools as native tools\n"
+            "  akictl model               list the active model and configured models\n"
+            "  akictl model set ID        switch model and restart the backend\n"
+            "  akictl reasoning           show reasoning_effort (default low)\n"
+            "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
             "  akictl avatar              show Aki's avatar asset status\n"
             "  akictl reset               reset the default conversation (backs up first)\n"
             "  akictl username            show how Aki addresses the user\n"
@@ -402,6 +525,12 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return _memory(args)
     if command == "mqtt":
         return _mqtt(args)
+    if command == "mcp":
+        return _mcp(args)
+    if command == "reasoning":
+        return _reasoning(args)
+    if command == "model":
+        return _model(args)
     if command == "avatar":
         return _management(args, "aki.avatar.status")
     if command == "reset":

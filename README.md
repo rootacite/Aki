@@ -6,22 +6,22 @@
 </p>
 
 <p align="center">
-  A local-first runtime for a persistent Letta agent: Unix-socket JSON-RPC, approvals, MemFS, MQTT, and a KDE Plasma widget.
+  A local-first runtime for a persistent Letta agent: Unix-socket JSON-RPC, approvals, MemFS, MQTT, and tokifactor.
 </p>
 
 <p align="center">
-  Python standard library · JSON-RPC over NDJSON · Letta stream-json · KDE Plasma 6
+  Python standard library · JSON-RPC over NDJSON · Letta stream-json · tokifactor · Legacy KDE Plasma 6 widget
 </p>
 
 ---
 
 ## 仓库描述
 
-> A local-first gateway for a persistent Aki agent: Unix socket, JSON-RPC, Letta, MQTT, and a KDE Plasma widget.
+> A local-first gateway for a persistent Aki agent: Unix socket, JSON-RPC, Letta, MQTT, and tokifactor.
 
 Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix socket，监督一个长驻的
 `letta --input-format stream-json --output-format stream-json` 子进程，把对话、工具审批、
-记忆、MQTT 频道和 KDE Plasma 小组件连接成一套可以长期运行的本地 Agent 系统。
+记忆、MQTT 频道和 tokifactor GUI 连接成一套可以长期运行的本地 Agent 系统。
 
 这个仓库关心的不是“再做一个聊天 CLI”，而是几个更具体的问题：同一个 Aki 如何在多次
 会话之间保持连续身份；危险操作如何由发起者批准；多个本地客户端如何共享状态而不共享
@@ -29,8 +29,8 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
 
 ## 设计取向
 
-- **本地优先，不暴露 TCP。** 对外只有一个 Unix socket；目录 `0700`、socket `0600`，
-  监听后校验 `SO_PEERCRED` 与当前用户 UID。TCP 不是可选项。
+- **本地优先。** 聊天入口只有一个 Unix socket；目录 `0700`、socket `0600`，
+  监听后校验 `SO_PEERCRED` 与当前用户 UID。模型调用另走 `127.0.0.1:7721`，只给本机 Letta 用。
 - **一个长驻后端，一个活跃 turn。** `akid` 监督一个 Letta stream-json 子进程；多个客户端
   可以同时连接，但同一时间只有一个 turn 在跑，后续消息 FIFO 排队。
 - **审批属于发起者。** 危险工具只向该 turn 的发起客户端请求批准；超时默认拒绝该工具，
@@ -55,8 +55,10 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
   `ApplyPatch` 和未知工具需要发起客户端批准，默认 60 秒超时拒绝。
 - **tokifactor MQTT 频道。** 加密文本/图片、分片消息、头像发布、频道内审批，以及
   `akid.v1` 结构化事件。
-- **KDE Plasma 6 widget。** 历史分页、流式输出、Markdown、工具调用卡片、GUI 审批卡、
-  停止/排队状态和系统通知。
+- **tokifactor GUI（首选）。** 在任意共享 `(broker host, port, magic)` 信道上探测 Aki；
+  只有探测成功时才显示 Aki 专用状态栏（模型、reasoning、上下文占用、队列与审批）。
+- **KDE Plasma 6 widget（legacy）。** 保留历史分页、流式输出、Markdown、工具调用卡片、
+  GUI 审批卡和系统通知，但不再推荐安装。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
 - **人格与 userdata。** 人格模板、称呼占位符、MemFS 渲染、备份和 git 提交。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
@@ -79,19 +81,46 @@ python3 install-daemon.py --uninstall        # 不删除 MemFS/历史
 如果该路径已存在且不是本仓库的链接，安装会报错而不会覆盖；`--uninstall`
 只会移除指向本仓库的链接。
 
+akid 的设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
+
+Letta 只连接 `http://127.0.0.1:7721/v1`。akid 按请求里的模型把调用转到 conf 里的上游，并换上对应的密钥。`[proxy] upstream_proxy` 非空时，访问上游先走这台 HTTP 代理（HTTPS 用 CONNECT）；单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连，本地 llama.cpp/OpenAI 兼容服务应这样配置。留空则所有上游直连。聊天客户端仍然只走 Unix socket。
+
 默认 socket 为 `$XDG_RUNTIME_DIR/aki/akid.sock`。手动运行时：
 
 ```bash
 AKI_SOCKET=/tmp/aki/akid.sock python3 engine/akid.py
 ```
 
-### KDE Plasma Widget
+### 首选 GUI：tokifactor
+
+tokifactor 是当前首选的桌面/Android GUI。它不内置 Aki 专用 broker 预设，也不需要
+固定 IP；在 tokifactor 设置里选择与 Aki 相同的 broker `host:port` 和 magic string 即可。
+Aki 的 MQTT 配置在 `~/.aki/aki.conf` 的 `[mqtt]` 段：
+
+```ini
+[mqtt]
+enabled = true
+host = <broker-host>
+port = 1883
+topic = tokifactor/text
+magic = <shared-magic>
+```
+
+把同样的 `host:port` 和 magic 填进 tokifactor。连接建立后，tokifactor 会在加密的
+`tokifactor/control` 主题上发送 probe；如果信道里有 Aki，Aki 回复 presence 并每 10 秒
+发布一次 status，tokifactor 顶部因此出现两行状态栏。信道里没有 Aki 时，tokifactor 只显示
+普通聊天界面，旧 tokifactor 客户端也会忽略控制主题继续聊天。
+
+### Legacy: KDE Plasma Widget (deprecated)
+
+KDE Plasma widget 已弃用，保留代码仅为兼容和参考；新用户请使用 tokifactor。
+安装器只有在显式传入 `--allow-deprecated` 时才会安装。
 
 ```bash
-python3 install-widget.py --dry-run   # 预览 unit 和安装路径
-python3 install-widget.py             # 安装 widget + 启动 GUI 桥接
-python3 install-widget.py --status
-python3 install-widget.py --uninstall # 保留 akid、MemFS 和聊天历史
+python3 install-widget.py --allow-deprecated --dry-run   # 预览 legacy unit 和安装路径
+python3 install-widget.py --allow-deprecated             # 安装 legacy widget + GUI 桥接
+python3 install-widget.py --status                       # --status 不受弃用限制
+python3 install-widget.py --uninstall                    # 保留 akid、MemFS 和聊天历史
 ```
 
 安装后右键底部面板 →“添加组件”→ 搜索 `Aki`。widget 平时显示 Aki 头像，
@@ -215,14 +244,14 @@ akictl allow /path/to/project
 akictl disallow /path/to/project
 akictl disallow --all
 akictl mqtt                       # 查看当前 MQTT 服务器
-akictl mqtt set 192.168.3.1:1883  # 持久化并立即重连
+akictl mqtt set broker.example:1883  # 持久化并立即重连
 akictl username                   # 查看当前称呼
 akictl set-username Master        # 修改称呼并重编译当前会话
 akictl recompile                  # 从 MemFS 重编译当前会话 prompt
 akictl reset                      # 重置 default 会话（先备份）
 ```
 
-注册表持久化在 `~/.local/share/aki/writable-dirs.json`（目录 `0700`、文件 `0600`）。
+可写目录、MQTT、MCP 排除列表和上游模型都写在 `~/.aki/aki.conf`（目录 `0700`、文件 `0600`）。
 注册/吊销会立即重启 Letta 后端；若有活跃 turn，该 turn 会收到
 `SANDBOX_POLICY_CHANGED` 和 `turn_end.reason=sandbox_restart`，队列中的其他 turn 保留。
 
@@ -230,11 +259,12 @@ akictl reset                      # 重置 default 会话（先备份）
 
 ## tokifactor MQTT 频道
 
-akid 默认同时连接 tokifactor 公共频道：
+akid 连接 `~/.aki/aki.conf` 中 `[mqtt]` 配置的信道，不假设固定 broker IP：
 
-- Broker：`192.168.3.1:1883`（MQTT 3.1.1，QoS 1）
+- Broker：`[mqtt] host:port`（用户实际配置的地址；私有 broker 仅作为当前部署示例）
 - Topic：`tokifactor/text`
-- Magic string：`akid-default-channel`
+- Control topic：`tokifactor/control`
+- Magic string：`[mqtt] magic`
 
 频道消息使用 tokifactor 相同的线格式：`HKDF-SHA256` 派生密钥，
 `nonce || AES-GCM-SIV` 密文，Base64 后发布；短消息是 `TextEnvelope` JSON，
@@ -265,6 +295,24 @@ akid-deny <approval_id>
 结构化事件使用兼容的 `akid.v1` TextEnvelope 扩展字段；旧客户端仍会看到
 fallback 文本。工具 stdout/stderr、工具参数、reasoning 和 usage 不会发布到频道。
 
+### 控制主题与 Aki 探测
+
+`tokifactor/control` 上的每条消息仍使用当前 magic 加密，不进入聊天历史、不创建
+turn、不触发通知。协议版本为 `protocolVersion=1`：
+
+- **Probe**：tokifactor 发布 `schema=akid.v1`、`kind=probe`、随机非空 `probeId` 和非空 text。
+- **Presence**：Aki 回复 `kind=presence`、`agent=aki`、`agentName=Aki`、原样回传
+  `probeId`，并附带 model、reasoning、capabilities、backendReady 和 channelReady。
+- **Status**：Aki 连接成功后立即发布，此后每 10 秒心跳；turn 开始/结束、usage、
+  审批请求/完成时也会立即刷新。字段包括模型、reasoning、上下文上限/用量、backend/
+  channel/sandbox 就绪状态、队列深度、活跃 turn、待审批数、uptime 和 memory tokens。
+- **Offline**：优雅停止时尽量发布 `kind=offline`；崩溃则由 tokifactor 的超时判定。
+
+Aki 忽略错误 magic、自身消息和重复 `probeId`，并按 sender 做简单限流。tokifactor
+连接成功、broker 或 magic 变化后发送 probe；未发现 Aki 时每 15 秒重试。收到 presence
+或 status 后停止主动探测，改由心跳维持在线；连续 30 秒没有两者时隐藏 Aki UI 并恢复
+probe。多个 Aki presence 时以首个有效 Aki 为准。
+
 > 安全提示：公共 broker 不可信，magic string 是群组口令。任何知道该 magic
 > string 的人都能读取频道、触发 Agent turn，并发送审批命令。不要在频道中
 > 传播秘密；如需真实隔离，应换用私有 broker 和不同的 magic string。
@@ -272,6 +320,34 @@ fallback 文本。工具 stdout/stderr、工具参数、reasoning 和 usage 不�
 ---
 
 ## 工具
+
+### MCP 原生工具
+
+akid 会在 backend ready 时读取 Letta 的 MCP 配置，把每个 MCP 工具注册成模型原生的
+external tool，名字保持 `mcp__<server>__<tool>`（例如
+`mcp__tavily__tavily_search`）。模型直接调用这些工具，不再需要通过 Bash 执行
+`letta mcp call`；akid 在收到 external tool 请求后代理到对应的 MCP server。
+
+- 工具发现：`letta mcp list` + `letta mcp tools <server> --full`，注册前会等待发现完成，
+  因此 backend 刚启动时第一个 turn 可能多等 1–3 秒。
+- 审批策略与普通工具一致：`mcp__tavily__*` 自动放行；其他 MCP 工具默认需要审批。
+- 默认排除 `local` 侦察工具，只注入 Tavily 的 5 个工具；避免 30 个侦察工具的
+  schema 每轮占用上下文。需要时可用 `akictl` 打开：
+
+  ```bash
+  akictl mcp                 # 查看当前原生 MCP 工具状态
+  akictl mcp local on        # 把 local 侦察工具也注入为原生工具
+  akictl mcp local off       # 恢复默认，只保留 Tavily
+  ```
+
+  开关会写进 `~/.aki/aki.conf` 的 `[mcp] excluded`，并在切换时安全重启 backend；
+  如果当时有 turn 在跑，该 turn 会被中断。
+- 结果以文本返回模型，单次结果最多保留 128 KiB；图片内容目前以占位说明代替。
+- MCP server 由 akid 以 external tool 方式启动，运行在 Letta bwrap 沙盒之外；
+  只应配置可信的 MCP server。
+
+这些值在 `~/.aki/aki.conf` 的 `[mcp]` 段：`native_tools`、`excluded`、`max_tools`、`timeout`。
+`AKI_MCP_NATIVE_SERVERS` 仍是可选的逗号分隔白名单，默认空表示不按白名单裁剪。
 
 ### tokifactor 图片
 
@@ -308,10 +384,7 @@ akid 通过 Letta external tool 注册 `camera_take_photo`。当前只支持单�
   `channel` 是 `camera`；拒绝或超时不会打开摄像头。
 - 文件位于 `/tmp`，重启后可能被系统清理。
 
-相关环境变量：`AKI_CAMERA_ENABLED`、`AKI_CAMERA_REQUIRE_APPROVAL`、
-`AKI_CAMERA_DEVICE`、`AKI_CAMERA_WIDTH`、`AKI_CAMERA_HEIGHT`、
-`AKI_CAMERA_OUTPUT_DIR`、`AKI_FFMPEG_BIN`、`AKI_FFPROBE_BIN`。
-`AKI_CAMERA_REQUIRE_APPROVAL=0` 只建议用于调试，默认必须保持 `1`。
+摄像头开关、设备和输出目录在 `~/.aki/aki.conf` 的 `[camera]`。`require_approval` 默认 `true`。
 
 ### 桌面截图
 
@@ -330,12 +403,7 @@ akid 通过 Letta external tool 注册 `desktop_take_screenshot`：
   `wayland-*` socket。
 - 只返回绝对路径、字节数、实际宽高、`Wayland display`、实际 backend、MIME 和
   cursor 状态；不返回图片内容。
-- 默认**不需要审批**。如需恢复审批，可设置
-  `AKI_SCREENSHOT_REQUIRE_APPROVAL=1`。
-
-相关环境变量：`AKI_SCREENSHOT_ENABLED`、`AKI_SCREENSHOT_REQUIRE_APPROVAL`、
-`AKI_GRIM_BIN`、`AKI_SPECTACLE_BIN`、`AKI_SCREENSHOT_OUTPUT_DIR`、
-`AKI_SCREENSHOT_WAYLAND_DISPLAY`。
+- 默认**不需要审批**。如需恢复审批，把 `~/.aki/aki.conf` 里 `[screenshot] require_approval` 设为 `true`。
 
 ### 桌面实况上下文
 
@@ -395,9 +463,9 @@ tokifactor 侧的行为：
 - `engine/protocol.py`：NDJSON、JSON-RPC 错误码与事件模型。
 - `engine/client.py`：同步客户端库与流式 REPL。
 - `engine/akictl.py`、`bin/akictl`：对话 + 本地管理 CLI。
-- `engine/gui_bridge.py`：GUI 专用本地 WebSocket → akid Unix socket 桥接。
-- `install-widget.py`：安装 Plasma widget 和 `akid-gui.service`。
-- `kde-widget/org.acite.aki.chat/`：Plasma 6 QML 聊天组件。
+- `engine/gui_bridge.py`：legacy GUI 专用本地 WebSocket → akid Unix socket 桥接。
+- `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
+- `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
 - `install-daemon.py`：systemd user service 安装器。
 - `scripts/sync-persona.py`：把 `userdata` 模板渲染并写入 MemFS。
 - `userdata/`：非隐私人格模板、`username.txt` 和同步清单。
@@ -431,4 +499,4 @@ python3 -m unittest discover -v
 MQTT broker 收发、频道审批命令、bwrap 允许/拒绝写入、注册表持久化与吊销、
 沙盒不可用 fail-closed、PictureChunk 编码、external tool 注册与审批、
 图片源路径限制、MQTT 服务器持久化与热重连、`akictl` 管理命令、会话初始化、
-人格模板渲染以及端到端流式输出。
+控制主题 probe/presence/status、probe 去重与限流、人格模板渲染以及端到端流式输出。

@@ -171,10 +171,10 @@ def service_unit(
     *,
     python_bin: str,
     repo: Path,
-    agent_id: str,
-    conversation_id: str,
-    letta_bin: str,
-    socket_path: Path,
+    agent_id: str = "",
+    conversation_id: str = "",
+    letta_bin: str = "",
+    socket_path: Path | None = None,
     mqtt_enabled: bool = True,
     mqtt_host: str = "192.168.3.1",
     mqtt_port: int = 1883,
@@ -186,6 +186,22 @@ def service_unit(
     mqtt_state: str | None = None,
     avatar_path: str | None = None,
 ) -> str:
+    del (
+        agent_id,
+        conversation_id,
+        letta_bin,
+        socket_path,
+        mqtt_enabled,
+        mqtt_host,
+        mqtt_port,
+        mqtt_topic,
+        mqtt_magic,
+        sandbox_enabled,
+        bwrap_bin,
+        writable_state,
+        mqtt_state,
+        avatar_path,
+    )
     return f"""[Unit]
 Description=Aki local gateway (akid)
 After=network.target
@@ -195,42 +211,8 @@ Type=simple
 ExecStart={python_bin} {repo / 'engine' / 'akid.py'}
 WorkingDirectory={repo}
 Environment="PYTHONUNBUFFERED=1"
-Environment="AKI_AGENT_ID={agent_id}"
-Environment="AKI_CONVERSATION_ID={conversation_id}"
-Environment="AKI_LETTA_BIN={letta_bin}"
-Environment="AKI_SOCKET={socket_path}"
 Environment="XDG_RUNTIME_DIR=%t"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"
-Environment="AKI_MQTT_ENABLED={1 if mqtt_enabled else 0}"
-Environment="AKI_MQTT_HOST={mqtt_host}"
-Environment="AKI_MQTT_PORT={mqtt_port}"
-Environment="AKI_MQTT_TOPIC={mqtt_topic}"
-Environment="AKI_MQTT_MAGIC={mqtt_magic}"
-Environment="AKI_MQTT_STATE={mqtt_state or str(Path.home() / '.local' / 'share' / 'aki' / 'mqtt.json')}"
-Environment="AKI_SANDBOX_ENABLED={1 if sandbox_enabled else 0}"
-Environment="AKI_BWRAP_BIN={bwrap_bin}"
-Environment="AKI_WRITABLE_STATE={writable_state or str(Path.home() / '.local' / 'share' / 'aki' / 'writable-dirs.json')}"
-Environment="AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL=0"
-Environment="AKI_AVATAR_PATH={avatar_path or repo / 'aki_avi.jpg'}"
-Environment="AKI_CAMERA_ENABLED=1"
-Environment="AKI_CAMERA_REQUIRE_APPROVAL=1"
-Environment="AKI_FFMPEG_BIN={shutil.which('ffmpeg') or 'ffmpeg'}"
-Environment="AKI_FFPROBE_BIN={shutil.which('ffprobe') or 'ffprobe'}"
-Environment="AKI_CAMERA_DEVICE=/dev/video0"
-Environment="AKI_CAMERA_WIDTH=1280"
-Environment="AKI_CAMERA_HEIGHT=720"
-Environment="AKI_CAMERA_OUTPUT_DIR=/tmp/aki/camera"
-Environment="AKI_SCREENSHOT_ENABLED=1"
-Environment="AKI_SCREENSHOT_REQUIRE_APPROVAL=0"
-Environment="AKI_GRIM_BIN={shutil.which('grim') or 'grim'}"
-Environment="AKI_SPECTACLE_BIN={shutil.which('spectacle') or 'spectacle'}"
-Environment="AKI_SCREENSHOT_OUTPUT_DIR=/tmp/aki/screenshots"
-Environment="AKI_LIVE_CONTEXT_ENABLED=1"
-Environment="AKI_LIVE_CONTEXT_BUDGET_TOKENS=65536"
-Environment="AKI_ZSH_HISTORY={Path.home() / '.zsh_history'}"
-Environment="AKI_PS_BIN={shutil.which('ps') or 'ps'}"
-Environment="AKI_QDBUS_BIN={shutil.which('qdbus') or shutil.which('qdbus6') or ''}"
-Environment="AKI_LIVE_CONTEXT_TIMEOUT=3.0"
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15

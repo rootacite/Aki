@@ -138,18 +138,22 @@ class LiveContextRenderTests(unittest.TestCase):
         self.assertNotIn("{CORE_MEMORY}", cleared)
 
     def test_environment_configuration(self) -> None:
+        from engine.aki_config import atomic_write, set_key, template_text
+
         with tempfile.TemporaryDirectory() as directory:
             history = Path(directory) / "zsh_history"
+            conf = Path(directory) / "aki.conf"
+            atomic_write(conf, template_text())
+            set_key(conf, "live", "enabled", "false")
+            set_key(conf, "live", "budget_tokens", "999999")
+            set_key(conf, "live", "timeout", "1.5")
             with mock.patch.dict(
                 os.environ,
                 {
-                    "AKI_LIVE_CONTEXT_ENABLED": "0",
-                    "AKI_LIVE_CONTEXT_BUDGET_TOKENS": "999999",
+                    "AKI_CONFIG": str(conf),
                     "AKI_ZSH_HISTORY": str(history),
                     "AKI_PS_BIN": "/bin/ps",
                     "AKI_QDBUS_BIN": "/bin/qdbus6",
-                    "AKI_LIVE_CONTEXT_TIMEOUT": "1.5",
-                    "AKI_MQTT_STATE": str(Path(directory) / "mqtt.json"),
                 },
                 clear=False,
             ):

@@ -80,6 +80,134 @@ class FakeLetta:
     def run_turn(self, content: str) -> None:
         self.turn_number += 1
         number = self.turn_number
+        if "INTERNAL_RESULT_RACE" in content:
+            emit(
+                {
+                    "type": "queue_item_enqueued",
+                    "item_id": "task-1",
+                    "client_message_id": "cm-task-1",
+                    "source": "task_notification",
+                    "kind": "task_notification",
+                    "queue_len": 1,
+                }
+            )
+            emit(
+                {
+                    "type": "queue_batch_dequeued",
+                    "batch_id": "batch-task",
+                    "item_ids": ["task-1"],
+                    "merged_count": 1,
+                    "queue_len_after": 0,
+                }
+            )
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": "internal notification reply\n"}],
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": "internal notification reply",
+                }
+            )
+            emit(
+                {
+                    "type": "queue_item_enqueued",
+                    "item_id": "user-1",
+                    "client_message_id": "cm-user-1",
+                    "source": "user",
+                    "kind": "message",
+                    "queue_len": 1,
+                }
+            )
+            emit(
+                {
+                    "type": "queue_batch_dequeued",
+                    "batch_id": "batch-user",
+                    "item_ids": ["user-1"],
+                    "merged_count": 1,
+                    "queue_len_after": 0,
+                }
+            )
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": "real reply\n"}],
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": "real reply",
+                }
+            )
+            return
+        if "NATIVE_MCP_TOOL" in content:
+            tool_call_id = f"mcp-tool-{number}"
+            response = self.request_tool(
+                "mcp__tavily__tavily_search",
+                {"query": "native search"},
+                tool_call_id,
+            )
+            body = (response or {}).get("response") or {}
+            if body.get("behavior") != "allow":
+                text = "native tool denied"
+                emit_chunk(
+                    {
+                        "message_type": "assistant_message",
+                        "content": [{"type": "text", "text": text}],
+                    }
+                )
+                emit(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "stop_reason": "end_turn",
+                        "result": text,
+                    }
+                )
+                return
+            emit(
+                {
+                    "type": "control_request",
+                    "request_id": f"ext-{tool_call_id}",
+                    "request": {
+                        "subtype": "execute_external_tool",
+                        "tool_call_id": tool_call_id,
+                        "tool_name": "mcp__tavily__tavily_search",
+                        "input": {"query": "native search"},
+                    },
+                }
+            )
+            response = self.wait_for_response(f"ext-{tool_call_id}") or {}
+            parts = ((response.get("content")) or [])
+            text = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            emitted = f"native tool result: {text}"
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": emitted}],
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": emitted,
+                }
+            )
+            return
         is_channel = content.startswith("[akid MQTT channel message]")
         if "EXTERNAL_IMAGE:" in content:
             marker = "EXTERNAL_IMAGE:"

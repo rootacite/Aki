@@ -14,6 +14,7 @@ from typing import Any, Awaitable, Callable, Mapping
 from engine.mqtt_client import MqttClient, MqttError
 from engine.tokifactor import (
     AVATAR_TOPIC,
+    CONTROL_TOPIC,
     DecodeError,
     MAX_IMAGE_BYTES,
     PICTURE_TOPIC,
@@ -37,6 +38,7 @@ TEXT_TOPIC = "tokifactor/text"
 DEFAULT_MAGIC = "akid-default-channel"
 
 TextHandler = Callable[[str, str, str], Awaitable[None]]
+ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 
 
 class ChannelUnavailable(RuntimeError):
@@ -57,6 +59,8 @@ class TokifactorChannel:
         avatar_hash: str = "",
         avatar_mime: str = "",
         on_text: TextHandler,
+        on_control: ControlHandler | None = None,
+        on_connected: Callable[[], Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.host = host
@@ -71,6 +75,8 @@ class TokifactorChannel:
         )
         self._avatar_mime = avatar_mime
         self.on_text = on_text
+        self.on_control = on_control
+        self.on_connected = on_connected
         self.logger = logger or logging.getLogger("akid.channel")
 
         self._stop = asyncio.Event()
@@ -97,6 +103,8 @@ class TokifactorChannel:
         self._avatar_last_error: str | None = None
         self._avatars_received = 0
         self._peer_avatars: dict[str, bytes] = {}
+        self._control_received = 0
+        self._control_sent = 0
 
     @property
     def connected(self) -> bool:
@@ -169,6 +177,12 @@ class TokifactorChannel:
                 except MqttError as exc:
                     self._avatar_last_error = f"avatar subscription failed: {exc}"
                     self.logger.warning(self._avatar_last_error)
+                try:
+                    control_granted = await client.subscribe(CONTROL_TOPIC, qos=1)
+                    if control_granted == 0x80:
+                        raise MqttError("broker rejected control subscription")
+                except MqttError as exc:
+                    self.logger.warning("control subscription failed: %s", exc)
                 self._connected = True
                 self._state = "connected"
                 self._last_error = None
@@ -177,6 +191,11 @@ class TokifactorChannel:
                     "channel connected %s:%s topic=%s", self.host, self.port, self.topic
                 )
                 await self._publish_avatar_have(force=True)
+                if self.on_connected is not None:
+                    try:
+                        await self.on_connected()
+                    except Exception:
+                        self.logger.exception("channel connected callback failed")
                 await client.wait_closed()
             except asyncio.CancelledError:
                 raise
@@ -203,6 +222,9 @@ class TokifactorChannel:
             return
         if topic == AVATAR_TOPIC:
             await self._handle_avatar_packet(payload)
+            return
+        if topic == CONTROL_TOPIC:
+            await self._handle_control_packet(payload)
             return
         if topic != self.topic:
             return
@@ -237,6 +259,30 @@ class TokifactorChannel:
             )
         except asyncio.QueueFull:
             self.logger.warning("channel inbox full; dropping message")
+
+    async def _handle_control_packet(self, payload: bytes) -> None:
+        if self.on_control is None:
+            return
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self._decode_failures += 1
+            return
+        envelope = decode_single_payload(text, self.magic)
+        if envelope is None:
+            self._decode_failures += 1
+            return
+        if envelope.sender_id and envelope.sender_id == self.sender_id:
+            return
+        if not envelope.text:
+            return
+        self._control_received += 1
+        try:
+            await self.on_control(envelope)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("channel control handler failed")
 
     def _is_duplicate(self, envelope: TextEnvelope) -> bool:
         now = time.monotonic()
@@ -283,6 +329,25 @@ class TokifactorChannel:
         self, text: str, metadata: Mapping[str, Any]
     ) -> None:
         await self.publish_text(text, metadata)
+
+    async def publish_control(
+        self, text: str, metadata: Mapping[str, Any]
+    ) -> None:
+        client = self._client
+        if client is None or not self._connected:
+            raise ChannelUnavailable("channel is not connected")
+        payloads = encode_text_payloads(
+            text,
+            self.magic,
+            sender=self.sender_name,
+            sender_id=self.sender_id,
+            avatar_hash=self._avatar_hash,
+            metadata=metadata,
+        )
+        async with self._publish_lock:
+            for payload in payloads:
+                await client.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=1)
+        self._control_sent += 1
 
     async def publish_notice(self, text: str) -> None:
         with contextlib.suppress(ChannelUnavailable):
@@ -481,5 +546,10 @@ class TokifactorChannel:
                 "peer_avatars": len(self._peer_avatars),
                 "avatars_received": self._avatars_received,
                 "last_error": self._avatar_last_error,
+            },
+            "control": {
+                "topic": CONTROL_TOPIC,
+                "messages_received": self._control_received,
+                "messages_sent": self._control_sent,
             },
         }

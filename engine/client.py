@@ -24,6 +24,16 @@ def default_socket_path() -> Path:
     configured = os.environ.get("AKI_SOCKET")
     if configured:
         return Path(configured).expanduser()
+    config_path = Path(os.environ["AKI_CONFIG"]).expanduser() if os.environ.get("AKI_CONFIG") else Path.home() / ".aki" / "aki.conf"
+    if config_path.is_file():
+        try:
+            from engine.aki_config import load_config
+
+            socket = load_config(config_path).socket
+        except (OSError, ValueError):
+            socket = ""
+        if socket:
+            return Path(socket).expanduser()
     runtime = os.environ.get("XDG_RUNTIME_DIR")
     if runtime:
         return Path(runtime) / "aki" / "akid.sock"

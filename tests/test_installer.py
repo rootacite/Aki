@@ -118,16 +118,11 @@ class InstallerTests(unittest.TestCase):
             "RuntimeDirectory=aki",
             "RuntimeDirectoryMode=0700",
             "UMask=0077",
-            "AKI_SANDBOX_ENABLED=1",
-            "AKI_BWRAP_BIN=",
-            "AKI_WRITABLE_STATE=",
             'Environment="XDG_RUNTIME_DIR=%t"',
             'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"',
-            'Environment="AKI_LIVE_CONTEXT_ENABLED=1"',
-            'Environment="AKI_LIVE_CONTEXT_BUDGET_TOKENS=65536"',
-            'Environment="AKI_ZSH_HISTORY=',
         ):
             self.assertIn(fragment, unit)
+        self.assertNotIn("AKI_", unit)
 
 
 if __name__ == "__main__":

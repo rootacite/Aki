@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
@@ -31,9 +32,32 @@ from typing import Any, Awaitable, Callable, Mapping
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from engine.aki_config import (
+    AkiConfig,
+    atomic_write,
+    default_config_path,
+    ensure_config,
+    load_config,
+    legacy_state_dir,
+    read_mcp_excluded,
+    write_mcp_excluded,
+)
+from engine.letta_llm import (
+    DEFAULT_REASONING_EFFORT,
+    prepare_letta,
+    supported_reasoning_efforts,
+    write_provider_mod,
+)
 from engine.letta_process import BackendProtocolError, BackendUnavailable, LettaProcess
+from engine.llm_proxy import LlmProxy
 from engine.avatar import AvatarAsset, AvatarError, default_avatar_path, load_avatar
-from engine.channel import DEFAULT_MAGIC, TEXT_TOPIC, ChannelUnavailable, TokifactorChannel
+from engine.channel import (
+    CONTROL_TOPIC,
+    DEFAULT_MAGIC,
+    TEXT_TOPIC,
+    ChannelUnavailable,
+    TokifactorChannel,
+)
 from engine.live_context import (
     DEFAULT_BUDGET_TOKENS as DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS,
     LiveContextOptions,
@@ -51,7 +75,7 @@ from engine.mqtt_settings import (
     load_mqtt_server,
     save_mqtt_server,
 )
-from engine.tokifactor import MAX_IMAGE_BYTES, detect_image_mime
+from engine.tokifactor import MAX_IMAGE_BYTES, TextEnvelope, detect_image_mime
 from engine.writable import WritableRegistry
 from engine.protocol import (
     MAX_LINE_BYTES,
@@ -92,6 +116,10 @@ EXTERNAL_TOOL_NAMES = {
     CAMERA_TOOL_NAME,
     SCREENSHOT_TOOL_NAME,
 }
+MCP_TOOL_PREFIX = "mcp__"
+MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
+DEFAULT_MCP_NATIVE_MAX_TOOLS = 64
+DEFAULT_MCP_TOOL_TIMEOUT = 300.0
 MAX_IMAGE_CAPTION_CHARS = 200
 MAX_CAMERA_DIMENSION = 4096
 MIN_CAMERA_DIMENSION = 160
@@ -105,6 +133,10 @@ DEFAULT_LIVE_CONTEXT_HISTORY_LIMIT = 20
 DEFAULT_LIVE_CONTEXT_PROCESS_LIMIT = 5
 CHANNEL_EVENT_QUEUE_MAX = 256
 BACKEND_HISTORY_PAGE = 32
+CHANNEL_PROTOCOL_VERSION = 1
+CHANNEL_STATUS_INTERVAL = 10.0
+CHANNEL_PROBE_SEEN_TTL = 300.0
+CHANNEL_PROBE_RATE_LIMIT = 1.0
 
 TOKIFACTOR_IMAGE_TOOL = {
     "name": TOKIFACTOR_IMAGE_TOOL_NAME,
@@ -219,6 +251,7 @@ CAPABILITIES = {
     "tokifactor_image_tool": True,
     "camera_tool": True,
     "screenshot_tool": True,
+    "mcp_native_tools": True,
     "avatar": True,
     "mqtt_manage": True,
     "conversation_reset": True,
@@ -275,6 +308,10 @@ def default_backend_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".letta" / "lc-local-backend"
+
+
+def default_mcp_native_state_path() -> Path:
+    return default_config_path()
 
 
 def default_memory_dir(agent_id: str) -> Path:
@@ -353,6 +390,71 @@ def _parse_tool_arguments(arguments: Any) -> Any:
         except ValueError:
             return arguments
     return arguments
+
+
+def _truncate_mcp_text(text: str) -> str:
+    if len(text) <= MAX_MCP_TOOL_TEXT_CHARS:
+        return text
+    return text[:MAX_MCP_TOOL_TEXT_CHARS] + "\n...[truncated by akid]"
+
+
+def _mcp_content_part_text(part: Any) -> str:
+    if isinstance(part, str):
+        return part
+    if not isinstance(part, dict):
+        return str(part)
+    kind = part.get("type")
+    if kind == "text" and isinstance(part.get("text"), str):
+        return part["text"]
+    if kind == "image":
+        mime = part.get("mimeType") or part.get("mime_type") or "image"
+        data = part.get("data")
+        size = len(data) if isinstance(data, str) else 0
+        return f"[image omitted: {mime}, {size} base64 chars]"
+    if kind == "resource" and isinstance(part.get("resource"), dict):
+        resource = part["resource"]
+        if isinstance(resource.get("text"), str):
+            return resource["text"]
+        return json.dumps(resource, ensure_ascii=False)
+    return json.dumps(part, ensure_ascii=False)
+
+
+def _normalize_mcp_result(raw: str) -> tuple[str, bool]:
+    text = raw.strip()
+    if not text:
+        return "MCP tool returned no output", False
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return _truncate_mcp_text(text), False
+    if not isinstance(payload, dict):
+        return _truncate_mcp_text(json.dumps(payload, ensure_ascii=False)), False
+
+    error = payload.get("error")
+    if isinstance(error, dict):
+        message = error.get("message") or json.dumps(error, ensure_ascii=False)
+        return _truncate_mcp_text(str(message)), True
+    if error:
+        return _truncate_mcp_text(str(error)), True
+
+    is_error = bool(payload.get("isError") or payload.get("is_error"))
+    parts: list[str] = []
+    content = payload.get("content")
+    if isinstance(content, list):
+        parts.extend(
+            text_part
+            for part in content
+            if (text_part := _mcp_content_part_text(part))
+        )
+    elif content is not None:
+        text_part = _mcp_content_part_text(content)
+        if text_part:
+            parts.append(text_part)
+    if not parts and payload.get("structuredContent") is not None:
+        parts.append(json.dumps(payload["structuredContent"], ensure_ascii=False))
+    if not parts:
+        parts.append(json.dumps(payload, ensure_ascii=False))
+    return _truncate_mcp_text("\n".join(parts)), is_error
 
 
 def _truncate_history_text(text: str) -> str:
@@ -474,6 +576,13 @@ class GatewayConfig:
     ps_bin: str = "ps"
     qdbus_bin: str | None = None
     avatar_path: Path | None = field(default_factory=default_avatar_path)
+    aki: AkiConfig | None = None
+    mcp_native_tools_enabled: bool = True
+    mcp_native_servers: tuple[str, ...] = ()
+    mcp_native_excluded_servers: tuple[str, ...] = ("local",)
+    mcp_native_state: Path | None = None
+    mcp_native_max_tools: int = DEFAULT_MCP_NATIVE_MAX_TOOLS
+    mcp_tool_timeout: float = DEFAULT_MCP_TOOL_TIMEOUT
 
 
 @dataclass(eq=False)
@@ -831,6 +940,7 @@ class Turn:
     assistant_parts: list[str] = field(default_factory=list)
     reasoning_parts: list[str] = field(default_factory=list)
     tool_calls_seen: set[str] = field(default_factory=set)
+    tool_results_seen: set[str] = field(default_factory=set)
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
     final_result: dict[str, Any] = field(default_factory=dict)
 
@@ -859,8 +969,15 @@ class GatewayServer:
         self._turn_tasks: set[asyncio.Task[Any]] = set()
         self._channel_tasks: set[asyncio.Task[Any]] = set()
         self._external_tool_tasks: set[asyncio.Task[Any]] = set()
+        self._backend_queue: deque[dict[str, Any]] = deque()
+        self._backend_current_batch: dict[str, Any] | None = None
         self._token_cache: tuple[float, dict[str, Any] | None, str | None] = (0.0, None, None)
         self._token_lock = asyncio.Lock()
+        self._status_event = asyncio.Event()
+        self._status_stop = asyncio.Event()
+        self._status_task: asyncio.Task[None] | None = None
+        self._probe_seen: dict[str, float] = {}
+        self._probe_rate: dict[str, float] = {}
         self._writable_lock = asyncio.Lock()
         self._mqtt_lock = asyncio.Lock()
         self._reset_lock = asyncio.Lock()
@@ -898,8 +1015,24 @@ class GatewayServer:
         self._sandbox_blocked_reason: str | None = None
         self._external_tools_registered = False
         self._external_tools_error: str | None = None
+        self._external_tools_pending = False
+        self._external_tools_ready = asyncio.Event()
+        self._external_tools_ready.set()
+        self._mcp_tools: list[dict[str, Any]] = []
+        self._mcp_tool_names: set[str] = set()
+        self._mcp_tools_error: str | None = None
+        self._mcp_native_active_servers: list[str] = []
+        self._mcp_native_excluded: set[str] = set(
+            config.mcp_native_excluded_servers
+        )
+        self.mcp_native_state_path = (
+            config.mcp_native_state or default_mcp_native_state_path()
+        )
+        self._mcp_lock = asyncio.Lock()
+        self._load_mcp_native_state()
         self.avatar_path = config.avatar_path or default_avatar_path()
         self.avatar: AvatarAsset | None = None
+        self._llm_proxy: LlmProxy | None = None
         self.avatar_error: str | None = None
         try:
             self.avatar = load_avatar(self.avatar_path)
@@ -920,6 +1053,8 @@ class GatewayServer:
                 avatar_hash=self.avatar.sha256 if self.avatar is not None else "",
                 avatar_mime=self.avatar.mime if self.avatar is not None else "",
                 on_text=self._on_channel_text,
+                on_control=self._on_channel_control,
+                on_connected=self._on_channel_connected,
                 logger=logging.getLogger("akid.channel"),
             )
         if backend_factory is None:
@@ -1019,6 +1154,16 @@ class GatewayServer:
         )
         os.chmod(path, 0o600)
         self._clear_live_context_block()
+        if self.config.aki is not None:
+            try:
+                await self._start_llm_proxy()
+            except Exception:
+                self._server.close()
+                await self._server.wait_closed()
+                self._server = None
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                raise
         sandbox_available = True
         if self.config.sandbox_enabled:
             self.writable.ensure_runtime_dirs()
@@ -1033,6 +1178,7 @@ class GatewayServer:
             self.backend.start()
         if self.channel is not None:
             await self.channel.start()
+            self._start_channel_status_loop()
         LOGGER.info("akid listening on %s", path)
 
     async def stop(self) -> None:
@@ -1063,11 +1209,26 @@ class GatewayServer:
         self.connection_set.clear()
         self.channel_conn.closed = True
         await self.channel_conn.stop()
+        self._status_stop.set()
+        self._status_event.set()
+        status_task = self._status_task
+        self._status_task = None
+        if status_task is not None:
+            status_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await status_task
         if self.channel is not None:
+            if self.channel.connected:
+                with contextlib.suppress(Exception):
+                    await asyncio.wait_for(self._publish_channel_offline(), timeout=2.0)
             with contextlib.suppress(Exception):
                 await self.channel.stop()
         with contextlib.suppress(Exception):
             await self.backend.stop()
+        if self._llm_proxy is not None:
+            with contextlib.suppress(Exception):
+                await self._llm_proxy.stop()
+            self._llm_proxy = None
         self._clear_live_context_block()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
@@ -1246,8 +1407,20 @@ class GatewayServer:
             return self._mqtt_status(), None
         if method == "aki.mqtt.set":
             return await self._mqtt_set(request.params), None
+        if method == "aki.mcp.status":
+            return self._mcp_native_status(), None
+        if method == "aki.mcp.set":
+            return await self._mcp_native_set(request.params), None
         if method == "aki.avatar.status":
             return self._avatar_health(), None
+        if method == "aki.reasoning.get":
+            return self._reasoning_status(), None
+        if method == "aki.reasoning.set":
+            return await self._reasoning_set(request.params), None
+        if method == "aki.model.get":
+            return self._model_status(), None
+        if method == "aki.model.set":
+            return await self._model_set(request.params), None
         raise RpcError(ErrorCode.METHOD_NOT_FOUND, f"unknown method: {method}")
 
     def _hello(self, conn: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -1296,12 +1469,67 @@ class GatewayServer:
     def _sandbox_health(self) -> dict[str, Any]:
         return self._writable_status()
 
+    def _load_mcp_native_state(self) -> None:
+        path = self.mcp_native_state_path
+        try:
+            excluded = read_mcp_excluded(path)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("invalid MCP native state file: %s (%s)", path, exc)
+            return
+        if excluded is None:
+            return
+        self._mcp_native_excluded = set(excluded)
+
+    def _save_mcp_native_state(self) -> None:
+        write_mcp_excluded(
+            self.mcp_native_state_path, sorted(self._mcp_native_excluded)
+        )
+
+    async def _start_llm_proxy(self) -> None:
+        aki = self.config.aki
+        if aki is None:
+            return
+        letta_home = self.config.letta_home or self.writable.letta_home
+        updated = prepare_letta(
+            aki,
+            backend_dir=self.config.backend_dir,
+            letta_home=letta_home,
+        )
+        self.config.aki = updated
+        self._llm_proxy = LlmProxy(
+            updated.proxy_host,
+            updated.proxy_port,
+            updated.proxy_token,
+            updated.enabled_models,
+            upstream_proxy=updated.upstream_proxy,
+        )
+        await self._llm_proxy.start()
+
+    def _mcp_native_status(self) -> dict[str, Any]:
+        return {
+            "enabled": self.config.mcp_native_tools_enabled,
+            "allowed_servers": list(self.config.mcp_native_servers),
+            "excluded_servers": sorted(self._mcp_native_excluded),
+            "active_servers": list(self._mcp_native_active_servers),
+            "tool_count": len(self._mcp_tools),
+            "tools": [tool["name"] for tool in self._mcp_tools],
+            "registered": self._external_tools_registered,
+            "pending": self._external_tools_pending,
+            "error": self._mcp_tools_error,
+            "state_path": str(self.mcp_native_state_path),
+        }
+
     def _external_tools_health(self) -> dict[str, Any]:
         tools = [tool["name"] for tool in self._external_tools()]
         return {
             "registered": self._external_tools_registered,
             "error": self._external_tools_error,
             "tools": tools,
+            "mcp_native_enabled": self.config.mcp_native_tools_enabled,
+            "mcp_native_tool_count": len(self._mcp_tools),
+            "mcp_native_error": self._mcp_tools_error,
+            "mcp_native_excluded": sorted(self._mcp_native_excluded),
+            "mcp_native_servers": list(self._mcp_native_active_servers),
             "require_approval": {
                 TOKIFACTOR_IMAGE_TOOL_NAME: self.config.tokifactor_image_require_approval,
                 CAMERA_TOOL_NAME: self.config.camera_require_approval,
@@ -1784,6 +2012,7 @@ class GatewayServer:
             )
         turn.state = "queued"
         self.queue.append(turn)
+        self._schedule_status_refresh()
         result = {
             "turn_id": turn.turn_id,
             "state": "queued",
@@ -1805,6 +2034,7 @@ class GatewayServer:
             return
         turn.state = "running"
         turn.started_at = time.time()
+        self._schedule_status_refresh()
         LOGGER.info("turn started id=%s queue=%s", turn.turn_id, len(self.queue))
         try:
             await self._emit(
@@ -1849,6 +2079,7 @@ class GatewayServer:
             self._policy_restarting
             or self._resetting
             or self._recompiling
+            or self._external_tools_pending
             or self.active is not None
             or not self.queue
         ):
@@ -1895,6 +2126,7 @@ class GatewayServer:
         turn.done_event.set()
         if self.active is turn:
             self.active = None
+        self._schedule_status_refresh()
         await self._maybe_start_next()
 
     async def _cancel_turn(self, turn: Turn, *, disconnect: bool = False) -> None:
@@ -1953,6 +2185,7 @@ class GatewayServer:
 
         if queued is not None:
             self.queue.remove(queued)
+            self._schedule_status_refresh()
             queued.state = "cancelled"
             queued.cancelled = True
             queued.end_sent = True
@@ -2016,6 +2249,55 @@ class GatewayServer:
             result.update(await self._restart_for_policy_change())
             return result
 
+    async def _mcp_native_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        server = require_string(params, "server").strip()
+        if not server:
+            raise RpcError(ErrorCode.INVALID_PARAMS, "server must be non-empty")
+        enabled = params.get("enabled")
+        if not isinstance(enabled, bool):
+            raise RpcError(ErrorCode.INVALID_PARAMS, "enabled must be a boolean")
+        async with self._mcp_lock:
+            before = set(self._mcp_native_excluded)
+            if enabled:
+                self._mcp_native_excluded.discard(server)
+            else:
+                self._mcp_native_excluded.add(server)
+            changed = before != self._mcp_native_excluded
+            if not changed:
+                return {
+                    "server": server,
+                    "enabled": enabled,
+                    "changed": False,
+                    "backend_restarted": False,
+                    "interrupted_turn_id": None,
+                    "backend_ready": bool(getattr(self.backend, "ready", False)),
+                    "status": self._mcp_native_status(),
+                }
+            try:
+                self._save_mcp_native_state()
+            except OSError as exc:
+                self._mcp_native_excluded = before
+                raise RpcError(
+                    ErrorCode.BACKEND_UNAVAILABLE,
+                    f"cannot persist MCP native state: {exc}",
+                ) from exc
+            if self.config.mcp_native_tools_enabled:
+                restart = await self._restart_backend_for_mcp_change()
+            else:
+                restart = {
+                    "backend_restarted": False,
+                    "interrupted_turn_id": None,
+                    "backend_ready": bool(getattr(self.backend, "ready", False)),
+                    "external_tools_pending": self._external_tools_pending,
+                }
+            return {
+                "server": server,
+                "enabled": enabled,
+                "changed": True,
+                **restart,
+                "status": self._mcp_native_status(),
+            }
+
     def _mqtt_status(self) -> dict[str, Any]:
         channel = self.channel
         return {
@@ -2030,6 +2312,183 @@ class GatewayServer:
             "state_path": str(self.mqtt_state_path),
         }
 
+    # -------------------------------------------------------- channel control
+    def _start_channel_status_loop(self) -> None:
+        if self._status_task is not None and not self._status_task.done():
+            return
+        self._status_stop.clear()
+        self._status_task = asyncio.create_task(
+            self._channel_status_loop(), name="akid-channel-status"
+        )
+
+    async def _channel_status_loop(self) -> None:
+        while not self._status_stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._status_event.wait(), timeout=CHANNEL_STATUS_INTERVAL
+                )
+            except asyncio.TimeoutError:
+                pass
+            self._status_event.clear()
+            if self._status_stop.is_set():
+                break
+            channel = self.channel
+            if channel is None or not channel.connected:
+                continue
+            try:
+                await self._publish_channel_status()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                LOGGER.warning("channel status publish failed: %s", exc)
+
+    def _schedule_status_refresh(self) -> None:
+        if self.channel is not None:
+            self._status_event.set()
+
+    async def _on_channel_connected(self) -> None:
+        self._schedule_status_refresh()
+        with contextlib.suppress(Exception):
+            await self._publish_channel_status()
+
+    @staticmethod
+    def _token_count(value: Any) -> int:
+        if isinstance(value, bool):
+            return 0
+        if isinstance(value, int):
+            return value
+        if isinstance(value, Mapping):
+            for key in ("total_tokens", "total", "tokens", "count", "context_tokens"):
+                candidate = value.get(key)
+                if isinstance(candidate, int) and not isinstance(candidate, bool):
+                    return candidate
+            numeric = [
+                item
+                for item in value.values()
+                if isinstance(item, int) and not isinstance(item, bool)
+            ]
+            if numeric:
+                return sum(numeric)
+        return 0
+
+    def _channel_capabilities(self) -> str:
+        return ",".join(
+            sorted(
+                name
+                for name, value in CAPABILITIES.items()
+                if value is True and name not in {"queue_max", "protocol_version"}
+            )
+        )
+
+    def _channel_live_metadata(self) -> dict[str, str]:
+        model, reasoning, _context_limit = self._agent_info()
+        channel = self.channel
+        channel_ready = bool(channel is not None and channel.connected)
+        return {
+            "schema": "akid.v1",
+            "agent": "aki",
+            "agentName": "Aki",
+            "protocolVersion": str(CHANNEL_PROTOCOL_VERSION),
+            "capabilities": self._channel_capabilities(),
+            "model": model or "",
+            "reasoning": reasoning or "",
+            "backendReady": "true"
+            if bool(getattr(self.backend, "ready", False))
+            else "false",
+            "channelReady": "true" if channel_ready else "false",
+        }
+
+    def _channel_control_metadata(self) -> dict[str, str]:
+        model, reasoning, context_limit = self._agent_info()
+        usage = self.last_usage if isinstance(self.last_usage, dict) else {}
+        context_tokens = self._token_count(
+            usage.get("context_tokens") or usage.get("prompt_tokens")
+        )
+        if context_limit is None:
+            value = usage.get("context_limit")
+            context_limit = value if isinstance(value, int) else None
+        cached_tokens = self._token_cache[1]
+        channel = self.channel
+        channel_ready = bool(channel is not None and channel.connected)
+        sandbox = self._sandbox_health()
+        sandbox_ready = not sandbox.get("enabled", False) or bool(
+            sandbox.get("available", False)
+        )
+        metadata = self._channel_live_metadata()
+        metadata.update(
+            {
+                "kind": "status",
+                "contextLimit": str(context_limit or 0),
+                "contextTokens": str(max(context_tokens, 0)),
+                "sandboxReady": "true" if sandbox_ready else "false",
+                "queueDepth": str(len(self.queue)),
+                "activeTurn": "true" if self.active is not None else "false",
+                "pendingApprovals": str(len(self.approvals)),
+                "uptimeS": str(int(max(0.0, time.time() - self.started_at))),
+                "memoryTokens": str(self._token_count(cached_tokens)),
+            }
+        )
+        return metadata
+
+    async def _publish_channel_control(
+        self, text: str, metadata: Mapping[str, Any]
+    ) -> bool:
+        channel = self.channel
+        if channel is None or not channel.connected:
+            return False
+        await channel.publish_control(text, metadata)
+        return True
+
+    async def _publish_channel_status(self) -> None:
+        await self._publish_channel_control(
+            "Aki status", self._channel_control_metadata()
+        )
+
+    async def _publish_channel_presence(self, probe_id: str) -> None:
+        metadata = self._channel_live_metadata()
+        metadata.update({"kind": "presence", "probeId": probe_id})
+        await self._publish_channel_control("Aki is online", metadata)
+
+    async def _publish_channel_offline(self) -> None:
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "offline",
+            "agent": "aki",
+            "agentName": "Aki",
+            "protocolVersion": str(CHANNEL_PROTOCOL_VERSION),
+        }
+        await self._publish_channel_control("Aki is offline", metadata)
+
+    async def _on_channel_control(self, envelope: TextEnvelope) -> None:
+        metadata = envelope.metadata
+        if metadata.get("schema") != "akid.v1":
+            return
+        if envelope.sender_id and envelope.sender_id == self.config.mqtt_sender_id:
+            return
+        if metadata.get("kind") != "probe":
+            return
+        if metadata.get("protocolVersion") != str(CHANNEL_PROTOCOL_VERSION):
+            return
+        probe_id = str(metadata.get("probeId") or "").strip()
+        if not probe_id or not envelope.text.strip():
+            return
+        now = time.monotonic()
+        cutoff = now - CHANNEL_PROBE_SEEN_TTL
+        self._probe_seen = {
+            key: value for key, value in self._probe_seen.items() if value >= cutoff
+        }
+        self._probe_rate = {
+            key: value for key, value in self._probe_rate.items() if value >= cutoff
+        }
+        if probe_id in self._probe_seen:
+            return
+        sender_key = envelope.sender_id or envelope.sender or "unknown"
+        if now - self._probe_rate.get(sender_key, float("-inf")) < CHANNEL_PROBE_RATE_LIMIT:
+            return
+        self._probe_seen[probe_id] = now
+        self._probe_rate[sender_key] = now
+        await self._publish_channel_presence(probe_id)
+
     async def _mqtt_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
         host = require_string(params, "host")
         host = host.strip()
@@ -2040,7 +2499,7 @@ class GatewayServer:
             if self.channel is None:
                 raise RpcError(
                     ErrorCode.INVALID_PARAMS,
-                    "MQTT channel is disabled; enable AKI_MQTT_ENABLED first",
+                    "MQTT channel is disabled; set [mqtt] enabled = true in ~/.aki/aki.conf",
                 )
             try:
                 save_mqtt_server(host, port, self.mqtt_state_path)
@@ -2062,6 +2521,8 @@ class GatewayServer:
                 sender_name=self.config.mqtt_sender_name,
                 sender_id=self.config.mqtt_sender_id,
                 on_text=self._on_channel_text,
+                on_control=self._on_channel_control,
+                on_connected=self._on_channel_connected,
                 logger=logging.getLogger("akid.channel"),
             )
             self.channel = new_channel
@@ -2080,6 +2541,303 @@ class GatewayServer:
                 new_channel.connected,
             )
             return result
+
+    def _reload_model_catalog(self) -> None:
+        aki = self.config.aki
+        path = getattr(aki, "path", None) if aki is not None else None
+        if not path:
+            return
+        try:
+            loaded = load_config(Path(path))
+        except (OSError, ValueError) as exc:
+            raise RpcError(ErrorCode.INTERNAL_ERROR, f"cannot read aki.conf: {exc}") from exc
+        self.config.aki = loaded
+        if self._llm_proxy is not None:
+            self._llm_proxy.routes = {
+                route.model_id: route for route in loaded.enabled_models
+            }
+
+    def _model_catalog(self) -> list[dict[str, str]]:
+        aki = self.config.aki
+        routes = () if aki is None else tuple(getattr(aki, "enabled_models", ()))
+        return [
+            {
+                "id": route.model_id,
+                "handle": f"aki/{route.model_id}",
+                "upstream": route.upstream_name,
+                "upstream_model": route.upstream_model,
+            }
+            for route in routes
+        ]
+
+    def _model_status(self) -> dict[str, Any]:
+        self._reload_model_catalog()
+        model, _effort, _context = self._agent_info()
+        return {"model": model, "models": self._model_catalog()}
+
+    def _normalize_model_id(self, raw: str) -> str:
+        text = raw.strip()
+        if text.startswith("aki/"):
+            text = text[4:]
+        if not text or "/" in text:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                "model must be a configured id, for example gemini-3.8-flash",
+            )
+        return text
+
+    async def _model_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        raw = params.get("model")
+        if not isinstance(raw, str) or not raw.strip():
+            raise RpcError(ErrorCode.INVALID_PARAMS, "model must be a string")
+        self._reload_model_catalog()
+        model_id = self._normalize_model_id(raw)
+        catalog = self._model_catalog()
+        known = {item["id"] for item in catalog}
+        if model_id not in known:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                f"model must be one of: {', '.join(item['id'] for item in catalog)}",
+                {"models": catalog},
+            )
+        handle = f"aki/{model_id}"
+        active_route = None
+        if self.config.aki is not None:
+            active_route = next(
+                (route for route in self.config.aki.enabled_models if route.model_id == model_id),
+                None,
+            )
+        previous = self._write_agent_model(
+            handle,
+            context_window=getattr(active_route, "context_window", None),
+            max_tokens=getattr(active_route, "max_tokens", None),
+        )
+        changed = previous != handle
+        if changed and hasattr(self.config.aki, "proxy_base_url"):
+            letta_home = self.config.letta_home or self.writable.letta_home
+            write_provider_mod(letta_home, self.config.aki)
+        restart = (
+            await self._restart_backend_for_mcp_change(
+                code="MODEL_CHANGED",
+                message="model changed; restarting backend",
+                finish_reason="model_restart",
+                finish_message="backend restarted for model change",
+            )
+            if changed
+            else {
+                "backend_restarted": False,
+                "interrupted_turn_id": None,
+                "backend_ready": bool(getattr(self.backend, "ready", False)),
+            }
+        )
+        status = self._model_status()
+        status.update(
+            {
+                "changed": changed,
+                "backend_restarted": restart.get("backend_restarted", False),
+                "interrupted_turn_id": restart.get("interrupted_turn_id"),
+                "backend_ready": restart.get("backend_ready", False),
+            }
+        )
+        return status
+
+    def _write_agent_model(
+        self,
+        handle: str,
+        *,
+        context_window: int | None = None,
+        max_tokens: int | None = None,
+    ) -> str | None:
+        target, data = self._agent_record()
+        previous = data.get("model")
+        data["model"] = handle
+        settings = data.get("model_settings")
+        if not isinstance(settings, dict):
+            settings = {}
+            data["model_settings"] = settings
+        settings["provider_type"] = "aki"
+        if context_window is not None:
+            settings["context_window_limit"] = context_window
+        if max_tokens is not None:
+            settings["max_tokens"] = max_tokens
+        atomic_write(target, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return previous if isinstance(previous, str) else None
+
+    def _agent_record(self) -> tuple[Path, dict[str, Any]]:
+        agent_id = self.config.agent_id
+        agents = self.config.backend_dir / "agents"
+        if agents.is_dir():
+            for path in agents.glob("*.json"):
+                try:
+                    loaded = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(loaded, dict) and loaded.get("id") == agent_id:
+                    return path, loaded
+        raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "agent file is missing")
+
+    def _active_model_route(self, model: str | None):
+        aki = self.config.aki
+        if aki is None or not model:
+            return None
+        model_id = model.split("/", 1)[1] if "/" in model else model
+        for route in aki.enabled_models:
+            if route.model_id == model_id:
+                return route
+        return None
+
+    def _reasoning_status(self) -> dict[str, Any]:
+        model, effort, _context = self._agent_info()
+        allowed = supported_reasoning_efforts(self._active_model_route(model))
+        return {
+            "model": model,
+            "effort": effort or DEFAULT_REASONING_EFFORT,
+            "default": DEFAULT_REASONING_EFFORT,
+            "allowed": list(allowed),
+        }
+
+    def _write_reasoning_effort(self, effort: str) -> str | None:
+        target, data = self._agent_record()
+        settings = data.get("model_settings")
+        if not isinstance(settings, dict):
+            settings = {}
+            data["model_settings"] = settings
+        previous = settings.get("reasoning_effort")
+        if not isinstance(previous, str):
+            nested = settings.get("reasoning")
+            previous = nested.get("reasoning_effort") if isinstance(nested, dict) else None
+        settings["reasoning_effort"] = effort
+        nested = settings.get("reasoning")
+        if not isinstance(nested, dict):
+            nested = {}
+        nested["reasoning_effort"] = effort
+        settings["reasoning"] = nested
+        atomic_write(target, json.dumps(data, ensure_ascii=False, indent=2) + "\n")
+        return previous if isinstance(previous, str) else None
+
+    async def _reasoning_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        raw = params.get("effort", DEFAULT_REASONING_EFFORT)
+        if not isinstance(raw, str) or not raw.strip():
+            raise RpcError(ErrorCode.INVALID_PARAMS, "effort must be a string")
+        effort = raw.strip().lower()
+        model, _current, _context = self._agent_info()
+        allowed = supported_reasoning_efforts(self._active_model_route(model))
+        if effort not in allowed:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                f"reasoning effort must be one of: {', '.join(allowed)}",
+                {"allowed": list(allowed)},
+            )
+        previous = self._write_reasoning_effort(effort)
+        changed = previous != effort
+        restart = (
+            await self._restart_backend_for_mcp_change(
+                code="REASONING_CHANGED",
+                message="reasoning effort changed; restarting backend",
+                finish_reason="reasoning_restart",
+                finish_message="backend restarted for reasoning effort change",
+            )
+            if changed
+            else {
+                "backend_restarted": False,
+                "interrupted_turn_id": None,
+                "backend_ready": bool(getattr(self.backend, "ready", False)),
+            }
+        )
+        status = self._reasoning_status()
+        status.update(
+            {
+                "changed": changed,
+                "backend_restarted": restart.get("backend_restarted", False),
+                "interrupted_turn_id": restart.get("interrupted_turn_id"),
+                "backend_ready": restart.get("backend_ready", False),
+            }
+        )
+        return status
+
+    async def _restart_backend_for_mcp_change(
+        self,
+        *,
+        code: str = "MCP_POLICY_CHANGED",
+        message: str = "MCP native tool policy changed; restarting backend",
+        finish_reason: str = "mcp_restart",
+        finish_message: str = "backend restarted for MCP native tool policy change",
+    ) -> dict[str, Any]:
+        if not bool(getattr(self.backend, "ready", False)):
+            return {
+                "backend_restarted": False,
+                "interrupted_turn_id": None,
+                "backend_ready": False,
+                "external_tools_pending": self._external_tools_pending,
+            }
+        self._policy_restarting = True
+        try:
+            return await self._restart_backend_for_mcp_change_locked(
+                code=code,
+                message=message,
+                finish_reason=finish_reason,
+                finish_message=finish_message,
+            )
+        finally:
+            self._policy_restarting = False
+            if bool(getattr(self.backend, "ready", False)):
+                await self._maybe_start_next()
+
+    async def _restart_backend_for_mcp_change_locked(
+        self,
+        *,
+        code: str = "MCP_POLICY_CHANGED",
+        message: str = "MCP native tool policy changed; restarting backend",
+        finish_reason: str = "mcp_restart",
+        finish_message: str = "backend restarted for MCP native tool policy change",
+    ) -> dict[str, Any]:
+        interrupted_turn_id: str | None = None
+        turn = self.active
+        if turn is not None and not turn.end_sent:
+            interrupted_turn_id = turn.turn_id
+            turn.cancelled = True
+            for approval in list(self.approvals.values()):
+                if approval.turn is turn and not approval.future.done():
+                    approval.future.set_result((False, message))
+            await self._emit(turn, "error", {"code": code, "message": message})
+            await self._finish_turn(
+                turn,
+                finish_reason,
+                {"interrupted": True, "message": finish_message},
+            )
+
+        try:
+            with contextlib.suppress(Exception):
+                await self.backend.stop()
+            self.backend.start()
+            ready = await self._wait_backend_ready(20.0)
+        except Exception as exc:
+            LOGGER.exception("backend restart failed after MCP native tool policy change")
+            raise RpcError(
+                ErrorCode.BACKEND_UNAVAILABLE,
+                f"backend restart failed: {exc}",
+                {"interrupted_turn_id": interrupted_turn_id, "backend_ready": False},
+            ) from exc
+        if not ready:
+            raise RpcError(
+                ErrorCode.BACKEND_UNAVAILABLE,
+                "backend did not become ready",
+                {
+                    "interrupted_turn_id": interrupted_turn_id,
+                    "backend_ready": False,
+                    "backend_error": getattr(self.backend, "last_error", None),
+                },
+            )
+        try:
+            await asyncio.wait_for(self._external_tools_ready.wait(), timeout=15.0)
+        except asyncio.TimeoutError:
+            LOGGER.warning("MCP native tool registration still pending after restart")
+        return {
+            "backend_restarted": True,
+            "interrupted_turn_id": interrupted_turn_id,
+            "backend_ready": True,
+            "external_tools_pending": self._external_tools_pending,
+        }
 
     async def _restart_for_policy_change(self) -> dict[str, Any]:
         if not self.config.sandbox_enabled:
@@ -2296,6 +3054,7 @@ class GatewayServer:
             return
         turn.state = "queued"
         self.queue.append(turn)
+        self._schedule_status_refresh()
 
     def _schedule_channel_notice(self, text: str) -> None:
         self._schedule_channel_publish(text, final=False)
@@ -2357,18 +3116,38 @@ class GatewayServer:
             },
         )
 
+    async def _emit_tool_result_once(
+        self, turn: Turn, tool_call_id: str, data: Mapping[str, Any]
+    ) -> None:
+        key = str(tool_call_id or "")
+        if key:
+            if key in turn.tool_results_seen:
+                return
+            turn.tool_results_seen.add(key)
+        await self._emit(turn, "tool_result", data)
+
     # -------------------------------------------------------------- backend rx
     async def _on_backend_ready(self, payload: dict[str, Any]) -> None:
         LOGGER.info("backend ready conversation=%s", payload.get("conversation_id"))
+        self._reset_backend_queue_state()
         self._external_tools_registered = False
         self._external_tools_error = None
-        await self._maybe_start_next()
-        if self._external_tools():
+        self._mcp_tools = []
+        self._mcp_tool_names = set()
+        self._mcp_tools_error = None
+        self._external_tools_ready.clear()
+        self._external_tools_pending = bool(
+            self.config.mcp_native_tools_enabled or self._external_tools()
+        )
+        if self._external_tools_pending:
             task = asyncio.create_task(
-                self._register_external_tools(), name="register-external-tools"
+                self._prepare_external_tools(), name="prepare-external-tools"
             )
             self._external_tool_tasks.add(task)
             task.add_done_callback(self._external_tool_tasks.discard)
+        else:
+            self._external_tools_ready.set()
+            await self._maybe_start_next()
 
     def _external_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = []
@@ -2378,7 +3157,121 @@ class GatewayServer:
             tools.append(SCREENSHOT_TOOL)
         if self.channel is not None:
             tools.append(TOKIFACTOR_IMAGE_TOOL)
+        tools.extend(self._mcp_tools)
         return tools
+
+    async def _prepare_external_tools(self) -> None:
+        try:
+            if self.config.mcp_native_tools_enabled:
+                await self._discover_mcp_tools()
+            if self._external_tools():
+                await self._register_external_tools()
+        except Exception:
+            LOGGER.exception("external tool preparation failed")
+        finally:
+            self._external_tools_pending = False
+            self._external_tools_ready.set()
+            await self._maybe_start_next()
+
+    async def _discover_mcp_tools(self) -> None:
+        self._mcp_tools = []
+        self._mcp_tool_names = set()
+        self._mcp_tools_error = None
+        self._mcp_native_active_servers = []
+        try:
+            servers = await self._run_letta_json_value(
+                ["mcp", "list", "--agent", self.config.agent_id], timeout=10.0
+            )
+        except Exception as exc:
+            self._mcp_tools_error = str(exc)
+            LOGGER.warning("MCP server discovery failed: %s", exc)
+            return
+        if not isinstance(servers, list):
+            self._mcp_tools_error = "letta mcp list returned unexpected JSON"
+            LOGGER.warning(self._mcp_tools_error)
+            return
+
+        all_names = [
+            str(server.get("name"))
+            for server in servers
+            if isinstance(server, dict) and server.get("name")
+        ]
+        allowed = set(self.config.mcp_native_servers)
+        names = [
+            name
+            for name in all_names
+            if (not allowed or name in allowed)
+            and name not in self._mcp_native_excluded
+        ]
+        self._mcp_native_active_servers = list(names)
+        if not names:
+            return
+
+        discovered: dict[str, dict[str, Any]] = {}
+        for server_name in names:
+            try:
+                raw_tools = await self._run_letta_json_value(
+                    [
+                        "mcp",
+                        "tools",
+                        server_name,
+                        "--full",
+                        "--agent",
+                        self.config.agent_id,
+                    ],
+                    timeout=10.0,
+                )
+            except Exception as exc:
+                LOGGER.warning(
+                    "MCP tool discovery failed server=%s: %s", server_name, exc
+                )
+                continue
+            if not isinstance(raw_tools, list):
+                continue
+            for item in raw_tools:
+                spec = self._mcp_tool_spec(item, server_name)
+                if spec is not None:
+                    discovered[spec["name"]] = spec
+
+        tools = list(discovered.values())
+        limit = max(0, self.config.mcp_native_max_tools)
+        if limit:
+            tools = tools[:limit]
+        else:
+            tools = []
+        self._mcp_tools = tools
+        self._mcp_tool_names = {tool["name"] for tool in tools}
+        LOGGER.info(
+            "discovered MCP native tools count=%s servers=%s",
+            len(tools),
+            ",".join(names),
+        )
+
+    def _mcp_tool_spec(
+        self, item: Any, server_name: str
+    ) -> dict[str, Any] | None:
+        if not isinstance(item, dict):
+            return None
+        name = str(item.get("name") or "").strip()
+        if not name.startswith(MCP_TOOL_PREFIX) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{1,64}", name
+        ):
+            return None
+        schema = item.get("inputSchema")
+        if not isinstance(schema, dict):
+            schema = {"type": "object", "properties": {}}
+        description = str(item.get("description") or "").strip()
+        if not description:
+            description = f"MCP tool {name} from {server_name}."
+        return {
+            "name": name,
+            "label": name,
+            "description": description,
+            "parameters": schema,
+            "auto_background": False,
+            "timeout_ms": max(1000, int(self.config.mcp_tool_timeout * 1000)),
+            "mcp_server": server_name,
+        }
 
     async def _register_external_tools(self) -> None:
         tools = self._external_tools()
@@ -2411,8 +3304,11 @@ class GatewayServer:
                 await asyncio.sleep(1.0)
 
     async def _on_backend_exit(self, returncode: int | None, detail: str | None) -> None:
+        self._reset_backend_queue_state()
         self._external_tools_registered = False
         self._external_tools_error = "backend exited"
+        self._external_tools_pending = False
+        self._external_tools_ready.set()
         turn = self.active
         if turn is not None and not turn.end_sent:
             await self._emit(
@@ -2425,10 +3321,92 @@ class GatewayServer:
             )
             await self._finish_turn(turn, "backend_error", {"returncode": returncode})
 
+    def _reset_backend_queue_state(self) -> None:
+        self._backend_queue.clear()
+        self._backend_current_batch = None
+
+    def _track_backend_queue_item(self, message: Mapping[str, Any]) -> None:
+        item_id = str(message.get("item_id") or "")
+        if not item_id:
+            return
+        self._backend_queue.append(
+            {
+                "id": item_id,
+                "client_message_id": str(message.get("client_message_id") or ""),
+                "source": str(message.get("source") or ""),
+                "kind": str(message.get("kind") or ""),
+            }
+        )
+
+    def _track_backend_queue_batch(self, message: Mapping[str, Any]) -> None:
+        raw_ids = message.get("item_ids")
+        item_ids = (
+            [str(value) for value in raw_ids] if isinstance(raw_ids, list) else []
+        )
+        try:
+            merged_count = max(0, int(message.get("merged_count") or 0))
+        except (TypeError, ValueError):
+            merged_count = 0
+
+        observed: list[dict[str, Any]] = []
+        if item_ids:
+            wanted = set(item_ids)
+            remaining: deque[dict[str, Any]] = deque()
+            for item in self._backend_queue:
+                if item["id"] in wanted:
+                    observed.append(item)
+                    wanted.discard(item["id"])
+                else:
+                    remaining.append(item)
+            self._backend_queue = remaining
+        if not observed and merged_count:
+            for _ in range(min(merged_count, len(self._backend_queue))):
+                observed.append(self._backend_queue.popleft())
+
+        missing = max(0, merged_count - len(observed))
+        if not observed and missing == 0:
+            self._backend_current_batch = None
+            return
+        # If the batch references items we never saw enqueued, assume it may
+        # contain a user message so a legitimate turn result is never dropped.
+        has_user = bool(missing) or any(
+            item.get("source") == "user" for item in observed
+        )
+        self._backend_current_batch = {
+            "batch_id": str(message.get("batch_id") or ""),
+            "items": observed,
+            "has_user": has_user,
+            "merged_count": merged_count,
+            "missing": missing,
+        }
+        LOGGER.debug(
+            "backend queue batch id=%s merged=%s observed=%s missing=%s has_user=%s",
+            self._backend_current_batch["batch_id"],
+            merged_count,
+            len(observed),
+            missing,
+            has_user,
+        )
+
+    def _backend_batch_is_internal(self) -> bool:
+        batch = self._backend_current_batch
+        return batch is not None and not bool(batch.get("has_user"))
+
     async def _on_backend_message(self, message: dict[str, Any]) -> None:
         if message.get("type") == "stream_event" and isinstance(message.get("event"), dict):
             message = message["event"]
         message_type = message.get("type")
+
+        if message_type == "queue_item_enqueued":
+            self._track_backend_queue_item(message)
+            return
+        if message_type == "queue_batch_dequeued":
+            self._track_backend_queue_batch(message)
+            return
+        if message_type == "queue_cleared":
+            self._reset_backend_queue_state()
+            return
+
         if message_type == "control_request":
             request = message.get("request") or {}
             if request.get("subtype") == "can_use_tool":
@@ -2442,7 +3420,34 @@ class GatewayServer:
             return
 
         turn = self.active
+        if message_type == "result":
+            batch = self._backend_current_batch
+            self._backend_current_batch = None
+            if batch is not None and not bool(batch.get("has_user")):
+                LOGGER.info(
+                    "ignoring backend result for internal batch id=%s items=%s",
+                    batch.get("batch_id"),
+                    ",".join(
+                        str(item.get("kind") or item.get("source") or "?")
+                        for item in batch.get("items", [])
+                    ),
+                )
+                return
+            if turn is None or turn.end_sent:
+                return
+            turn.final_result = dict(message)
+            reason = "cancelled" if message.get("stop_reason") == "cancelled" else "completed"
+            if message.get("subtype") == "error" and reason != "cancelled":
+                reason = "error"
+            await self._finish_turn(turn, reason)
+            return
+
         if turn is None or turn.end_sent:
+            return
+        if self._backend_batch_is_internal():
+            # Task notifications and cron prompts run as backend-internal
+            # turns. Their stream output must not be attributed to the user
+            # turn waiting behind them in the queue.
             return
         inner_type = message.get("message_type") or message_type
 
@@ -2471,9 +3476,9 @@ class GatewayServer:
                 )
             return
         if inner_type == "tool_return_message":
-            await self._emit(
+            await self._emit_tool_result_once(
                 turn,
-                "tool_result",
+                str(message.get("tool_call_id") or ""),
                 {
                     "tool_call_id": message.get("tool_call_id"),
                     "status": message.get("status"),
@@ -2499,6 +3504,7 @@ class GatewayServer:
             }
             self.last_usage = usage
             await self._emit(turn, "usage", usage)
+            self._schedule_status_refresh()
             return
         if inner_type == "event_message" and message.get("event_type") == "compaction":
             await self._emit(
@@ -2525,13 +3531,6 @@ class GatewayServer:
                 },
             )
             return
-        if message_type == "result":
-            turn.final_result = dict(message)
-            reason = "cancelled" if message.get("stop_reason") == "cancelled" else "completed"
-            if message.get("subtype") == "error" and reason != "cancelled":
-                reason = "error"
-            await self._finish_turn(turn, reason)
-            return
 
     async def _handle_tool_request(self, message: dict[str, Any]) -> None:
         turn = self.active
@@ -2544,6 +3543,18 @@ class GatewayServer:
         tool_name = str(request.get("tool_name") or "unknown")
         tool_call_id = str(request.get("tool_call_id") or request_id)
         tool_input = request.get("input")
+
+        if self._backend_batch_is_internal():
+            if tool_is_safe(tool_name) or (
+                tool_name == "Bash"
+                and self.config.sandbox_enabled
+                and self._sandbox_blocked_reason is None
+            ):
+                await self._safe_allow(request_id)
+            else:
+                await self._safe_deny(request_id, "internal backend turn")
+            return
+
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
 
         if (
@@ -2594,6 +3605,7 @@ class GatewayServer:
             tool_call_id=tool_call_id,
         )
         self.approvals[approval_id] = approval
+        self._schedule_status_refresh()
         data: dict[str, Any] = {
             "approval_id": approval_id,
             "tool_name": tool_name,
@@ -2626,6 +3638,7 @@ class GatewayServer:
             allow, reason = False, "turn cancelled"
         finally:
             self.approvals.pop(approval_id, None)
+            self._schedule_status_refresh()
         decision = "timeout" if timed_out else ("allow" if allow else "deny")
         await self._emit(
             turn,
@@ -2668,6 +3681,20 @@ class GatewayServer:
                 tool_call_id, "external tool requires an active turn", True
             )
             return
+        if not isinstance(tool_input, dict):
+            await self._send_external_result(
+                tool_call_id, "external tool input must be an object", True
+            )
+            return
+        if self._backend_batch_is_internal():
+            await self._send_external_result(
+                tool_call_id, "external tool is not available in an internal backend turn", True
+            )
+            return
+        if tool_name.startswith(MCP_TOOL_PREFIX):
+            await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
+            await self._handle_mcp_tool(turn, tool_call_id, tool_name, tool_input)
+            return
         if tool_name not in (
             TOKIFACTOR_IMAGE_TOOL_NAME,
             CAMERA_TOOL_NAME,
@@ -2675,11 +3702,6 @@ class GatewayServer:
         ):
             text = f"unknown external tool: {tool_name}"
             await self._send_external_result(tool_call_id, text, True)
-            return
-        if not isinstance(tool_input, dict):
-            await self._send_external_result(
-                tool_call_id, "external tool input must be an object", True
-            )
             return
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
         if tool_name == TOKIFACTOR_IMAGE_TOOL_NAME:
@@ -2696,9 +3718,9 @@ class GatewayServer:
     async def _external_tool_failure(
         self, turn: Turn, tool_call_id: str, text: str
     ) -> None:
-        await self._emit(
+        await self._emit_tool_result_once(
             turn,
-            "tool_result",
+            tool_call_id,
             {"tool_call_id": tool_call_id, "status": "error", "tool_return": text},
         )
         await self._send_external_result(tool_call_id, text, True)
@@ -2706,12 +3728,82 @@ class GatewayServer:
     async def _external_tool_success(
         self, turn: Turn, tool_call_id: str, text: str
     ) -> None:
-        await self._emit(
+        await self._emit_tool_result_once(
             turn,
-            "tool_result",
+            tool_call_id,
             {"tool_call_id": tool_call_id, "status": "success", "tool_return": text},
         )
         await self._send_external_result(tool_call_id, text, False)
+
+    async def _handle_mcp_tool(
+        self,
+        turn: Turn,
+        tool_call_id: str,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        if tool_name not in self._mcp_tool_names:
+            await self._external_tool_failure(
+                turn, tool_call_id, f"unknown MCP tool: {tool_name}"
+            )
+            return
+        try:
+            text, is_error = await self._call_mcp_tool(tool_name, tool_input)
+        except Exception as exc:
+            LOGGER.warning("MCP tool call failed tool=%s error=%s", tool_name, exc)
+            await self._external_tool_failure(
+                turn, tool_call_id, f"MCP tool call failed: {exc}"
+            )
+            return
+        if is_error:
+            await self._external_tool_failure(turn, tool_call_id, text)
+        else:
+            await self._external_tool_success(turn, tool_call_id, text)
+
+    async def _call_mcp_tool(
+        self, tool_name: str, arguments: Mapping[str, Any]
+    ) -> tuple[str, bool]:
+        payload = json.dumps(dict(arguments), ensure_ascii=False)
+        command = [
+            self.config.letta_bin,
+            "mcp",
+            "call",
+            tool_name,
+            "--args-file",
+            "-",
+            "--agent",
+            self.config.agent_id,
+        ]
+        proc: asyncio.subprocess.Process | None = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *command,
+                cwd=str(self.config.cwd),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(payload.encode("utf-8")),
+                timeout=self.config.mcp_tool_timeout,
+            )
+        except asyncio.TimeoutError as exc:
+            if proc is not None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+                    await proc.wait()
+            raise RuntimeError(
+                f"MCP tool timed out after {self.config.mcp_tool_timeout:g}s"
+            ) from exc
+        except OSError as exc:
+            raise RuntimeError(f"failed to start letta mcp: {exc}") from exc
+
+        stdout_text = stdout.decode("utf-8", "replace")
+        stderr_text = stderr.decode("utf-8", "replace").strip()
+        if proc.returncode != 0:
+            detail = (stderr_text or stdout_text.strip() or f"exit code {proc.returncode}")
+            return _truncate_mcp_text(f"MCP tool failed: {detail}"), True
+        return _normalize_mcp_result(stdout_text)
 
     async def _handle_tokifactor_image_tool(
         self,
@@ -3847,7 +4939,13 @@ class GatewayServer:
         return messages[:limit], has_more
 
     # ----------------------------------------------------------------- memory
-    async def _run_letta_json(self, args: list[str], timeout: float = 20.0) -> dict[str, Any]:
+    async def _run_letta_json_value(
+        self,
+        args: list[str],
+        timeout: float = 20.0,
+        *,
+        label: str = "letta command",
+    ) -> Any:
         command = [self.config.letta_bin, *args]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -3858,18 +4956,23 @@ class GatewayServer:
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except (OSError, asyncio.TimeoutError) as exc:
-            raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "letta command failed") from exc
+            raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, f"{label} failed") from exc
         if proc.returncode != 0:
             detail = stderr.decode("utf-8", "replace").strip()[:300]
             raise RpcError(
                 ErrorCode.BACKEND_UNAVAILABLE,
-                "letta memory command failed",
+                f"{label} failed",
                 {"detail": detail} if detail else None,
             )
         try:
-            data = json.loads(stdout.decode("utf-8"))
+            return json.loads(stdout.decode("utf-8"))
         except ValueError as exc:
             raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "letta returned invalid JSON") from exc
+
+    async def _run_letta_json(self, args: list[str], timeout: float = 20.0) -> dict[str, Any]:
+        data = await self._run_letta_json_value(
+            args, timeout=timeout, label="letta memory command"
+        )
         if not isinstance(data, dict):
             raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "letta returned unexpected JSON")
         return data
@@ -4038,71 +5141,35 @@ async def _serve(config: GatewayConfig) -> None:
 
 
 def build_config_from_env() -> GatewayConfig:
-    mqtt_enabled = os.environ.get("AKI_MQTT_ENABLED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    explicit_config = os.environ.get("AKI_CONFIG")
+    config_path = (
+        Path(explicit_config).expanduser()
+        if explicit_config
+        else Path.home() / ".aki" / "aki.conf"
     )
-    sandbox_enabled = os.environ.get("AKI_SANDBOX_ENABLED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
+    migrate_from = None
+    if not explicit_config and not config_path.exists():
+        migrate_from = legacy_state_dir()
+    aki = ensure_config(config_path, migrate_from=migrate_from)
+    if os.environ.get("AKI_SOCKET"):
+        socket_path = Path(os.environ["AKI_SOCKET"]).expanduser()
+    elif aki.socket:
+        socket_path = Path(aki.socket).expanduser()
+    else:
+        socket_path = default_socket_path()
     image_require_approval = os.environ.get(
         "AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
-    camera_enabled = os.environ.get("AKI_CAMERA_ENABLED", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-    camera_require_approval = os.environ.get(
-        "AKI_CAMERA_REQUIRE_APPROVAL", "1"
-    ).strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-    screenshot_enabled = os.environ.get(
-        "AKI_SCREENSHOT_ENABLED", "1"
-    ).strip().lower() not in ("0", "false", "no", "off")
-    screenshot_require_approval = os.environ.get(
-        "AKI_SCREENSHOT_REQUIRE_APPROVAL", "0"
-    ).strip().lower() in ("1", "true", "yes", "on")
-    live_context_enabled = os.environ.get(
-        "AKI_LIVE_CONTEXT_ENABLED", "1"
-    ).strip().lower() not in ("0", "false", "no", "off")
-    try:
-        live_context_budget_tokens = clamp_budget_tokens(
-            int(
-                os.environ.get(
-                    "AKI_LIVE_CONTEXT_BUDGET_TOKENS",
-                    str(DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS),
-                )
-            )
-        )
-    except ValueError:
-        live_context_budget_tokens = DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS
-    mqtt_state = (
-        Path(os.environ["AKI_MQTT_STATE"]).expanduser()
-        if os.environ.get("AKI_MQTT_STATE")
-        else None
-    )
-    persisted_host, persisted_port = load_mqtt_server(mqtt_state)
-    env_port = os.environ.get("AKI_MQTT_PORT")
-    mqtt_host = persisted_host or os.environ.get("AKI_MQTT_HOST") or DEFAULT_MQTT_HOST
-    mqtt_port = persisted_port or (
-        int(env_port) if env_port else DEFAULT_MQTT_PORT
+    mcp_native_servers = tuple(
+        name.strip()
+        for name in os.environ.get("AKI_MCP_NATIVE_SERVERS", "").split(",")
+        if name.strip()
     )
     return GatewayConfig(
-        socket_path=default_socket_path(),
-        agent_id=os.environ.get("AKI_AGENT_ID", DEFAULT_AGENT_ID),
-        conversation_id=os.environ.get("AKI_CONVERSATION_ID", DEFAULT_CONVERSATION_ID),
-        letta_bin=os.environ.get("AKI_LETTA_BIN", "letta"),
+        socket_path=socket_path,
+        agent_id=aki.agent_id,
+        conversation_id=aki.conversation,
+        letta_bin=aki.letta_bin,
         cwd=Path(os.environ.get("AKI_CWD", Path.cwd())),
         memory_dir=(Path(os.environ["AKI_MEMORY_DIR"]).expanduser() if os.environ.get("AKI_MEMORY_DIR") else None),
         backup_dir=(Path(os.environ["AKI_BACKUP_DIR"]).expanduser() if os.environ.get("AKI_BACKUP_DIR") else None),
@@ -4111,70 +5178,55 @@ def build_config_from_env() -> GatewayConfig:
         approval_timeout=float(
             os.environ.get("AKI_APPROVAL_TIMEOUT", DEFAULT_APPROVAL_TIMEOUT)
         ),
-        mqtt_enabled=mqtt_enabled,
-        mqtt_host=mqtt_host,
-        mqtt_port=mqtt_port,
-        mqtt_topic=os.environ.get("AKI_MQTT_TOPIC", TEXT_TOPIC),
-        mqtt_magic=os.environ.get("AKI_MQTT_MAGIC", DEFAULT_MAGIC),
+        mqtt_enabled=aki.mqtt_enabled,
+        mqtt_host=aki.mqtt_host,
+        mqtt_port=aki.mqtt_port,
+        mqtt_topic=aki.mqtt_topic,
+        mqtt_magic=aki.mqtt_magic,
         mqtt_sender_name=os.environ.get("AKI_MQTT_SENDER_NAME", "akid"),
         mqtt_sender_id=os.environ.get("AKI_MQTT_SENDER_ID", "akid"),
-        mqtt_state=mqtt_state,
-        sandbox_enabled=sandbox_enabled,
+        mqtt_state=config_path,
+        sandbox_enabled=aki.sandbox,
         bwrap_bin=os.environ.get("AKI_BWRAP_BIN", "bwrap"),
-        writable_state=(
-            Path(os.environ["AKI_WRITABLE_STATE"]).expanduser()
-            if os.environ.get("AKI_WRITABLE_STATE")
-            else None
-        ),
+        writable_state=config_path,
         letta_home=(
             Path(os.environ["LETTA_HOME"]).expanduser()
             if os.environ.get("LETTA_HOME")
             else None
         ),
         tokifactor_image_require_approval=image_require_approval,
-        camera_enabled=camera_enabled,
-        camera_require_approval=camera_require_approval,
-        camera_device=os.environ.get("AKI_CAMERA_DEVICE", "/dev/video0"),
-        camera_width=int(os.environ.get("AKI_CAMERA_WIDTH", "1280")),
-        camera_height=int(os.environ.get("AKI_CAMERA_HEIGHT", "720")),
-        camera_output_dir=(
-            Path(os.environ["AKI_CAMERA_OUTPUT_DIR"]).expanduser()
-            if os.environ.get("AKI_CAMERA_OUTPUT_DIR")
-            else None
-        ),
+        camera_enabled=aki.camera_enabled,
+        camera_require_approval=aki.camera_require_approval,
+        camera_device=aki.camera_device,
+        camera_width=aki.camera_width,
+        camera_height=aki.camera_height,
+        camera_output_dir=Path(aki.camera_output_dir),
         ffmpeg_bin=os.environ.get("AKI_FFMPEG_BIN", "ffmpeg"),
         ffprobe_bin=(os.environ.get("AKI_FFPROBE_BIN", "ffprobe").strip() or None),
-        screenshot_enabled=screenshot_enabled,
-        screenshot_require_approval=screenshot_require_approval,
+        screenshot_enabled=aki.screenshot_enabled,
+        screenshot_require_approval=aki.screenshot_require_approval,
         grim_bin=os.environ.get("AKI_GRIM_BIN", "grim"),
         spectacle_bin=os.environ.get("AKI_SPECTACLE_BIN", "spectacle"),
-        screenshot_output_dir=(
-            Path(os.environ["AKI_SCREENSHOT_OUTPUT_DIR"]).expanduser()
-            if os.environ.get("AKI_SCREENSHOT_OUTPUT_DIR")
-            else None
-        ),
-        screenshot_wayland_display=(
-            os.environ.get("AKI_SCREENSHOT_WAYLAND_DISPLAY", "").strip() or None
-        ),
-        live_context_enabled=live_context_enabled,
-        live_context_budget_tokens=live_context_budget_tokens,
+        screenshot_output_dir=Path(aki.screenshot_output_dir),
+        screenshot_wayland_display=aki.screenshot_wayland_display or None,
+        live_context_enabled=aki.live_enabled,
+        live_context_budget_tokens=clamp_budget_tokens(aki.live_budget_tokens),
+        mcp_native_tools_enabled=aki.mcp_native_tools,
+        mcp_native_servers=mcp_native_servers,
+        mcp_native_excluded_servers=aki.mcp_excluded,
+        mcp_native_state=config_path,
+        mcp_native_max_tools=aki.mcp_max_tools,
+        mcp_tool_timeout=aki.mcp_timeout,
         zsh_history_path=(
             Path(os.environ["AKI_ZSH_HISTORY"]).expanduser()
             if os.environ.get("AKI_ZSH_HISTORY")
             else None
         ),
-        live_context_timeout=float(
-            os.environ.get(
-                "AKI_LIVE_CONTEXT_TIMEOUT", DEFAULT_LIVE_CONTEXT_TIMEOUT
-            )
-        ),
+        live_context_timeout=aki.live_timeout,
         ps_bin=os.environ.get("AKI_PS_BIN", "ps"),
         qdbus_bin=(os.environ.get("AKI_QDBUS_BIN", "").strip() or None),
-        avatar_path=(
-            Path(os.environ["AKI_AVATAR_PATH"]).expanduser()
-            if os.environ.get("AKI_AVATAR_PATH")
-            else default_avatar_path()
-        ),
+        avatar_path=Path(aki.avatar_path).expanduser() if aki.avatar_path else default_avatar_path(),
+        aki=aki,
     )
 
 

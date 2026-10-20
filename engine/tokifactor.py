@@ -1,9 +1,11 @@
-"""Wire compatibility with tokifactor's public-MQTT text channel.
+"""Wire compatibility with tokifactor's MQTT text and control channels.
 
 tokifactor publishes UTF-8 Base64 of ``nonce || AES-GCM-SIV(ciphertext)`` on
 ``tokifactor/text``.  The key is HKDF-SHA256(magic_string, fixed salt,
 ``P2P_CHANNEL_V1``).  Short texts are a JSON TextEnvelope; longer texts are
 TextChunk JSON fragments containing independently encrypted slices.
+``tokifactor/control`` uses the same envelope encryption for probe, presence,
+status, and offline messages.
 """
 
 from __future__ import annotations
@@ -56,6 +58,7 @@ MAX_INBOUND_CHUNK_BYTES = 2 * 1024 * 1024
 INCOMPLETE_TIMEOUT_S = 5.0
 PICTURE_TOPIC = "tokifactor/picture"
 AVATAR_TOPIC = "tokifactor/avatar"
+CONTROL_TOPIC = "tokifactor/control"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 STRUCTURED_FIELDS = (
     "schema",
@@ -73,6 +76,23 @@ STRUCTURED_FIELDS = (
     "timeoutS",
     "details",
     "decision",
+    "probeId",
+    "protocolVersion",
+    "agent",
+    "agentName",
+    "model",
+    "reasoning",
+    "capabilities",
+    "backendReady",
+    "channelReady",
+    "sandboxReady",
+    "contextLimit",
+    "contextTokens",
+    "queueDepth",
+    "activeTurn",
+    "pendingApprovals",
+    "uptimeS",
+    "memoryTokens",
 )
 
 

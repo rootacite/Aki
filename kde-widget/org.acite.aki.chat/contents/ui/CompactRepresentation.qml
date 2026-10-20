@@ -48,6 +48,6 @@ Item {
 
     MouseArea {
         anchors.fill: parent
-        onClicked: root.plasmoidItem.expanded = !root.plasmoidItem.expanded
+        onClicked: root.plasmoidItem.openChatWindow()
     }
 }

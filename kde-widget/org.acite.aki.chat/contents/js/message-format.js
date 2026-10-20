@@ -17,6 +17,31 @@ function contentText(content) {
     return parts.join("");
 }
 
+function toStringValue(value) {
+    if (value === undefined || value === null)
+        return "";
+    if (typeof value === "string")
+        return value;
+    if (Array.isArray(value)) {
+        var text = contentText(value);
+        if (text)
+            return text;
+        try {
+            return JSON.stringify(value);
+        } catch (error) {
+            return String(value);
+        }
+    }
+    if (typeof value === "object") {
+        try {
+            return JSON.stringify(value, null, 2);
+        } catch (error) {
+            return String(value);
+        }
+    }
+    return String(value);
+}
+
 function stripSystemReminders(text) {
     if (!text)
         return "";
@@ -56,7 +81,7 @@ function normalizeMessage(message) {
             messageId: message.id || "",
             role: "assistant",
             kind: "reasoning",
-            reasoning: message.reasoning || "",
+            reasoning: toStringValue(message.reasoning),
             timestamp: timestamp,
             streaming: false,
             collapsed: true,
@@ -84,9 +109,9 @@ function normalizeMessage(message) {
             messageId: message.id || "",
             role: "tool",
             kind: "tool",
-            toolName: call.name || "unknown",
-            toolCallId: call.tool_call_id || call.id || "",
-            toolArgs: call.arguments,
+            toolName: toStringValue(call.name || "unknown"),
+            toolCallId: toStringValue(call.tool_call_id || call.id || ""),
+            toolArgs: formatToolArgs(call.arguments),
             toolResult: "",
             status: "requested",
             timestamp: timestamp,
@@ -99,11 +124,11 @@ function normalizeMessage(message) {
             messageId: message.id || "",
             role: "tool",
             kind: "tool",
-            toolName: "",
-            toolCallId: message.tool_call_id || "",
+            toolName: toStringValue(message.tool_name || ""),
+            toolCallId: toStringValue(message.tool_call_id || ""),
             toolArgs: "",
-            toolResult: message.tool_return || "",
-            status: message.status || "success",
+            toolResult: toolResultText(message.tool_return),
+            status: toStringValue(message.status || "success"),
             timestamp: timestamp,
             streaming: false,
             collapsed: false
@@ -132,6 +157,19 @@ function normalizeMessage(message) {
         };
     }
     return null;
+}
+
+function toolResultText(value) {
+    if (value === undefined || value === null)
+        return "";
+    if (typeof value === "string")
+        return value;
+    if (Array.isArray(value)) {
+        var text = contentText(value);
+        if (text)
+            return text;
+    }
+    return formatToolArgs(value);
 }
 
 function parseMarkdownBlocks(text) {

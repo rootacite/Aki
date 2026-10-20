@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Window
 import QtQuick.Layouts
 import QtWebSockets
 import org.kde.kirigami as Kirigami
@@ -36,34 +37,81 @@ PlasmoidItem {
     property var pendingApprovals: []
     property var statusInfo: ({})
     property var lastUsage: ({})
+    property var chatWindow: null
     property string clientName: "aki-plasmoid-" + Math.random().toString(36).slice(2, 8)
     property alias chatModel: messageModel
 
+    property var rowDefaults: ({
+        messageId: "",
+        role: "",
+        kind: "",
+        text: "",
+        reasoning: "",
+        toolName: "",
+        toolCallId: "",
+        toolArgs: "",
+        toolResult: "",
+        status: "",
+        timestamp: 0,
+        streaming: false,
+        collapsed: false,
+        source: "",
+        approvalId: "",
+        toolInput: "",
+        timeoutS: 0,
+        turnId: ""
+    })
+    property var stringRoleKeys: ({
+        messageId: true,
+        role: true,
+        kind: true,
+        text: true,
+        reasoning: true,
+        toolName: true,
+        toolCallId: true,
+        toolArgs: true,
+        toolResult: true,
+        status: true,
+        source: true,
+        approvalId: true,
+        toolInput: true,
+        turnId: true
+    })
+    property var numberRoleKeys: ({
+        timestamp: true,
+        timeoutS: true
+    })
+    property var boolRoleKeys: ({
+        streaming: true,
+        collapsed: true
+    })
+
     readonly property string bridgeUrl: BridgeConfig.url()
 
+    function coerceRowValue(key, value) {
+        if (stringRoleKeys[key])
+            return MessageFormat.toStringValue(value);
+        if (numberRoleKeys[key]) {
+            var number = Number(value);
+            return isNaN(number) ? 0 : number;
+        }
+        if (boolRoleKeys[key])
+            return value === true;
+        return value;
+    }
+
     function baseRow(item) {
-        var row = {
-            messageId: "",
-            role: "",
-            kind: "",
-            text: "",
-            reasoning: "",
-            toolName: "",
-            toolCallId: "",
-            toolArgs: "",
-            toolResult: "",
-            status: "",
-            timestamp: 0,
-            streaming: false,
-            collapsed: false,
-            source: "",
-            approvalId: "",
-            toolInput: "",
-            timeoutS: 0,
-            turnId: ""
-        };
-        for (var key in item)
-            row[key] = item[key];
+        var row = {};
+        for (var defaultKey in rowDefaults)
+            row[defaultKey] = rowDefaults[defaultKey];
+        if (item) {
+            for (var itemKey in item) {
+                if (Object.prototype.hasOwnProperty.call(rowDefaults, itemKey))
+                    row[itemKey] = item[itemKey];
+            }
+        }
+        for (var rowKey in row)
+            row[rowKey] = coerceRowValue(rowKey, row[rowKey]);
         return row;
     }
 
@@ -78,8 +126,11 @@ PlasmoidItem {
     function updateModelItem(index, patch) {
         if (index < 0 || index >= chatModel.count)
             return;
-        for (var key in patch)
-            chatModel.setProperty(index, key, patch[key]);
+        for (var key in patch) {
+            if (!Object.prototype.hasOwnProperty.call(rowDefaults, key))
+                continue;
+            chatModel.setProperty(index, key, coerceRowValue(key, patch[key]));
+        }
     }
 
     function findModelIndex(key, value) {
@@ -240,6 +291,18 @@ PlasmoidItem {
         socket.active = false;
         reconnectDelay = 1000;
         startBridge();
+    }
+
+    function openChatWindow() {
+        if (!chatWindow)
+            chatWindow = chatWindowComponent.createObject(root);
+        if (!chatWindow) {
+            lastError = "无法打开 Aki 聊天窗口";
+            return;
+        }
+        chatWindow.show();
+        chatWindow.raise();
+        chatWindow.requestActivate();
     }
 
     function sendHello() {
@@ -433,7 +496,7 @@ PlasmoidItem {
             if (name)
                 patch.toolName = name;
             if (args !== undefined && args !== null)
-                patch.toolArgs = args;
+                patch.toolArgs = MessageFormat.formatToolArgs(args);
             updateModelItem(index, patch);
             return;
         }
@@ -442,7 +505,7 @@ PlasmoidItem {
             kind: "tool",
             toolName: name || "tool",
             toolCallId: toolCallId,
-            toolArgs: args,
+            toolArgs: MessageFormat.formatToolArgs(args),
             status: status,
             timestamp: Date.now(),
             turnId: activeTurnId
@@ -453,7 +516,7 @@ PlasmoidItem {
         var index = findModelIndex("toolCallId", toolCallId);
         if (index >= 0) {
             updateModelItem(index, {
-                toolResult: result || "",
+                toolResult: MessageFormat.toolResultText(result),
                 status: status || "success"
             });
         } else {
@@ -461,7 +524,7 @@ PlasmoidItem {
                 role: "tool",
                 kind: "tool",
                 toolCallId: toolCallId,
-                toolResult: result || "",
+                toolResult: MessageFormat.toolResultText(result),
                 status: status || "success",
                 timestamp: Date.now(),
                 turnId: activeTurnId
@@ -494,10 +557,10 @@ PlasmoidItem {
         var item = {
             role: "tool",
             kind: "approval",
-            approvalId: data.approval_id || "",
-            toolCallId: data.tool_call_id || "",
-            toolName: data.tool_name || "tool",
-            toolInput: data.input,
+            approvalId: MessageFormat.toStringValue(data.approval_id || ""),
+            toolCallId: MessageFormat.toStringValue(data.tool_call_id || ""),
+            toolName: MessageFormat.toStringValue(data.tool_name || "tool"),
+            toolInput: MessageFormat.formatToolArgs(data.input),
             status: "pending",
             timeoutS: data.timeout_s || 60,
             timestamp: Date.now(),
@@ -541,7 +604,7 @@ PlasmoidItem {
         appendModelItem({
             role: "system",
             kind: "notice",
-            text: text,
+            text: MessageFormat.toStringValue(text),
             timestamp: Date.now(),
             turnId: activeTurnId
         });
@@ -587,13 +650,13 @@ PlasmoidItem {
             streamAssistantIndex = -1;
             streamReasoningIndex = -1;
         } else if (type === "assistant_delta") {
-            var text = data.text || "";
+        var text = MessageFormat.toStringValue(data.text || "");
             if (data.reasoning)
                 ensureReasoningItem(text);
             else
                 ensureAssistantItem(text);
         } else if (type === "assistant_message") {
-            finalizeAssistant(data.content || data.text || "");
+            finalizeAssistant(MessageFormat.toStringValue(data.content || data.text || ""));
         } else if (type === "tool_call") {
             upsertTool(data.tool_call_id || "", data.name || "tool", data.arguments, "running");
         } else if (type === "tool_result") {
@@ -607,7 +670,7 @@ PlasmoidItem {
             addNotice("上下文已压缩");
         } else if (type === "error") {
             var message = data.message || data.code || "unknown error";
-            lastError = String(message);
+            lastError = MessageFormat.toStringValue(message);
             addNotice("错误：" + message);
         } else if (type === "turn_end") {
             finishTurn(data);
@@ -674,8 +737,31 @@ PlasmoidItem {
         unreadCount: root.unreadCount
     }
 
-    fullRepresentation: FullRepresentation {
-        chatRoot: root
+    fullRepresentation: Item {
+        implicitWidth: 1
+        implicitHeight: 1
+    }
+
+    Component {
+        id: chatWindowComponent
+
+        Window {
+            width: 440
+            height: 700
+            minimumWidth: 360
+            minimumHeight: 480
+            visible: false
+            title: "Aki"
+            color: Kirigami.Theme.backgroundColor
+
+            Item {
+                anchors.fill: parent
+                FullRepresentation {
+                    anchors.fill: parent
+                    chatRoot: root
+                }
+            }
+        }
     }
 
     Component.onCompleted: startBridge()

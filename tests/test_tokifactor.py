@@ -79,6 +79,38 @@ class TokifactorWireTests(unittest.TestCase):
         self.assertEqual(decoded.metadata, metadata)
         self.assertIn('"schema":"akid.v1"', encode_envelope(envelope))
 
+    def test_control_status_envelope_round_trip(self) -> None:
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "status",
+            "agent": "aki",
+            "agentName": "Aki",
+            "model": "aki/deepseek-flash",
+            "reasoning": "low",
+            "capabilities": "approvals,history",
+            "protocolVersion": "1",
+            "contextLimit": "400000",
+            "contextTokens": "1234",
+            "backendReady": "true",
+            "channelReady": "true",
+            "sandboxReady": "true",
+            "queueDepth": "2",
+            "activeTurn": "true",
+            "pendingApprovals": "1",
+            "uptimeS": "60",
+            "memoryTokens": "42",
+        }
+        envelope = TextEnvelope(
+            sender="akid",
+            text="Aki status",
+            sender_id="akid",
+            metadata=metadata,
+        )
+        decoded = decode_envelope(encode_envelope(envelope))
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded.metadata, metadata)
+
     def test_avatar_envelope_round_trip(self) -> None:
         have = encode_avatar_have("akid", "abc123", "ZW5jcnlwdGVk")
         parsed = parse_avatar_envelope(have)

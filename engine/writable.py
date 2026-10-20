@@ -2,16 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from engine.aki_config import default_config_path, read_writable, write_writable
 from engine.protocol import ErrorCode, RpcError
 
 STATE_VERSION = 1
@@ -23,10 +22,9 @@ def _iso_now() -> str:
 
 
 def default_state_path(home: Path | None = None) -> Path:
-    configured = os.environ.get("AKI_WRITABLE_STATE")
-    if configured:
-        return Path(configured).expanduser()
-    return (home or Path.home()) / ".local" / "share" / "aki" / "writable-dirs.json"
+    if home is not None and not os.environ.get("AKI_CONFIG"):
+        return home / ".aki" / "aki.conf"
+    return default_config_path(home)
 
 
 def default_letta_home(home: Path | None = None) -> Path:
@@ -126,27 +124,13 @@ class WritableRegistry:
             self._refresh_invalid()
             return
         try:
-            data = json.loads(self.state_path.read_text("utf-8"))
+            revision, roots = read_writable(self.state_path)
         except (OSError, ValueError) as exc:
             self.last_error = f"cannot read writable registry: {exc}"
             return
-        if not isinstance(data, dict):
-            self.last_error = "writable registry is not a JSON object"
-            return
-        revision = data.get("revision", 0)
-        self.revision = revision if isinstance(revision, int) and revision >= 0 else 0
-        roots = data.get("roots", [])
-        if isinstance(roots, list):
-            for item in roots:
-                if isinstance(item, str):
-                    self._roots.append(RegisteredRoot(path=item, added_at=""))
-                elif isinstance(item, dict) and isinstance(item.get("path"), str):
-                    self._roots.append(
-                        RegisteredRoot(
-                            path=item["path"],
-                            added_at=str(item.get("added_at") or ""),
-                        )
-                    )
+        self.revision = revision
+        for item in roots:
+            self._roots.append(RegisteredRoot(path=item, added_at=""))
         self._refresh_invalid()
 
     def ensure_runtime_dirs(self) -> None:
@@ -283,30 +267,11 @@ class WritableRegistry:
 
     def save(self) -> None:
         self.ensure_runtime_dirs()
-        payload = {
-            "version": STATE_VERSION,
-            "revision": self.revision,
-            "roots": [
-                {"path": entry.path, "added_at": entry.added_at} for entry in self._roots
-            ],
-        }
-        fd, temp_name = tempfile.mkstemp(
-            prefix=".writable-dirs.", dir=str(self.state_path.parent), text=True
+        write_writable(
+            self.state_path,
+            [entry.path for entry in self._roots],
+            self.revision,
         )
-        try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(payload, handle, ensure_ascii=False, indent=2)
-                handle.write("\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_name, self.state_path)
-            os.chmod(self.state_path, 0o600)
-        finally:
-            try:
-                os.unlink(temp_name)
-            except FileNotFoundError:
-                pass
 
     def effective_roots(self) -> list[Path]:
         roots = [*self.defaults, *self.internal, *sorted(self._valid_paths)]

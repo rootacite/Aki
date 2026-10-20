@@ -15,10 +15,11 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from engine.akid import GatewayConfig, GatewayServer, _b64url
+from engine.akid import GatewayConfig, GatewayServer, _b64url, _normalize_mcp_result
 from engine.letta_process import LettaProcess
 from engine.live_context import WindowInfo
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
+from engine.tokifactor import TextEnvelope
 from tests.fake_mqtt_broker import FakeMqttBroker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -49,6 +50,8 @@ class FakeChannel:
         self.published: list[tuple[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.images: list[dict[str, Any]] = []
+        self.control: list[tuple[str, dict[str, str]]] = []
+        self.connected = True
 
     async def start(self) -> None:
         return
@@ -68,6 +71,10 @@ class FakeChannel:
 
     async def publish_notice(self, text: str) -> None:
         self.published.append(("notice", text))
+
+    async def publish_control(self, text: str, metadata: dict[str, str]) -> None:
+        payload = {str(key): str(value) for key, value in metadata.items()}
+        self.control.append((text, payload))
 
     async def publish_approval(self, data: dict) -> None:
         self.published.append(("approval", data))
@@ -284,6 +291,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         memory_dir: Path | None = None,
         cwd: Path | None = None,
         backup_dir: Path | None = None,
+        mcp_native_tools_enabled: bool = False,
+        mcp_native_excluded_servers: tuple[str, ...] = ("local",),
+        mcp_native_state: Path | None = None,
     ) -> GatewayServer:
         config = GatewayConfig(
             socket_path=self.root / "akid.sock",
@@ -324,6 +334,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             live_context_timeout=live_context_timeout,
             ps_bin=ps_bin,
             qdbus_bin=qdbus_bin,
+            mcp_native_tools_enabled=mcp_native_tools_enabled,
+            mcp_native_excluded_servers=mcp_native_excluded_servers,
+            mcp_native_state=mcp_native_state,
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -374,6 +387,281 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
         history = await client.call("aki.chat.history", {"limit": 10})
         self.assertEqual(history["messages"][0]["id"], "m1")
+
+    async def test_internal_task_notification_result_does_not_end_turn(self) -> None:
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        result = await client.call("aki.chat.send", {"message": "INTERNAL_RESULT_RACE"})
+        events = await client.collect_turn(result["turn_id"])
+        self.assertEqual([event["type"] for event in events].count("turn_end"), 1)
+        self.assertEqual(events[-1]["data"]["reason"], "completed")
+        assistant = next(
+            event for event in events if event["type"] == "assistant_message"
+        )
+        self.assertIn("real reply", assistant["data"]["content"])
+        self.assertNotIn("internal notification reply", assistant["data"]["content"])
+
+    async def test_mcp_tool_discovery_builds_native_specs(self) -> None:
+        await self.start_server(mcp_native_tools_enabled=False)
+        assert self.server is not None
+
+        async def fake_letta_json(args, timeout=20.0, *, label="letta command"):
+            if args[:2] == ["mcp", "list"]:
+                return [{"name": "tavily", "transport": "stdio"}]
+            if args[:3] == ["mcp", "tools", "tavily"]:
+                return [
+                    {
+                        "name": "mcp__tavily__tavily_search",
+                        "description": "Search the web",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"query": {"type": "string"}},
+                            "required": ["query"],
+                        },
+                    }
+                ]
+            raise AssertionError(f"unexpected letta args: {args}")
+
+        with mock.patch.object(
+            self.server, "_run_letta_json_value", new=fake_letta_json
+        ):
+            await self.server._discover_mcp_tools()
+
+        names = [tool["name"] for tool in self.server._external_tools()]
+        self.assertIn("mcp__tavily__tavily_search", names)
+        tool = next(
+            tool
+            for tool in self.server._mcp_tools
+            if tool["name"] == "mcp__tavily__tavily_search"
+        )
+        self.assertEqual(tool["parameters"]["required"], ["query"])
+        self.assertIsNone(self.server._mcp_tool_spec({"name": "bad name"}, "tavily"))
+
+    async def test_mcp_native_excludes_local_by_default(self) -> None:
+        await self.start_server(
+            mcp_native_tools_enabled=False,
+            mcp_native_excluded_servers=("local",),
+        )
+        assert self.server is not None
+
+        async def fake_letta_json(args, timeout=20.0, *, label="letta command"):
+            if args[:2] == ["mcp", "list"]:
+                return [{"name": "tavily"}, {"name": "local"}]
+            if args[:3] == ["mcp", "tools", "tavily"]:
+                return [
+                    {
+                        "name": "mcp__tavily__tavily_search",
+                        "description": "Search the web",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            if args[:3] == ["mcp", "tools", "local"]:
+                return [
+                    {
+                        "name": "mcp__local__nmap_scan",
+                        "description": "Scan ports",
+                        "inputSchema": {"type": "object", "properties": {}},
+                    }
+                ]
+            raise AssertionError(f"unexpected letta args: {args}")
+
+        with mock.patch.object(
+            self.server, "_run_letta_json_value", new=fake_letta_json
+        ):
+            await self.server._discover_mcp_tools()
+
+        self.assertEqual(self.server._mcp_native_active_servers, ["tavily"])
+        self.assertEqual(
+            self.server._mcp_tool_names, {"mcp__tavily__tavily_search"}
+        )
+
+    async def test_model_set_switches_among_enabled_models(self) -> None:
+        from types import SimpleNamespace
+
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True)
+        agent_path = agents / "test-agent.json"
+        agent_path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "model": "aki/gemini-3.8-flash",
+                    "model_settings": {"provider_type": "aki"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = await self.start_server()
+        server.config.aki = SimpleNamespace(
+            enabled_models=(
+                SimpleNamespace(
+                    model_id="gemini-3.8-flash",
+                    upstream_name="openrouter",
+                    upstream_model="google/gemini-3.8-flash",
+                    context_window=1_000_000,
+                    max_tokens=65_536,
+                ),
+                SimpleNamespace(
+                    model_id="deepseek-flash",
+                    upstream_name="deepseek",
+                    upstream_model="deepseek-flash",
+                    context_window=256_000,
+                    max_tokens=32_768,
+                ),
+            )
+        )
+        client = await self.client()
+        await client.hello()
+        listed = await client.call("aki.model.get", {})
+        self.assertEqual(listed["model"], "aki/gemini-3.8-flash")
+        self.assertEqual(
+            [item["id"] for item in listed["models"]],
+            ["gemini-3.8-flash", "deepseek-flash"],
+        )
+        changed = await client.call("aki.model.set", {"model": "deepseek-flash"})
+        self.assertTrue(changed["changed"])
+        self.assertEqual(changed["model"], "aki/deepseek-flash")
+        self.assertTrue(changed["backend_restarted"])
+        saved = json.loads(agent_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["model"], "aki/deepseek-flash")
+        self.assertEqual(saved["model_settings"]["provider_type"], "aki")
+        self.assertEqual(saved["model_settings"]["context_window_limit"], 256_000)
+        self.assertEqual(saved["model_settings"]["max_tokens"], 32_768)
+        with self.assertRaises(RpcError):
+            await client.call("aki.model.set", {"model": "grok-4.7"})
+
+    async def test_reasoning_set_persists_and_restarts(self) -> None:
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True)
+        agent_path = agents / "test-agent.json"
+        agent_path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "model": "aki/gemini-3.8-flash",
+                    "model_settings": {"reasoning_effort": "high"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        current = await client.call("aki.reasoning.get", {})
+        self.assertEqual(current["effort"], "high")
+        self.assertEqual(current["default"], "low")
+        self.assertIn("low", current["allowed"])
+        changed = await client.call("aki.reasoning.set", {"effort": "low"})
+        self.assertTrue(changed["changed"])
+        self.assertTrue(changed["backend_restarted"])
+        self.assertEqual(changed["effort"], "low")
+        saved = json.loads(agent_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["model_settings"]["reasoning_effort"], "low")
+        self.assertEqual(saved["model_settings"]["reasoning"]["reasoning_effort"], "low")
+        with self.assertRaises(RpcError):
+            await client.call("aki.reasoning.set", {"effort": "max"})
+
+    async def test_mcp_native_local_toggle_persists_and_restarts(self) -> None:
+        state_path = self.root / "mcp-native.json"
+        server = await self.start_server(
+            mcp_native_tools_enabled=False,
+            mcp_native_state=state_path,
+        )
+        client = await self.client()
+        await client.hello()
+
+        status = await client.call("aki.mcp.status", {})
+        self.assertIn("local", status["excluded_servers"])
+
+        server.config.mcp_native_tools_enabled = True
+        restart_result = {
+            "backend_restarted": True,
+            "interrupted_turn_id": None,
+            "backend_ready": True,
+            "external_tools_pending": False,
+        }
+        with mock.patch.object(
+            server,
+            "_restart_backend_for_mcp_change",
+            new=mock.AsyncMock(return_value=restart_result),
+        ) as restart:
+            enabled = await client.call(
+                "aki.mcp.set", {"server": "local", "enabled": True}
+            )
+        restart.assert_awaited_once()
+        self.assertTrue(enabled["changed"])
+        self.assertNotIn("local", enabled["status"]["excluded_servers"])
+        from engine.aki_config import read_mcp_excluded
+
+        self.assertEqual(read_mcp_excluded(state_path), ())
+
+        with mock.patch.object(
+            server,
+            "_restart_backend_for_mcp_change",
+            new=mock.AsyncMock(return_value=restart_result),
+        ):
+            disabled = await client.call(
+                "aki.mcp.set", {"server": "local", "enabled": False}
+            )
+        self.assertTrue(disabled["changed"])
+        self.assertIn("local", disabled["status"]["excluded_servers"])
+        self.assertEqual(read_mcp_excluded(state_path), ("local",))
+
+    async def test_native_mcp_tool_call_uses_external_tool_path(self) -> None:
+        server = await self.start_server(mcp_native_tools_enabled=False)
+        server._mcp_tools = [
+            {
+                "name": "mcp__tavily__tavily_search",
+                "description": "Search the web",
+                "parameters": {"type": "object", "properties": {}},
+            }
+        ]
+        server._mcp_tool_names = {"mcp__tavily__tavily_search"}
+        client = await self.client()
+        await client.hello()
+
+        with mock.patch.object(
+            server,
+            "_call_mcp_tool",
+            new=mock.AsyncMock(return_value=("native search result", False)),
+        ) as call_mcp:
+            result = await client.call("aki.chat.send", {"message": "NATIVE_MCP_TOOL"})
+            events = await client.collect_turn(result["turn_id"])
+
+        call_mcp.assert_awaited_once_with(
+            "mcp__tavily__tavily_search", {"query": "native search"}
+        )
+        tool_calls = [event for event in events if event["type"] == "tool_call"]
+        self.assertEqual(len(tool_calls), 1)
+        self.assertEqual(
+            tool_calls[0]["data"]["name"], "mcp__tavily__tavily_search"
+        )
+        tool_result = next(
+            event for event in events if event["type"] == "tool_result"
+        )
+        self.assertEqual(tool_result["data"]["status"], "success")
+        self.assertEqual(tool_result["data"]["tool_return"], "native search result")
+        assistant = next(
+            event for event in events if event["type"] == "assistant_message"
+        )
+        self.assertIn("native search result", assistant["data"]["content"])
+
+    def test_mcp_result_normalization(self) -> None:
+        text, is_error = _normalize_mcp_result(
+            json.dumps({"content": [{"type": "text", "text": "hello"}]})
+        )
+        self.assertEqual((text, is_error), ("hello", False))
+        text, is_error = _normalize_mcp_result(
+            json.dumps({"content": {"type": "text", "text": "object form"}})
+        )
+        self.assertEqual((text, is_error), ("object form", False))
+        text, is_error = _normalize_mcp_result(
+            json.dumps({"error": {"message": "boom"}})
+        )
+        self.assertEqual((text, is_error), ("boom", True))
+        text, is_error = _normalize_mcp_result("plain text")
+        self.assertEqual((text, is_error), ("plain text", False))
 
     async def test_username_get_and_set(self) -> None:
         repo = self.root / "repo"
@@ -773,6 +1061,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             agent_id="test-agent",
             memory_dir=self.memory,
             backend_dir=self.root / "backend",
+            mcp_native_tools_enabled=False,
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -802,6 +1091,138 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not call any tool", prompt)
         self.assertIn("[NO_REPLY]", prompt)
 
+    async def test_channel_control_probe_presence_dedup_and_rate_limit(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+
+        def probe(probe_id: str, sender_id: str, **extra: str) -> TextEnvelope:
+            metadata = {
+                "schema": "akid.v1",
+                "kind": "probe",
+                "protocolVersion": "1",
+                "probeId": probe_id,
+                **extra,
+            }
+            return TextEnvelope(
+                sender="tokifactor",
+                text="Aki probe",
+                sender_id=sender_id,
+                metadata=metadata,
+            )
+
+        await server._on_channel_control(probe("probe-1", "gui-1"))
+        presences = [
+            (text, metadata)
+            for text, metadata in fake_channel.control
+            if metadata.get("kind") == "presence"
+        ]
+        self.assertEqual(len(presences), 1)
+        text, metadata = presences[0]
+        self.assertEqual(text, "Aki is online")
+        self.assertEqual(metadata["kind"], "presence")
+        self.assertEqual(metadata["agent"], "aki")
+        self.assertEqual(metadata["agentName"], "Aki")
+        self.assertEqual(metadata["probeId"], "probe-1")
+        self.assertEqual(metadata["protocolVersion"], "1")
+        self.assertIn("approvals", metadata["capabilities"])
+        self.assertIn("model", metadata)
+        self.assertIn("reasoning", metadata)
+        self.assertIn(metadata["backendReady"], {"true", "false"})
+        self.assertEqual(metadata["channelReady"], "true")
+
+        await server._on_channel_control(probe("probe-1", "gui-1"))
+        self.assertEqual(
+            sum(1 for _text, meta in fake_channel.control if meta.get("kind") == "presence"),
+            1,
+        )
+        await server._on_channel_control(probe("probe-2", "gui-1"))
+        self.assertEqual(
+            sum(1 for _text, meta in fake_channel.control if meta.get("kind") == "presence"),
+            1,
+        )
+        await server._on_channel_control(probe("probe-3", "gui-2"))
+        self.assertEqual(
+            sum(1 for _text, meta in fake_channel.control if meta.get("kind") == "presence"),
+            2,
+        )
+        await server._on_channel_control(
+            probe("probe-4", "gui-3", protocolVersion="2")
+        )
+        await server._on_channel_control(
+            TextEnvelope(
+                sender="tokifactor",
+                text="",
+                sender_id="gui-3",
+                metadata={
+                    "schema": "akid.v1",
+                    "kind": "probe",
+                    "protocolVersion": "1",
+                    "probeId": "probe-5",
+                },
+            )
+        )
+        self.assertEqual(
+            sum(1 for _text, meta in fake_channel.control if meta.get("kind") == "presence"),
+            2,
+        )
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+    async def test_channel_status_metadata_is_complete(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        metadata = server._channel_control_metadata()
+        for key in (
+            "schema",
+            "kind",
+            "agent",
+            "agentName",
+            "protocolVersion",
+            "capabilities",
+            "model",
+            "reasoning",
+            "contextLimit",
+            "contextTokens",
+            "backendReady",
+            "channelReady",
+            "sandboxReady",
+            "queueDepth",
+            "activeTurn",
+            "pendingApprovals",
+            "uptimeS",
+            "memoryTokens",
+        ):
+            self.assertIn(key, metadata)
+        self.assertEqual(metadata["kind"], "status")
+        self.assertEqual(metadata["channelReady"], "true")
+        self.assertEqual(metadata["queueDepth"], "0")
+        self.assertEqual(metadata["pendingApprovals"], "0")
+        self.assertEqual(metadata["activeTurn"], "false")
+
+    async def test_channel_status_refreshes_on_turn_and_approval(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
+        )
+
+        def statuses() -> list[dict[str, str]]:
+            return [
+                metadata
+                for _text, metadata in fake_channel.control
+                if metadata.get("kind") == "status"
+            ]
+
+        await server._on_channel_text("alice", "alice-1", "hello channel")
+        await wait_until(lambda: any(item.get("activeTurn") == "false" for item in statuses()))
+        await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
+        await wait_until(lambda: bool(fake_channel.events_of("approval")))
+        await wait_until(lambda: any(item.get("pendingApprovals") == "1" for item in statuses()))
+        await server._on_channel_text("alice", "alice-1", "akid-approve")
+        await wait_until(
+            lambda: any(item.get("pendingApprovals") == "0" for item in statuses())
+        )
+
     def test_default_backend_uses_standard_permission_mode(self) -> None:
         config = GatewayConfig(
             socket_path=self.root / "perm.sock",
@@ -810,6 +1231,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             cwd=ROOT,
             memory_dir=self.memory,
             backend_dir=self.root / "backend-perm",
+            mcp_native_tools_enabled=False,
         )
         server = GatewayServer(config)
         command = server.backend.command
@@ -1751,9 +2173,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(changed["port"], broker2.port)
             self.assertTrue(changed["connected"])
             self.assertTrue(changed["persisted"])
-            saved = json.loads(state.read_text())
-            self.assertEqual(saved["host"], "127.0.0.1")
-            self.assertEqual(saved["port"], broker2.port)
+            from engine.aki_config import read_mqtt
+
+            saved_host, saved_port = read_mqtt(state)
+            self.assertEqual(saved_host, "127.0.0.1")
+            self.assertEqual(saved_port, broker2.port)
             await wait_until(lambda: server.channel is not None and server.channel.connected)
         finally:
             await server.stop()

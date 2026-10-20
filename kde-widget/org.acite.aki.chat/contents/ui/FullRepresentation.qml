@@ -7,15 +7,29 @@ import org.kde.plasma.extras as PlasmaExtras
 Item {
     id: full
     property var chatRoot
+    property string shownModel: ""
+    implicitWidth: 420
+    implicitHeight: 640
     Layout.preferredWidth: 420
     Layout.preferredHeight: 640
     Layout.minimumWidth: 360
     Layout.minimumHeight: 480
 
-    Component.onCompleted: chatRoot.onPopupOpened()
-    onVisibleChanged: {
-        if (visible)
+    Component.onCompleted: {
+        if (visible && chatRoot)
             chatRoot.onPopupOpened();
+        shownModel = chatRoot ? (chatRoot.modelName || "") : "";
+    }
+    onVisibleChanged: {
+        if (visible && chatRoot)
+            chatRoot.onPopupOpened();
+    }
+
+    Connections {
+        target: chatRoot
+        function onModelNameChanged() {
+            full.shownModel = chatRoot.modelName || "";
+        }
     }
 
     function statusText() {
@@ -94,8 +108,8 @@ Item {
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                         }
                         Text {
-                            visible: (chatRoot.modelName || "").length > 0
-                            text: "· " + chatRoot.modelName
+                            visible: full.shownModel.length > 0
+                            text: "· " + full.shownModel
                             color: Kirigami.Theme.disabledTextColor
                             font.pointSize: Kirigami.Theme.smallFont.pointSize
                         }
@@ -160,7 +174,7 @@ Item {
                 spacing: Kirigami.Units.smallSpacing
                 boundsBehavior: Flickable.StopAtBounds
                 reuseItems: true
-                cacheBuffer: 2000
+                cacheBuffer: 400
 
                 delegate: ChatMessage {
                     itemData: model

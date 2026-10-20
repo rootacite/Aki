@@ -4,7 +4,7 @@ import importlib.util
 import io
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -56,6 +56,7 @@ class WidgetInstallerTests(unittest.TestCase):
                 result = self.installer.main(
                     [
                         "--dry-run",
+                        "--allow-deprecated",
                         "--bridge-port",
                         "8765",
                         "--token-file",
@@ -68,6 +69,26 @@ class WidgetInstallerTests(unittest.TestCase):
             self.assertFalse(token_file.exists())
             self.assertFalse(endpoint_file.exists())
             self.assertIn("engine/gui_bridge.py", output.getvalue())
+
+    def test_install_requires_deprecated_flag(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            token_file = Path(tempdir) / "gui-token"
+            endpoint_file = Path(tempdir) / "gui-bridge.json"
+            error = io.StringIO()
+            with redirect_stderr(error):
+                result = self.installer.main(
+                    [
+                        "--dry-run",
+                        "--token-file",
+                        str(token_file),
+                        "--endpoint-file",
+                        str(endpoint_file),
+                    ]
+                )
+            self.assertEqual(result, 2)
+            self.assertFalse(token_file.exists())
+            self.assertFalse(endpoint_file.exists())
+            self.assertIn("tokifactor", error.getvalue())
 
 
 if __name__ == "__main__":

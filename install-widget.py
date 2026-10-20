@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the Aki Plasma widget and its local WebSocket bridge."""
+"""Install the legacy Aki Plasma widget and its local WebSocket bridge."""
 
 from __future__ import annotations
 
@@ -210,10 +210,17 @@ def status(*, unit_path: Path, endpoint_file: Path, packageroot: Path | None) ->
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Install the Aki Plasma widget")
+    parser = argparse.ArgumentParser(
+        description="Install the legacy Aki Plasma widget (use tokifactor instead)"
+    )
     parser.add_argument("--dry-run", action="store_true", help="print actions only")
     parser.add_argument("--status", action="store_true")
     parser.add_argument("--uninstall", action="store_true")
+    parser.add_argument(
+        "--allow-deprecated",
+        action="store_true",
+        help="required to install the deprecated Plasma widget",
+    )
     parser.add_argument("--bridge-port", type=int, default=DEFAULT_BRIDGE_PORT)
     parser.add_argument("--socket", default=default_socket_path())
     parser.add_argument("--token-file")
@@ -221,6 +228,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--packageroot", help="alternate kpackagetool6 package root")
     parser.add_argument("--restart-plasmashell", action="store_true")
     args = parser.parse_args(argv)
+
+    if not (args.status or args.uninstall or args.allow_deprecated):
+        print(
+            "The KDE Plasma widget is deprecated; use tokifactor for the recommended GUI. "
+            "Re-run with --allow-deprecated to install the legacy widget.",
+            file=sys.stderr,
+        )
+        return 2
 
     if os.geteuid() == 0:
         print("refusing to install a per-user widget as root", file=sys.stderr)

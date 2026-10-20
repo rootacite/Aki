@@ -31,6 +31,7 @@ class ClientCliTests(unittest.TestCase):
         shutil.copy2(ROOT / "scripts" / "sync-persona.py", self.repo_cwd / "scripts" / "sync-persona.py")
         env = os.environ.copy()
         env["AKI_REPO_CWD"] = str(self.repo_cwd)
+        env["AKI_MCP_NATIVE_STATE"] = str(self.root / "mcp-native.json")
         self.server = subprocess.Popen(
             [
                 sys.executable,
@@ -152,6 +153,33 @@ class ClientCliTests(unittest.TestCase):
             self.assertTrue(json.loads(removed.stdout)["removed"])
         finally:
             shutil.rmtree(allowed, ignore_errors=True)
+
+    def test_akictl_mcp_status_and_local_toggle(self) -> None:
+        status = self.run_akictl("mcp", "status", "--socket", str(self.socket))
+        self.assertEqual(status.returncode, 0, status.stderr)
+        payload = json.loads(status.stdout)
+        self.assertIn("local", payload["excluded_servers"])
+
+        enabled = self.run_akictl(
+            "mcp", "local", "on", "--socket", str(self.socket)
+        )
+        self.assertEqual(enabled.returncode, 0, enabled.stderr)
+        enabled_payload = json.loads(enabled.stdout)
+        self.assertTrue(enabled_payload["changed"])
+        self.assertNotIn("local", enabled_payload["status"]["excluded_servers"])
+        from engine.aki_config import read_mcp_excluded
+
+        state_path = self.root / "mcp-native.json"
+        self.assertEqual(read_mcp_excluded(state_path), ())
+
+        disabled = self.run_akictl(
+            "mcp", "local", "off", "--socket", str(self.socket)
+        )
+        self.assertEqual(disabled.returncode, 0, disabled.stderr)
+        disabled_payload = json.loads(disabled.stdout)
+        self.assertTrue(disabled_payload["changed"])
+        self.assertIn("local", disabled_payload["status"]["excluded_servers"])
+        self.assertEqual(read_mcp_excluded(state_path), ("local",))
 
     def test_akictl_reset_clears_default_conversation(self) -> None:
         conversation_dir = (

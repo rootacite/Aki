@@ -21,16 +21,19 @@ Item {
             model: MessageFormat.parseMarkdownBlocks(root.text)
             delegate: Item {
                 id: blockItem
+                readonly property string blockKind: modelData && modelData.kind ? modelData.kind : ""
+                readonly property string blockText: modelData && modelData.text ? modelData.text : ""
+                readonly property string blockLang: modelData && modelData.lang ? modelData.lang : ""
                 Layout.fillWidth: true
                 implicitHeight: blockLoader.item ? blockLoader.item.implicitHeight : 0
 
                 Loader {
                     id: blockLoader
                     width: parent.width
-                    sourceComponent: modelData.kind === "code" ? codeComponent : textComponent
+                    sourceComponent: blockItem.blockKind === "code" ? codeComponent : textComponent
                     onLoaded: {
-                        item.text = modelData.text;
-                        item.lang = modelData.lang || "";
+                        item.text = blockItem.blockText;
+                        item.lang = blockItem.blockLang;
                     }
                 }
             }

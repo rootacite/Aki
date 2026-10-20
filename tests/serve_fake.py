@@ -32,6 +32,12 @@ async def run(socket_path: Path, memory_dir: Path, writable_state: Path | None) 
         queue_max=8,
         approval_timeout=2.0,
         writable_state=writable_state,
+        mcp_native_tools_enabled=False,
+        mcp_native_state=(
+            Path(os.environ["AKI_MCP_NATIVE_STATE"]).expanduser()
+            if os.environ.get("AKI_MCP_NATIVE_STATE")
+            else None
+        ),
     )
 
     def factory(on_message, on_ready, on_exit):
