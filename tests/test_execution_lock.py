@@ -66,6 +66,8 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.assertIn("只读工具不需要锁", block)
         self.assertIn("acquire_execution_lock", block)
         self.assertIn("没有授权", block)
+        self.assertIn("除非用户主动询问", block)
+        self.assertIn("无需刻意向用户强调锁", block)
         once = apply_execution_lock_policy("BASE\n", block)
         twice = apply_execution_lock_policy(once, block)
         self.assertEqual(twice.count(f"<{EXECUTION_LOCK_TAG}"), 1)

@@ -124,7 +124,8 @@ def render_execution_lock_policy(
         "执行非只读操作。完成后调用 "
         f"`{LOCK_RELEASE_TOOL}`，turn 结束时网关也会自动释放。"
         "如果工具返回缺少锁、抢锁失败或未获授权，禁止重试同一操作；立即结束本轮"
-        "并说明需要用户指定执行者。</lock-rule>",
+        "并说明需要用户指定执行者。除非用户主动询问，否则无需刻意向用户强调锁的"
+        "获取、持有或释放状态；正常完成工作即可。</lock-rule>",
     ]
     if authorized:
         lines.append(
