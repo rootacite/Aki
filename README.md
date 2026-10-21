@@ -30,7 +30,8 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
 ## 设计取向
 
 - **本地优先。** 聊天入口只有一个 Unix socket；目录 `0700`、socket `0600`，
-  监听后校验 `SO_PEERCRED` 与当前用户 UID。模型调用另走 `127.0.0.1:7721`，只给本机 Letta 用。
+  监听后校验 `SO_PEERCRED` 与当前用户 UID。模型调用另走每个 profile 自己的 loopback
+  proxy；proxy 是独立的 `akid-proxy@.service`，不由 akid 进程拉起。
 - **一个长驻后端，一个活跃 turn。** `akid` 监督一个 Letta stream-json 子进程；多个客户端
   可以同时连接，但同一时间只有一个 turn 在跑，后续消息 FIFO 排队。
 - **审批属于发起者。** 危险工具只向该 turn 的发起客户端请求批准；超时默认拒绝该工具，
@@ -55,8 +56,8 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
   `ApplyPatch` 和未知工具需要发起客户端批准，默认 60 秒超时拒绝。
 - **tokifactor MQTT 频道。** 加密文本/图片、分片消息、头像发布、频道内审批，以及
   `akid.v1` 结构化事件。
-- **tokifactor GUI（首选）。** 在任意共享 `(broker host, port, magic)` 信道上探测 Aki；
-  只有探测成功时才显示 Aki 专用状态栏（模型、reasoning、上下文占用、队列与审批）。
+- **tokifactor GUI（首选）。** 通过 control 主题自动发现同一频道里的多个智能体；
+  顶部成员栏显示在线成员，选中成员的状态行显示模型、reasoning、上下文占用、队列与审批。
 - **KDE Plasma 6 widget（legacy）。** 保留历史分页、流式输出、Markdown、工具调用卡片、
   GUI 审批卡和系统通知，但不再推荐安装。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
@@ -70,20 +71,48 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
 ## 快速开始
 
 ```bash
-python3 install-daemon.py --dry-run          # 预览 unit，不落盘
-python3 install-daemon.py                    # 安装并启动 akid.service
+python3 install-daemon.py --dry-run          # 预览两个 unit 模板，不落盘
+python3 install-daemon.py                    # 安装 akid@.service / akid-proxy@.service
 python3 install-daemon.py --status
 python3 install-daemon.py --restart
-python3 install-daemon.py --uninstall        # 不删除 MemFS/历史
+python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/历史
 ```
 
 安装时会把 `akictl` 链接到 `~/.local/bin/akictl`（指向本仓库的 `bin/akictl`）。
 如果该路径已存在且不是本仓库的链接，安装会报错而不会覆盖；`--uninstall`
 只会移除指向本仓库的链接。
 
-akid 的设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
+默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
 
-Letta 只连接 `http://127.0.0.1:7721/v1`。akid 按请求里的模型把调用转到 conf 里的上游，并换上对应的密钥。`[proxy] upstream_proxy` 非空时，访问上游先走这台 HTTP 代理（HTTPS 用 CONNECT）；单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连，本地 llama.cpp/OpenAI 兼容服务应这样配置。留空则所有上游直连。聊天客户端仍然只走 Unix socket。
+### Profiles
+
+`~/.aki/*.conf` 中每个合法的 `<profile>.conf` 都是一个独立 profile；`aki.conf`
+对应默认 profile `aki`。profile 名必须匹配 `[a-z0-9][a-z0-9_-]{0,31}`。
+每个 profile 有独立的 agent、conversation、socket、频道身份、proxy 端口、上游模型和
+用户名状态；它们共享同一个 Letta backend，但注册不同的 provider（`aki`、`aki-<profile>`）。
+用户名保存在各自 `[gateway] username`，`set-username` 只修改当前 profile 的配置文件。
+
+```bash
+akictl profiles
+akictl aki up
+akictl fuyu up
+akictl fuyu status
+akictl fuyu chat
+akictl --profile fuyu status
+akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
+```
+
+`aki` 的默认 socket 仍是 `$XDG_RUNTIME_DIR/aki/akid.sock`；其他 profile 是
+`$XDG_RUNTIME_DIR/aki/<profile>.sock`。`AKI_CONFIG` 仍可作为默认 profile 的显式路径覆盖，
+显式 `--profile` 优先。`up` 会先校验配置、agent、conversation、socket 和 proxy 端口冲突，
+然后启动 `akid-proxy@<profile>.service`，再启动 `akid@<profile>.service`。
+
+### Loopback proxy
+
+每个 profile 的 Letta 只连接自己的 `[proxy] listen` 地址。`akid-proxy@<profile>.service`
+是独立进程，按请求里的模型把调用转到该 profile 的 `[upstream.*]`，并换上对应密钥。
+`[proxy] upstream_proxy` 非空时，访问上游先走这台 HTTP 代理（HTTPS 用 CONNECT）；
+单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连。聊天客户端仍然只走 Unix socket。
 
 ### 复用 Grok Build 的 xAI OAuth
 
@@ -142,7 +171,8 @@ Aki 的基础 prompt 是仓库内自有文件 `prompts/aki-system.md`，不再�
 python3 scripts/install-system-prompt.py --status
 python3 scripts/install-system-prompt.py --dry-run
 python3 scripts/install-system-prompt.py
-systemctl --user restart akid.service
+systemctl --user restart akid@aki.service
+systemctl --user restart akid-proxy@aki.service
 ```
 
 脚本会保留现有 core memory 和 `<aki-live-context>`，并先备份到
@@ -222,9 +252,11 @@ WebSocket 文本帧对应一个 JSON-RPC 对象，桥接只在转发到 akid 时
 ## 客户端
 
 ```bash
-akictl -p "你好"                  # 单次流式输入
+akictl -p "你好"                  # 单次流式输入（默认 profile aki）
 akictl -p "你好" --json           # 原始 NDJSON 服务端输出
 akictl                            # 流式 REPL
+akictl fuyu chat                  # 与 fuyu profile 对话
+akictl --profile fuyu -p "你好"   # 显式 profile
 bin/aki -p "你好"                 # 兼容别名
 ```
 
@@ -259,19 +291,30 @@ Aki 的名字是 Aki，中文名是秋、小秋，日语名是秋（aki）。这
 - `character/relationship.md`
 - `character/boundaries.md`
 - `character/examples.md`
-- `username.txt` — 当前对用户的称呼（默认“Master”）
+- `username.txt` — 仅作为旧版 `aki` profile 的首次迁移来源
 
-模板中用 `{{USERNAME}}` 表示称呼。同步脚本会把占位符替换成 `username.txt`
-的值，再把渲染后的内容写入 MemFS；模型看到的是最终文本，不需要自己读配置文件。
+模板中用 `{{USERNAME}}` 表示称呼。每个 profile 的当前称呼保存在
+`<profile>.conf` 的 `[gateway] username`，例如：
+
+```ini
+[gateway]
+username = Master
+```
+
+同步脚本会把占位符替换后写入该 agent 的 MemFS；模型看到的是最终文本，不需要
+自己读配置文件。不同 profile 调用 `set-username` 不会互相影响。
 
 修改称呼：
 
 ```bash
-akictl username                 # 查看当前称呼
-akictl set-username Master      # 修改、渲染并重编译当前会话
+akictl username                 # 查看默认 profile 的称呼
+akictl set-username Master      # 修改默认 profile
+akictl fuyu set-username 主人    # 只修改 fuyu profile
 ```
 
-也可以手动编辑 `userdata/username.txt`，再运行同步脚本：
+旧版 `aki` profile 在 `[gateway] username` 尚未设置时仍会读取
+`userdata/username.txt` 或旧的按 agent 状态文件作为迁移来源；首次 `set-username`
+会把结果写入 `[gateway] username`。也可以手动编辑模板迁移源，再运行同步脚本：
 
 ```bash
 python3 scripts/sync-persona.py --dry-run   # 预览
@@ -324,10 +367,22 @@ akictl reset                      # 重置 default 会话（先备份）
 
 ## tokifactor MQTT 频道
 
-akid 连接 `~/.aki/aki.conf` 中 `[mqtt]` 配置的信道，不假设固定 broker IP：
+akid 连接当前 profile 的 `[mqtt]` 配置，不假设固定 broker IP：
 
 - Broker：`[mqtt] host:port`（用户实际配置的地址；私有 broker 仅作为当前部署示例）
 - Topic：`tokifactor/text`
+- `[channel]`：`id` 是 control 协议里的 `agentId`；`name`、`aliases`、`description`
+  用于成员栏和 `@` 提及。`id` 默认回退到 Letta agent id，名称/描述默认回退到 agent 记录。
+
+所有 profile 的 akid 都通过 control 主题互相 probe/status 发现，成员按 `agentId` 去重；
+30 秒无心跳视为离线。频道文本仍会启动每个智能体的 turn，`@` 只影响模型判断是否回复。
+每条频道消息的上下文都带 `<channel-context>`、成员列表和三类提示：点名自己、点名他人、
+没有 `@`。本地 turn 不包含频道段。
+
+每个智能体实例还有一个“主动启动次数”状态，默认 4：用户新消息会重置为 4；由其他
+智能体消息触发的 turn 在第一次产生频道动作时扣 1，同一 turn 最多扣 1；为 0 时该 turn
+不产生频道输出。剩余次数通过 `<channel-context>` 的 `<initiation-budget>` 提供给模型，
+也会出现在 `aki.health` / `aki.status` 的 `agent_initiation` 字段。
 - Control topic：`tokifactor/control`
 - Magic string：`[mqtt] magic`
 
@@ -521,6 +576,7 @@ tokifactor 侧的行为：
 ## 文件布局
 
 - `engine/akid.py`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
+- `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。
 - `engine/letta_process.py`：Letta 子进程监督、崩溃重启、control request。
 - `engine/writable.py`：可写目录注册表、路径校验与 bwrap 策略。
 - `engine/avatar.py`：接口无关的头像资源（路径、MIME、SHA-256）。
@@ -531,9 +587,9 @@ tokifactor 侧的行为：
 - `engine/gui_bridge.py`：legacy GUI 专用本地 WebSocket → akid Unix socket 桥接。
 - `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
 - `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
-- `install-daemon.py`：systemd user service 安装器。
+- `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装与 legacy 迁移。
 - `scripts/sync-persona.py`：把 `userdata` 模板渲染并写入 MemFS。
-- `userdata/`：非隐私人格模板、`username.txt` 和同步清单。
+- `userdata/`：非隐私人格模板、旧版称呼迁移源和同步清单。
 - `tests/`：协议、网关、假 Letta 子进程与 CLI 端到端测试。
 
 ---
@@ -564,4 +620,5 @@ python3 -m unittest discover -v
 MQTT broker 收发、频道审批命令、bwrap 允许/拒绝写入、注册表持久化与吊销、
 沙盒不可用 fail-closed、PictureChunk 编码、external tool 注册与审批、
 图片源路径限制、MQTT 服务器持久化与热重连、`akictl` 管理命令、会话初始化、
-控制主题 probe/presence/status、probe 去重与限流、人格模板渲染以及端到端流式输出。
+控制主题 probe/presence/status、probe 去重与限流、多成员 roster 与 `@` 提及、
+profile 级用户名、profile 解析与 systemd 模板、provider 隔离、人格模板渲染以及端到端流式输出。

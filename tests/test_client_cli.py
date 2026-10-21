@@ -32,6 +32,8 @@ class ClientCliTests(unittest.TestCase):
         env = os.environ.copy()
         env["AKI_REPO_CWD"] = str(self.repo_cwd)
         env["AKI_MCP_NATIVE_STATE"] = str(self.root / "mcp-native.json")
+        env["AKI_PROFILE_CONFIG"] = str(self.root / "aki.conf")
+        env["AKI_USERNAME"] = "OldName"
         self.server = subprocess.Popen(
             [
                 sys.executable,
@@ -288,9 +290,13 @@ class ClientCliTests(unittest.TestCase):
         recompiled = self.run_akictl("recompile", "--socket", str(self.socket))
         self.assertEqual(recompiled.returncode, 0, recompiled.stderr)
         self.assertTrue(json.loads(recompiled.stdout)["recompiled"])
+        self.assertIn(
+            "username = Master",
+            (self.root / "aki.conf").read_text(encoding="utf-8"),
+        )
         self.assertEqual(
             (self.repo_cwd / "userdata" / "username.txt").read_text(encoding="utf-8"),
-            "Master\n",
+            "OldName\n",
         )
 
     def test_akictl_mqtt_status_uses_lan_default(self) -> None:

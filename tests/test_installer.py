@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -123,6 +124,87 @@ class InstallerTests(unittest.TestCase):
         ):
             self.assertIn(fragment, unit)
         self.assertNotIn("AKI_", unit)
+        self.assertIn("--profile %i", unit)
+        self.assertIn("akid-proxy@%i.service", unit)
+
+    def test_proxy_unit_is_a_separate_template(self) -> None:
+        unit = self.installer.proxy_service_unit(
+            python_bin="/usr/bin/python3",
+            repo=ROOT,
+        )
+        self.assertIn("engine/akid_proxy.py --profile %i", unit)
+        self.assertIn("Restart=on-failure", unit)
+        self.assertNotIn("akid.py", unit)
+
+    def test_install_migrates_legacy_unit_after_health_check(self) -> None:
+        home = self.root / "home"
+        units = home / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        (units / "akid.service").write_text("legacy\n", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(command, *, check=True):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), mock.patch.object(
+            self.installer, "run", side_effect=fake_run
+        ), mock.patch.object(
+            self.installer, "wait_ready", return_value=True
+        ), mock.patch.object(
+            self.installer, "ensure_conversation", return_value=self.root / "conversation"
+        ), mock.patch.object(
+            self.installer, "install_akictl", return_value=home / "bin" / "akictl"
+        ):
+            result = self.installer.main(["--profile", "aki", "--no-sandbox"])
+        self.assertEqual(result, 0)
+        self.assertIn(
+            ["systemctl", "--user", "enable", "--now", "akid-proxy@aki.service"], calls
+        )
+        self.assertIn(
+            ["systemctl", "--user", "enable", "--now", "akid@aki.service"], calls
+        )
+        self.assertIn(
+            ["systemctl", "--user", "disable", "--now", "akid.service"], calls
+        )
+        self.assertLess(
+            calls.index(["systemctl", "--user", "disable", "--now", "akid.service"]),
+            calls.index(
+                ["systemctl", "--user", "enable", "--now", "akid-proxy@aki.service"]
+            ),
+        )
+        self.assertFalse((units / "akid.service").exists())
+        self.assertTrue((units / "akid@.service").exists())
+        self.assertTrue((units / "akid-proxy@.service").exists())
+
+    def test_failed_migration_rolls_back_to_legacy_unit(self) -> None:
+        home = self.root / "home"
+        units = home / ".config" / "systemd" / "user"
+        units.mkdir(parents=True)
+        (units / "akid.service").write_text("legacy\n", encoding="utf-8")
+        calls: list[list[str]] = []
+
+        def fake_run(command, *, check=True):
+            calls.append(list(command))
+            return subprocess.CompletedProcess(command, 0, "", "")
+
+        with mock.patch.dict(os.environ, {"HOME": str(home)}, clear=False), mock.patch.object(
+            self.installer, "run", side_effect=fake_run
+        ), mock.patch.object(
+            self.installer, "wait_ready", return_value=False
+        ), mock.patch.object(
+            self.installer, "ensure_conversation", return_value=self.root / "conversation"
+        ), mock.patch.object(
+            self.installer, "install_akictl", return_value=home / "bin" / "akictl"
+        ):
+            result = self.installer.main(["--profile", "aki", "--no-sandbox"])
+        self.assertEqual(result, 1)
+        self.assertIn(
+            ["systemctl", "--user", "enable", "--now", "akid.service"], calls
+        )
+        self.assertTrue((units / "akid.service").exists())
+        self.assertFalse((units / "akid@.service").exists())
+        self.assertFalse((units / "akid-proxy@.service").exists())
 
 
 if __name__ == "__main__":

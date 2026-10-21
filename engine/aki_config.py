@@ -1,17 +1,21 @@
-"""Single user configuration file for akid: ``~/.aki/aki.conf``."""
+"""Profile-aware configuration files for akid (``~/.aki/<profile>.conf``)."""
 
 from __future__ import annotations
 
 import configparser
+import json
 import os
+import re
 import secrets
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
+DEFAULT_PROFILE = "aki"
+PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 _KNOWN_SECTIONS = {
     "gateway",
@@ -23,13 +27,33 @@ _KNOWN_SECTIONS = {
     "live",
     "avatar",
     "proxy",
+    "channel",
 }
 _APIS = {"openai-completions", "openai-responses"}
 _AUTH_PROVIDERS = {"", "grok-oauth"}
 
 
 class ConfigError(ValueError):
-    """``aki.conf`` is missing a required value or contains an invalid one."""
+    """A profile config is missing a required value or contains an invalid one."""
+
+
+def validate_profile_name(profile: str) -> str:
+    name = profile.strip()
+    if not PROFILE_PATTERN.fullmatch(name):
+        raise ConfigError(
+            "profile must match [a-z0-9][a-z0-9_-]{0,31}"
+        )
+    return name
+
+
+def provider_id_for_profile(profile: str) -> str:
+    profile = validate_profile_name(profile)
+    return DEFAULT_PROFILE if profile == DEFAULT_PROFILE else f"aki-{profile}"
+
+
+def profile_from_config_path(path: Path) -> str:
+    stem = Path(path).stem
+    return stem if PROFILE_PATTERN.fullmatch(stem) else DEFAULT_PROFILE
 
 
 @dataclass(frozen=True)
@@ -39,6 +63,16 @@ class Upstream:
     api_key: str
     use_proxy: bool = True
     auth: str = ""
+
+
+@dataclass(frozen=True)
+class ChannelIdentity:
+    """User-facing identity for one akid instance on the shared channel."""
+
+    name: str = ""
+    id: str = ""
+    aliases: tuple[str, ...] = ()
+    description: str = ""
 
 
 @dataclass(frozen=True)
@@ -64,8 +98,10 @@ class ModelRoute:
 @dataclass
 class AkiConfig:
     path: Path
+    profile: str
     agent_id: str
     conversation: str
+    username: str
     letta_bin: str
     socket: str
     sandbox: bool
@@ -100,6 +136,7 @@ class AkiConfig:
     upstream_proxy: str
     upstreams: dict[str, Upstream]
     models: tuple[ModelRoute, ...]
+    channel: ChannelIdentity = field(default_factory=ChannelIdentity)
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:
@@ -109,26 +146,150 @@ class AkiConfig:
     def proxy_base_url(self) -> str:
         return f"http://{self.proxy_host}:{self.proxy_port}/v1"
 
+    @property
+    def provider_id(self) -> str:
+        return provider_id_for_profile(self.profile)
 
-def default_config_path(home: Path | None = None) -> Path:
+    @property
+    def provider_mod_name(self) -> str:
+        return f"aki-proxy-{self.profile}.ts"
+
+
+def state_dir(home: Path | None = None) -> Path:
+    return (home or Path.home()) / ".aki"
+
+
+def default_config_path(
+    home: Path | None = None, *, profile: str | None = None
+) -> Path:
+    if profile is not None:
+        name = validate_profile_name(profile)
+        return state_dir(home) / f"{name}.conf"
     configured = os.environ.get("AKI_CONFIG")
     if configured:
         return Path(configured).expanduser()
-    return (home or Path.home()) / ".aki" / "aki.conf"
+    return state_dir(home) / f"{DEFAULT_PROFILE}.conf"
+
+
+def profile_config_path(profile: str, home: Path | None = None) -> Path:
+    return default_config_path(home, profile=profile)
+
+
+def discover_profiles(home: Path | None = None) -> dict[str, Path]:
+    """Return valid ``~/.aki/<profile>.conf`` files, keyed by profile."""
+    root = state_dir(home)
+    profiles: dict[str, Path] = {}
+    try:
+        paths = sorted(root.glob("*.conf"))
+    except OSError:
+        paths = []
+    for path in paths:
+        if not path.is_file() or not PROFILE_PATTERN.fullmatch(path.stem):
+            continue
+        profiles[path.stem] = path
+    return dict(sorted(profiles.items(), key=lambda item: (item[0] != DEFAULT_PROFILE, item[0])))
+
+
+def resolve_config_path(
+    profile: str | None = None,
+    home: Path | None = None,
+) -> tuple[str, Path]:
+    """Resolve a profile name and config path.
+
+    An explicit profile wins over ``AKI_CONFIG``; otherwise ``AKI_CONFIG`` is
+    the explicit path override and the default profile is ``aki``.
+    """
+    if profile is not None:
+        name = validate_profile_name(profile)
+        return name, profile_config_path(name, home)
+    configured = os.environ.get("AKI_CONFIG")
+    path = Path(configured).expanduser() if configured else default_config_path(home)
+    return profile_from_config_path(path), path
+
+
+def default_socket_path(
+    profile: str = DEFAULT_PROFILE, home: Path | None = None
+) -> Path:
+    configured = os.environ.get("AKI_SOCKET")
+    if configured:
+        return Path(configured).expanduser()
+    name = validate_profile_name(profile)
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        root = Path(runtime) / "aki"
+    else:
+        root = Path(f"/tmp/aki-{os.getuid()}")
+    filename = "akid.sock" if name == DEFAULT_PROFILE else f"{name}.sock"
+    return root / filename
+
+
+def default_username_path(agent_id: str, home: Path | None = None) -> Path:
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", agent_id)
+    return state_dir(home) / "usernames" / f"{safe}.txt"
+
+
+def read_agent_identity(
+    agent_id: str, home: Path | None = None
+) -> tuple[str, str]:
+    configured = os.environ.get("AKI_LETTA_BACKEND_DIR")
+    backend = (
+        Path(configured).expanduser()
+        if configured
+        else (home or Path.home()) / ".letta" / "lc-local-backend"
+    )
+    try:
+        paths = (backend / "agents").glob("*.json")
+    except OSError:
+        return "", ""
+    for path in paths:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict) or data.get("id") != agent_id:
+            continue
+        name = data.get("name")
+        description = data.get("description")
+        return (
+            name.strip() if isinstance(name, str) else "",
+            description.strip() if isinstance(description, str) else "",
+        )
+    return "", ""
 
 
 def legacy_state_dir(home: Path | None = None) -> Path:
     return (home or Path.home()) / ".local" / "share" / "aki"
 
 
-def template_text(agent_id: str = DEFAULT_AGENT_ID) -> str:
+def template_text(
+    agent_id: str = DEFAULT_AGENT_ID, *, profile: str = DEFAULT_PROFILE
+) -> str:
+    name = validate_profile_name(profile)
+    channel_name = "Aki" if name == DEFAULT_PROFILE else name.replace("-", " ").title()
+    channel_aliases = (
+        "Aki,aki,秋,小秋,秋（aki）"
+        if name == DEFAULT_PROFILE
+        else f"{channel_name},{name}"
+    )
+    channel_description = (
+        "Aki（秋 / 小秋），住在用户电脑里的赛博生命体。"
+        if name == DEFAULT_PROFILE
+        else ""
+    )
     return f"""[gateway]
 agent_id = {agent_id}
 conversation = default
+username = Master
 letta_bin = letta
-# 留空则用 $XDG_RUNTIME_DIR/aki/akid.sock
+# 留空则用 $XDG_RUNTIME_DIR/aki/akid.sock（非 aki profile 使用 <profile>.sock）
 socket =
 sandbox = true
+
+[channel]
+name = {channel_name}
+id = {profile}
+aliases = {channel_aliases}
+description = {channel_description}
 
 [mqtt]
 enabled = true
@@ -229,6 +390,10 @@ context_window = 1048576
 max_tokens = 65536
 input = text,image
 """
+
+
+def _template_for(path: Path) -> str:
+    return template_text(profile=profile_from_config_path(path))
 
 
 def atomic_write(path: Path, text: str) -> None:
@@ -362,7 +527,7 @@ def join_url(base: str, path: str) -> str:
     return base.strip().rstrip("/") + path
 
 
-def load_config(path: Path) -> AkiConfig:
+def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
     parser = _read_parser(path)
     for section in parser.sections():
         if section in _KNOWN_SECTIONS:
@@ -432,10 +597,28 @@ def load_config(path: Path) -> AkiConfig:
             )
         )
 
+    resolved_profile = validate_profile_name(profile) if profile else profile_from_config_path(path)
+    agent_id = _require(parser, "gateway", "agent_id").strip() or DEFAULT_AGENT_ID
+    username = (
+        parser.get("gateway", "username", fallback="").strip()
+        or parser.get("channel", "username", fallback="").strip()
+    )
+    channel_name = parser.get("channel", "name", fallback="").strip()
+    channel_id = parser.get("channel", "id", fallback="").strip() or agent_id
+    channel_description = parser.get("channel", "description", fallback="").strip()
+    if not channel_name or not channel_description:
+        agent_name, agent_description = read_agent_identity(agent_id)
+        channel_name = channel_name or agent_name
+        channel_description = channel_description or agent_description
+    aliases = _list(parser.get("channel", "aliases", fallback=""))
+    if channel_name and channel_name not in aliases:
+        aliases = (channel_name, *aliases)
     return AkiConfig(
         path=path,
-        agent_id=_require(parser, "gateway", "agent_id").strip() or DEFAULT_AGENT_ID,
+        profile=resolved_profile,
+        agent_id=agent_id,
         conversation=_require(parser, "gateway", "conversation").strip() or "default",
+        username=username,
         letta_bin=_require(parser, "gateway", "letta_bin").strip() or "letta",
         socket=_require(parser, "gateway", "socket").strip(),
         sandbox=_bool(parser, "gateway", "sandbox"),
@@ -470,6 +653,12 @@ def load_config(path: Path) -> AkiConfig:
         upstream_proxy=parse_upstream_proxy(parser.get("proxy", "upstream_proxy", fallback="")),
         upstreams=upstreams,
         models=tuple(models),
+        channel=ChannelIdentity(
+            name=channel_name,
+            id=channel_id,
+            aliases=aliases,
+            description=channel_description,
+        ),
     )
 
 
@@ -557,7 +746,7 @@ def read_writable(path: Path) -> tuple[int, tuple[str, ...]]:
 
 def write_writable(path: Path, dirs: list[str], revision: int) -> None:
     if not path.exists():
-        atomic_write(path, template_text())
+        atomic_write(path, _template_for(path))
     set_key(path, "writable", "revision", str(revision))
     body = "\n".join(dirs)
     set_key(path, "writable", "dirs", body)
@@ -582,7 +771,7 @@ def read_mqtt(path: Path) -> tuple[str | None, int | None]:
 
 def write_mqtt(path: Path, host: str, port: int) -> None:
     if not path.exists():
-        atomic_write(path, template_text())
+        atomic_write(path, _template_for(path))
     set_key(path, "mqtt", "host", host)
     set_key(path, "mqtt", "port", str(port))
 
@@ -598,7 +787,7 @@ def read_mcp_excluded(path: Path) -> tuple[str, ...] | None:
 
 def write_mcp_excluded(path: Path, excluded: list[str]) -> None:
     if not path.exists():
-        atomic_write(path, template_text())
+        atomic_write(path, _template_for(path))
     set_key(path, "mcp", "excluded", ", ".join(excluded))
 
 
@@ -621,15 +810,24 @@ def _move_legacy(source: Path, dest_dir: Path) -> None:
     shutil.move(str(source), str(target))
 
 
-def ensure_config(path: Path, *, migrate_from: Path | None = None, agent_id: str = DEFAULT_AGENT_ID) -> AkiConfig:
+def ensure_config(
+    path: Path,
+    *,
+    migrate_from: Path | None = None,
+    agent_id: str = DEFAULT_AGENT_ID,
+    profile: str | None = None,
+) -> AkiConfig:
     created = False
+    resolved_profile = (
+        validate_profile_name(profile) if profile else profile_from_config_path(path)
+    )
     if not path.exists():
-        atomic_write(path, template_text(agent_id))
+        atomic_write(path, template_text(agent_id, profile=resolved_profile))
         created = True
     if created and migrate_from is not None:
         _migrate_legacy(path, migrate_from)
     ensure_proxy_token(path)
-    return load_config(path)
+    return load_config(path, profile=resolved_profile)
 
 
 def _migrate_legacy(path: Path, source_dir: Path) -> None:

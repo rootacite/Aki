@@ -294,6 +294,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         mcp_native_tools_enabled: bool = False,
         mcp_native_excluded_servers: tuple[str, ...] = ("local",),
         mcp_native_state: Path | None = None,
+        username: str = "Master",
+        username_source: str = "default",
+        username_path: Path | None = None,
+        profile_config_path: Path | None = None,
     ) -> GatewayServer:
         config = GatewayConfig(
             socket_path=self.root / "akid.sock",
@@ -337,6 +341,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             mcp_native_tools_enabled=mcp_native_tools_enabled,
             mcp_native_excluded_servers=mcp_native_excluded_servers,
             mcp_native_state=mcp_native_state,
+            username=username,
+            username_source=username_source,
+            username_path=username_path,
+            profile_config_path=profile_config_path or (self.root / "aki.conf"),
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -712,11 +720,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             memory_dir=memfs,
             cwd=repo,
             backup_dir=self.root / "backups",
+            username="OldName",
+            username_source="legacy-userdata",
+            username_path=repo / "userdata" / "username.txt",
         )
         client = await self.client()
         await client.hello()
         before = await client.call("aki.username.get", {})
         self.assertEqual(before["username"], "OldName")
+        self.assertEqual(before["source"], "legacy-userdata")
         result = await client.call("aki.username.set", {"username": "Master"})
         self.assertTrue(result["changed"])
         self.assertTrue(result["recompiled"])
@@ -728,9 +740,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         after = await client.call("aki.username.get", {})
         self.assertEqual(after["username"], "Master")
         self.assertIn("Master", (memfs / "persona.md").read_text(encoding="utf-8"))
+        config_text = (self.root / "aki.conf").read_text(encoding="utf-8")
+        self.assertIn("[gateway]", config_text)
+        self.assertIn("username = Master", config_text)
         self.assertEqual(
             (repo / "userdata" / "username.txt").read_text(encoding="utf-8"),
-            "Master\n",
+            "OldName\n",
         )
         log = subprocess.check_output(
             ["git", "-C", str(memfs), "log", "-1", "--pretty=%s"], text=True
@@ -1172,6 +1187,233 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.queue, [])
         self.assertEqual(fake_channel.events, [])
 
+    async def test_channel_member_roster_and_mentions_are_contextual(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "status",
+            "protocolVersion": "1",
+            "agentId": "fuyu",
+            "agent": "fuyu",
+            "agentName": "Fuyu",
+            "description": "Fuyu <untrusted>",
+            "aliases": "Fuyu,冬",
+            "model": "aki-fuyu/deepseek-flash",
+            "reasoning": "low",
+            "backendReady": "true",
+            "channelReady": "true",
+            "queueDepth": "0",
+            "activeTurn": "false",
+            "pendingApprovals": "0",
+        }
+        await server._on_channel_control(
+            TextEnvelope(
+                sender="Fuyu",
+                text="Fuyu status",
+                sender_id="fuyu",
+                metadata=metadata,
+            )
+        )
+        await server._on_channel_control(
+            TextEnvelope(
+                sender="Aki",
+                text="self status",
+                sender_id="aki",
+                metadata={**metadata, "agentId": "aki", "agent": "aki"},
+            )
+        )
+        plain = server._channel_prompt("alice", "alice-1", "hello everyone")
+        self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain)
+        self.assertIn("Fuyu", plain)
+        self.assertIn("&lt;untrusted&gt;", plain)
+        other = server._channel_prompt("alice", "alice-1", "@冬 hello")
+        self.assertIn("提到了其他成员，没有点你", other)
+        own = server._channel_prompt("alice", "alice-1", "@秋 hello")
+        self.assertIn("用户提到了你，正在和你对话。", own)
+        self.assertNotIn("没有点你", own)
+        await server._on_channel_control(
+            TextEnvelope(
+                sender="Fuyu",
+                text="Fuyu offline",
+                sender_id="fuyu",
+                metadata={**metadata, "kind": "offline"},
+            )
+        )
+        after_offline = server._channel_prompt("alice", "alice-1", "hello")
+        self.assertNotIn("Fuyu", after_offline)
+        self.assertEqual(server.active, None)
+        self.assertEqual(fake_channel.events, [])
+
+    async def test_channel_mentions_do_not_prevent_turns(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        await server._on_channel_text("alice", "alice-1", "@Fuyu please answer")
+        await wait_until(lambda: server.active is not None or bool(fake_channel.events))
+        await wait_until(lambda: bool(fake_channel.events))
+        self.assertTrue(fake_channel.events)
+
+    async def test_agent_reply_budget_decrements_and_user_message_resets(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        self.assertEqual(server._agent_initiation_remaining, 4)
+        await server._on_channel_text("Fuyu", "fuyu", "hello from another agent")
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        self.assertEqual(server._agent_initiation_remaining, 3)
+        await server._on_channel_text("alice", "alice-1", "hello from user")
+        self.assertEqual(server._agent_initiation_remaining, 4)
+        await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
+
+    async def test_agent_reply_budget_zero_suppresses_agent_to_agent_reply(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._agent_initiation_remaining = 0
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        await server._on_channel_text("Fuyu", "fuyu", "loop continues")
+        await wait_until(lambda: server.active is None)
+        await asyncio.sleep(0.1)
+        self.assertEqual(fake_channel.events, [])
+        self.assertEqual(fake_channel.final_texts(), [])
+        self.assertEqual(server._agent_initiation_remaining, 0)
+
+    async def test_agent_initiation_is_charged_at_most_once_per_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        self.assertEqual(server._agent_initiation_remaining, 4)
+        conn = server.channel_conn
+        turn_id = "turn-budget-once"
+        await conn.send(
+            make_event(
+                turn_id,
+                1,
+                "turn_started",
+                {"origin": "mqtt", "origin_sender_id": "fuyu", "origin_is_agent": True},
+                "2026-10-21T00:00:00Z",
+            )
+        )
+        self.assertEqual(server._agent_initiation_remaining, 3)
+        await conn.send(
+            make_event(
+                turn_id,
+                2,
+                "assistant_message",
+                {"content": "first visible message", "text": "first visible message"},
+                "2026-10-21T00:00:01Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                3,
+                "assistant_message",
+                {"content": "second visible message", "text": "second visible message"},
+                "2026-10-21T00:00:02Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                4,
+                "turn_end",
+                {"reason": "completed"},
+                "2026-10-21T00:00:03Z",
+            )
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
+        self.assertEqual(server._agent_initiation_remaining, 3)
+
+    async def test_last_initiation_does_not_truncate_the_current_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._agent_initiation_remaining = 1
+        conn = server.channel_conn
+        turn_id = "turn-last-budget"
+        await conn.send(
+            make_event(
+                turn_id,
+                1,
+                "turn_started",
+                {"origin": "mqtt", "origin_sender_id": "fuyu", "origin_is_agent": True},
+                "2026-10-21T00:00:00Z",
+            )
+        )
+        self.assertEqual(server._agent_initiation_remaining, 0)
+        await conn.send(
+            make_event(
+                turn_id,
+                2,
+                "assistant_message",
+                {"content": "first part", "text": "first part"},
+                "2026-10-21T00:00:01Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                3,
+                "tool_call",
+                {"name": "Read", "tool_call_id": "tool-1"},
+                "2026-10-21T00:00:02Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                4,
+                "assistant_delta",
+                {"text": "second part"},
+                "2026-10-21T00:00:03Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                5,
+                "assistant_message",
+                {"content": "second part", "text": "second part"},
+                "2026-10-21T00:00:04Z",
+            )
+        )
+        await conn.send(
+            make_event(
+                turn_id,
+                6,
+                "turn_end",
+                {"reason": "completed"},
+                "2026-10-21T00:00:04Z",
+            )
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
+        self.assertEqual(
+            fake_channel.final_texts(),
+            ["first part", "second part"],
+        )
+        self.assertEqual(server._agent_initiation_remaining, 0)
+
+    async def test_channel_prompt_exposes_agent_initiation_budget(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        self.server._agent_initiation_remaining = 2
+        prompt = self.server._channel_prompt(
+            "Fuyu", "fuyu", "agent message", from_agent=True
+        )
+        self.assertIn('remaining="2"', prompt)
+        self.assertIn('limit="4"', prompt)
+        self.assertIn("每产生一次可见回复", prompt)
+
     async def test_channel_status_metadata_is_complete(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
@@ -1180,7 +1422,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "schema",
             "kind",
             "agent",
+            "agentId",
             "agentName",
+            "description",
+            "aliases",
             "protocolVersion",
             "capabilities",
             "model",

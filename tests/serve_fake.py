@@ -20,6 +20,18 @@ from engine.letta_process import LettaProcess
 
 async def run(socket_path: Path, memory_dir: Path, writable_state: Path | None) -> None:
     repo_cwd = Path(os.environ.get("AKI_REPO_CWD", ROOT)).expanduser()
+    username_path = (
+        Path(os.environ["AKI_USERNAME_PATH"]).expanduser()
+        if os.environ.get("AKI_USERNAME_PATH")
+        else None
+    )
+    username = os.environ.get("AKI_USERNAME", "")
+    username_source = "default"
+    if not username and username_path is not None and username_path.is_file():
+        username = username_path.read_text(encoding="utf-8").strip() or "Master"
+        username_source = "legacy-profile-file"
+    if not username:
+        username = "Master"
     config = GatewayConfig(
         socket_path=socket_path,
         agent_id="test-agent",
@@ -37,6 +49,14 @@ async def run(socket_path: Path, memory_dir: Path, writable_state: Path | None) 
             Path(os.environ["AKI_MCP_NATIVE_STATE"]).expanduser()
             if os.environ.get("AKI_MCP_NATIVE_STATE")
             else None
+        ),
+        username=username,
+        username_source=username_source,
+        username_path=username_path,
+        profile_config_path=(
+            Path(os.environ["AKI_PROFILE_CONFIG"]).expanduser()
+            if os.environ.get("AKI_PROFILE_CONFIG")
+            else socket_path.parent / "aki.conf"
         ),
     )
 

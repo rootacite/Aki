@@ -9,6 +9,7 @@ from unittest import mock
 
 from engine.akid import build_config_from_env
 from engine.live_context import (
+    ChannelMember,
     HistoryEntry,
     LiveContextSnapshot,
     ProcessInfo,
@@ -22,6 +23,8 @@ from engine.live_context import (
     parse_ps_output,
     parse_kwin_journal_line,
     parse_zsh_history_text,
+    match_channel_mentions,
+    render_channel_context,
     render_live_context,
 )
 
@@ -79,6 +82,87 @@ class LiveContextParsingTests(unittest.TestCase):
         self.assertIsNone(
             parse_kwin_journal_line("kwin_wayland[1]: AKI_MARKER null", "AKI_MARKER")
         )
+
+
+class ChannelContextTests(unittest.TestCase):
+    def members(self) -> list[ChannelMember]:
+        return [
+            ChannelMember(
+                id="aki",
+                name="Aki",
+                aliases=("Aki", "aki", "秋", "小秋"),
+                description="self",
+                is_self=True,
+            ),
+            ChannelMember(
+                id="fuyu",
+                name="Fuyu",
+                aliases=("Fuyu", "冬"),
+                description="other",
+            ),
+        ]
+
+    def test_mentions_are_case_insensitive_longest_and_skip_email(self) -> None:
+        self.assertEqual(
+            match_channel_mentions("hello @AKI and @小秋", self.members()),
+            {"aki"},
+        )
+        self.assertEqual(
+            match_channel_mentions("@Fuyu hi", self.members()),
+            {"fuyu"},
+        )
+        self.assertEqual(match_channel_mentions("mail me at foo@aki.com", self.members()), set())
+        self.assertEqual(match_channel_mentions("@AkiChan", self.members()), set())
+
+    def test_guidance_covers_self_other_and_no_mentions(self) -> None:
+        self_member = self.members()[0]
+        self_text = render_channel_context(
+            self_member=self_member, members=self.members(), message="@秋 你好"
+        )
+        self.assertIn("用户提到了你，正在和你对话。", self_text)
+        other_text = render_channel_context(
+            self_member=self_member, members=self.members(), message="@Fuyu 你好"
+        )
+        self.assertIn("提到了其他成员，没有点你", other_text)
+        plain_text = render_channel_context(
+            self_member=self_member, members=self.members(), message="大家好"
+        )
+        self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain_text)
+        self.assertNotIn("没有提到你", plain_text)
+        self.assertIn("@名字", plain_text)
+        self.assertIn('remaining="4"', plain_text)
+        self.assertIn('resets="user-message"', plain_text)
+
+    def test_agent_initiation_budget_is_exposed_and_zero_blocks_replies(self) -> None:
+        members = self.members()
+        blocked = render_channel_context(
+            self_member=members[0],
+            members=members,
+            message="@Fuyu hello",
+            initiation_remaining=0,
+            initiation_limit=4,
+            from_agent=True,
+        )
+        self.assertIn('remaining="0"', blocked)
+        self.assertIn('limit="4"', blocked)
+        self.assertIn("[NO_REPLY]", blocked)
+        self.assertIn("主动启动次数已经用完", blocked)
+
+    def test_descriptions_are_escaped_limited_and_marked_untrusted(self) -> None:
+        members = self.members()
+        members[1] = ChannelMember(
+            id="fuyu",
+            name="Fuyu <x>",
+            aliases=("Fuyu",),
+            description="<script>bad</script>" + "z" * 400,
+        )
+        text = render_channel_context(
+            self_member=members[0], members=members, message="hi"
+        )
+        self.assertIn('untrusted="true"', text)
+        self.assertIn("&lt;script&gt;", text)
+        self.assertNotIn("<script>", text)
+        self.assertLessEqual(text.count("z"), 300)
 
 
 class LiveContextRenderTests(unittest.TestCase):

@@ -20,24 +20,29 @@ CLIENT_NAME = "aki-cli"
 CLIENT_VERSION = "0.1.0"
 
 
-def default_socket_path() -> Path:
+def default_socket_path(profile: str | None = None) -> Path:
+    from engine.aki_config import (
+        ConfigError,
+        default_socket_path as profile_socket_path,
+        load_config,
+        resolve_config_path,
+    )
+
     configured = os.environ.get("AKI_SOCKET")
     if configured:
         return Path(configured).expanduser()
-    config_path = Path(os.environ["AKI_CONFIG"]).expanduser() if os.environ.get("AKI_CONFIG") else Path.home() / ".aki" / "aki.conf"
+    try:
+        name, config_path = resolve_config_path(profile)
+    except ConfigError:
+        name, config_path = "aki", Path.home() / ".aki" / "aki.conf"
     if config_path.is_file():
         try:
-            from engine.aki_config import load_config
-
-            socket = load_config(config_path).socket
+            socket = load_config(config_path, profile=name).socket
         except (OSError, ValueError):
             socket = ""
         if socket:
             return Path(socket).expanduser()
-    runtime = os.environ.get("XDG_RUNTIME_DIR")
-    if runtime:
-        return Path(runtime) / "aki" / "akid.sock"
-    return Path(f"/tmp/aki-{os.getuid()}") / "akid.sock"
+    return profile_socket_path(name)
 
 
 @dataclass

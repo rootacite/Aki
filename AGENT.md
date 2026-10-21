@@ -230,7 +230,11 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
 - 基础 system prompt：`prompts/aki-system.md`，由
   `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
-- 设置：`~/.aki/aki.conf`。Letta 只保存回环代理地址和回环令牌。
+- 设置：每个 profile 使用 `~/.aki/<profile>.conf`；`aki.conf` 是默认 profile。
+  Letta 只保存对应 profile 的回环代理地址和回环令牌。
+- 服务：`akid@<profile>.service` 管网关，`akid-proxy@<profile>.service` 管独立
+  loopback LLM proxy；akid 进程本身不监听模型端口。
+- 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
 - 上下文预算：500,000 tokens；达到 50%（250,000 tokens）触发 compaction。
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
@@ -244,6 +248,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不假设固定 IP，也不假设信道上一定有 Aki。
 - tokifactor 通过加密的 `tokifactor/control` 主题发送 probe；Aki 回复 presence，并用
   status 心跳维持在线状态。控制消息不进入聊天历史、不创建 turn、不触发通知。
+- 频道成员按 `agentId` 去重并由 control 心跳维护；tokifactor 顶部显示多成员栏，
+  `@` 仅影响各智能体的回复判断，不阻止其他智能体启动 turn。
+- 每个智能体有默认 4 次“主动启动次数”：用户消息重置；其他智能体触发的 turn
+  在第一次产生频道动作时扣 1，每 turn 最多 1 次；剩余次数写入 channel live context。
 - **KDE Plasma widget、`engine/gui_bridge.py` 和 `install-widget.py` 是 legacy。**
   代码保留，但不属于推荐路径；安装必须显式传入 `--allow-deprecated`。
 

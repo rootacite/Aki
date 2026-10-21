@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -18,6 +20,17 @@ from pathlib import Path
 
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 SERVICE_NAME = "akid.service"
+SERVICE_TEMPLATE = "akid@.service"
+PROXY_TEMPLATE = "akid-proxy@.service"
+LEGACY_SERVICE_NAME = "akid.service"
+
+
+def gateway_unit(profile: str) -> str:
+    return f"akid@{profile}.service"
+
+
+def proxy_unit_name(profile: str) -> str:
+    return f"akid-proxy@{profile}.service"
 
 
 def now_iso() -> str:
@@ -80,12 +93,23 @@ def b64url(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def default_socket_path() -> Path:
+def default_socket_path(profile: str = "aki") -> Path:
     configured = os.environ.get("AKI_SOCKET")
     if configured:
         return Path(configured).expanduser()
+    try:
+        from engine.aki_config import load_config, profile_config_path
+
+        config_path = profile_config_path(profile)
+        if config_path.is_file():
+            socket_path = load_config(config_path, profile=profile).socket
+            if socket_path:
+                return Path(socket_path).expanduser()
+    except (ImportError, OSError, ValueError):
+        pass
     runtime = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
-    return Path(runtime) / "aki" / "akid.sock"
+    filename = "akid.sock" if profile == "aki" else f"{profile}.sock"
+    return Path(runtime) / "aki" / filename
 
 
 def backend_dir() -> Path:
@@ -203,12 +227,13 @@ def service_unit(
         avatar_path,
     )
     return f"""[Unit]
-Description=Aki local gateway (akid)
-After=network.target
+Description=Aki local gateway (%i)
+After=network.target akid-proxy@%i.service
+Wants=akid-proxy@%i.service
 
 [Service]
 Type=simple
-ExecStart={python_bin} {repo / 'engine' / 'akid.py'}
+ExecStart={python_bin} {repo / 'engine' / 'akid.py'} --profile %i
 WorkingDirectory={repo}
 Environment="PYTHONUNBUFFERED=1"
 Environment="XDG_RUNTIME_DIR=%t"
@@ -219,6 +244,27 @@ TimeoutStopSec=15
 KillMode=control-group
 RuntimeDirectory=aki
 RuntimeDirectoryMode=0700
+UMask=0077
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def proxy_service_unit(*, python_bin: str, repo: Path) -> str:
+    return f"""[Unit]
+Description=Aki loopback LLM proxy (%i)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={python_bin} {repo / 'engine' / 'akid_proxy.py'} --profile %i
+WorkingDirectory={repo}
+Environment="PYTHONUNBUFFERED=1"
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillMode=control-group
 UMask=0077
 
 [Install]
@@ -262,17 +308,36 @@ def wait_ready(socket_path: Path, timeout: float = 30.0) -> bool:
     return False
 
 
-def journal_hint() -> None:
+def journal_hint(profile: str = "aki") -> None:
     print("akid did not become ready; inspect logs with:", file=sys.stderr)
-    print("  journalctl --user -u akid.service -n 200 --no-pager", file=sys.stderr)
+    print(
+        f"  journalctl --user -u {gateway_unit(profile)} -u {proxy_unit_name(profile)} "
+        "-n 200 --no-pager",
+        file=sys.stderr,
+    )
+
+
+def _systemctl(*args: str, check: bool = False) -> subprocess.CompletedProcess[str]:
+    return run(["systemctl", "--user", *args], check=check)
+
+
+def _enable_profile(profile: str) -> None:
+    _systemctl("enable", "--now", proxy_unit_name(profile), check=True)
+    _systemctl("enable", "--now", gateway_unit(profile), check=True)
+
+
+def _disable_profile(profile: str) -> None:
+    _systemctl("disable", "--now", gateway_unit(profile), check=False)
+    _systemctl("disable", "--now", proxy_unit_name(profile), check=False)
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Install the Aki gateway user service")
-    parser.add_argument("--dry-run", action="store_true", help="print the unit without writing")
-    parser.add_argument("--uninstall", action="store_true", help="stop and remove the unit")
-    parser.add_argument("--restart", action="store_true", help="restart an installed unit")
+    parser.add_argument("--dry-run", action="store_true", help="print the units without writing")
+    parser.add_argument("--uninstall", action="store_true", help="stop and remove the units")
+    parser.add_argument("--restart", action="store_true", help="restart installed units")
     parser.add_argument("--status", action="store_true", help="show unit and gateway status")
+    parser.add_argument("--profile", default="aki", help="default profile installed and started")
     parser.add_argument("--agent-id", default=DEFAULT_AGENT_ID)
     parser.add_argument("--letta-bin", default=shutil.which("letta") or "letta")
     parser.add_argument("--socket", help="gateway socket path")
@@ -294,9 +359,15 @@ def main(argv: list[str] | None = None) -> int:
 
     repo = Path(__file__).resolve().parent
     python_bin = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
-    socket_path = Path(args.socket).expanduser() if args.socket else default_socket_path()
+    profile = args.profile.strip()
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", profile):
+        print("profile must match [a-z0-9][a-z0-9_-]{0,31}", file=sys.stderr)
+        return 2
+    socket_path = Path(args.socket).expanduser() if args.socket else default_socket_path(profile)
     unit_dir = Path.home() / ".config" / "systemd" / "user"
-    unit_path = unit_dir / SERVICE_NAME
+    unit_path = unit_dir / SERVICE_TEMPLATE
+    proxy_path = unit_dir / PROXY_TEMPLATE
+    legacy_path = unit_dir / LEGACY_SERVICE_NAME
     unit = service_unit(
         python_bin=python_bin,
         repo=repo,
@@ -315,19 +386,23 @@ def main(argv: list[str] | None = None) -> int:
         mqtt_state=args.mqtt_state,
         avatar_path=args.avatar_path,
     )
+    proxy_unit = proxy_service_unit(python_bin=python_bin, repo=repo)
 
     if args.dry_run:
         print(f"# would link {default_user_bin_dir() / 'akictl'} -> {repo / 'bin' / 'akictl'}")
         print(f"# would write {unit_path}")
         print(unit, end="")
+        print(f"# would write {proxy_path}")
+        print(proxy_unit, end="")
         return 0
 
     if args.status:
         try:
-            result = run(["systemctl", "--user", "status", SERVICE_NAME, "--no-pager"], check=False)
-            print(result.stdout, end="")
-            if result.stderr:
-                print(result.stderr, end="", file=sys.stderr)
+            for name in (proxy_unit_name(profile), gateway_unit(profile)):
+                result = _systemctl("status", name, "--no-pager", check=False)
+                print(result.stdout, end="")
+                if result.stderr:
+                    print(result.stderr, end="", file=sys.stderr)
         except FileNotFoundError:
             print("systemctl is not available", file=sys.stderr)
             return 1
@@ -344,13 +419,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.uninstall:
         with_error = False
         try:
-            run(["systemctl", "--user", "disable", "--now", SERVICE_NAME], check=False)
+            _disable_profile(profile)
+            _systemctl("disable", "--now", LEGACY_SERVICE_NAME, check=False)
         except FileNotFoundError:
             with_error = True
-        if unit_path.exists():
-            unit_path.unlink()
+        for path in (unit_path, proxy_path, legacy_path):
+            if path.exists():
+                path.unlink()
         try:
-            run(["systemctl", "--user", "daemon-reload"], check=False)
+            _systemctl("daemon-reload", check=False)
         except FileNotFoundError:
             with_error = True
         try:
@@ -360,21 +437,22 @@ def main(argv: list[str] | None = None) -> int:
             removed_link = False
         if removed_link:
             print(f"akictl link removed: {default_user_bin_dir() / 'akictl'}")
-        print("akid.service removed; MemFS and conversation history were left untouched")
+        print("akid units removed; profiles, MemFS and conversation history were left untouched")
         return 1 if with_error else 0
 
     if args.restart:
-        if not unit_path.exists():
-            print(f"{SERVICE_NAME} is not installed at {unit_path}", file=sys.stderr)
+        if not unit_path.exists() or not proxy_path.exists():
+            print(f"Aki units are not installed under {unit_dir}", file=sys.stderr)
             return 1
         try:
-            run(["systemctl", "--user", "daemon-reload"])
-            run(["systemctl", "--user", "restart", SERVICE_NAME])
+            _systemctl("daemon-reload")
+            _systemctl("restart", proxy_unit_name(profile))
+            _systemctl("restart", gateway_unit(profile))
         except (FileNotFoundError, subprocess.CalledProcessError) as exc:
             print(f"failed to restart akid: {exc}", file=sys.stderr)
             return 1
         if not wait_ready(socket_path):
-            journal_hint()
+            journal_hint(profile)
             return 1
         return 0
 
@@ -416,21 +494,46 @@ def main(argv: list[str] | None = None) -> int:
 
     unit_dir.mkdir(parents=True, exist_ok=True)
     unit_path.write_text(unit, encoding="utf-8")
+    proxy_path.write_text(proxy_unit, encoding="utf-8")
     os.chmod(unit_path, 0o644)
+    os.chmod(proxy_path, 0o644)
+    legacy = legacy_path.exists()
+    if legacy:
+        # The legacy akid process owns the profile socket and proxy port. Stop it
+        # before starting the split proxy/gateway services; rollback restarts it.
+        with contextlib.suppress(FileNotFoundError):
+            _systemctl("disable", "--now", LEGACY_SERVICE_NAME, check=False)
     try:
-        run(["systemctl", "--user", "daemon-reload"])
-        run(["systemctl", "--user", "enable", "--now", SERVICE_NAME])
+        _systemctl("daemon-reload")
+        _enable_profile(profile)
     except FileNotFoundError:
-        print("systemctl is not available; unit written but not started", file=sys.stderr)
+        print("systemctl is not available; units written but not started", file=sys.stderr)
         return 1
     except subprocess.CalledProcessError as exc:
         print(f"systemctl failed: {exc.stderr or exc}", file=sys.stderr)
-        journal_hint()
+        if legacy:
+            with contextlib.suppress(FileNotFoundError):
+                _disable_profile(profile)
+                _systemctl("enable", "--now", LEGACY_SERVICE_NAME, check=False)
+        journal_hint(profile)
         return 1
 
     if not wait_ready(socket_path):
-        journal_hint()
+        if legacy:
+            print("new profile failed health check; rolling back to akid.service", file=sys.stderr)
+            with contextlib.suppress(FileNotFoundError):
+                _disable_profile(profile)
+                _systemctl("enable", "--now", LEGACY_SERVICE_NAME, check=False)
+                unit_path.unlink(missing_ok=True)
+                proxy_path.unlink(missing_ok=True)
+                _systemctl("daemon-reload", check=False)
+        journal_hint(profile)
         return 1
+    if legacy:
+        legacy_path.unlink(missing_ok=True)
+        with contextlib.suppress(FileNotFoundError):
+            _systemctl("daemon-reload", check=False)
+        print(f"legacy {LEGACY_SERVICE_NAME} migrated to {gateway_unit(profile)}")
     return 0
 
 

@@ -10,18 +10,21 @@ from pathlib import Path
 from engine.aki_config import AkiConfig, ModelRoute, atomic_write, load_config, set_key
 
 DEEPSEEK_HANDLE = "deepseek/deepseek-flash"
-AKI_HANDLE = "aki/deepseek-flash"
 
 
 def render_provider_mod(config: AkiConfig) -> str:
     models = ",\n".join(_model_literal(route) for route in config.enabled_models)
     body = models + ("," if models else "")
     base = json.dumps(config.proxy_base_url)
+    provider_id = json.dumps(config.provider_id)
+    display_name = json.dumps(
+        "Aki" if config.profile == "aki" else f"Aki ({config.profile})"
+    )
     return f"""export default function activate(letta) {{
   if (!letta.capabilities || !letta.capabilities.providers) return;
-  return letta.providers.register("aki", {{
-    name: "Aki",
-    description: "Loopback proxy owned by akid",
+  return letta.providers.register({provider_id}, {{
+    name: {display_name},
+    description: "Loopback proxy for Aki profile {config.profile}",
     baseUrl: {base},
     authHeader: true,
     connect: false,
@@ -139,42 +142,54 @@ def _is_xai(route: ModelRoute) -> bool:
 
 
 def write_provider_mod(letta_home: Path, config: AkiConfig) -> Path:
-    path = letta_home / "mods" / "aki-proxy.ts"
+    path = letta_home / "mods" / config.provider_mod_name
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(path, render_provider_mod(config))
+    if config.profile == "aki":
+        legacy = letta_home / "mods" / "aki-proxy.ts"
+        if legacy != path and legacy.is_file():
+            legacy.unlink()
     return path
 
 
 def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> AkiConfig:
-    """Move a DeepSeek key out of Letta, then publish the loopback provider."""
+    """Publish this profile's loopback provider and retarget only its agent.
+
+    The proxy itself is a separate service.  This function only prepares
+    Letta configuration; it never binds a port.
+    """
     auth_path = backend_dir / "providers" / "auth.json"
     file = _read_auth(auth_path)
-    deepseek = file["providers"].get("deepseek")
-    stored = config.upstreams.get("deepseek")
-    if (stored is None or not stored.api_key) and isinstance(deepseek, dict):
-        key = _api_key(deepseek)
-        if key:
-            set_key(config.path, "upstream.deepseek", "api_key", key)
-            config = load_config(config.path)
+    if config.profile == "aki":
+        deepseek = file["providers"].get("deepseek")
+        stored = config.upstreams.get("deepseek")
+        if (stored is None or not stored.api_key) and isinstance(deepseek, dict):
+            key = _api_key(deepseek)
+            if key:
+                set_key(config.path, "upstream.deepseek", "api_key", key)
+                config = load_config(config.path, profile=config.profile)
     write_provider_mod(letta_home, config)
-    ready = any(route.model_id == "deepseek-flash" and route.enabled for route in config.models)
+    provider_id = config.provider_id
+    ready = bool(config.enabled_models)
     file = _read_auth(auth_path)
-    if not ready:
-        if "aki" not in file["providers"]:
-            _write_aki_provider(auth_path, config)
-        return config
-    if "deepseek" in file["providers"]:
-        _backup_auth(auth_path, letta_home)
-        file = _read_auth(auth_path)
     desired = _aki_record(config)
-    current = file["providers"].get("aki")
+    current = file["providers"].get(provider_id)
     if isinstance(current, dict) and current.get("created_at"):
         desired["created_at"] = current["created_at"]
-    if "deepseek" in file["providers"] or not _same_proxy(current, desired):
-        file["providers"].pop("deepseek", None)
-        file["providers"]["aki"] = desired
+    remove_deepseek = config.profile == "aki" and "deepseek" in file["providers"]
+    if remove_deepseek:
+        _backup_auth(auth_path, letta_home)
+        file = _read_auth(auth_path)
+    if (
+        remove_deepseek
+        or not _same_proxy(current, desired)
+        or (ready and provider_id not in file["providers"])
+    ):
+        if remove_deepseek:
+            file["providers"].pop("deepseek", None)
+        file["providers"][provider_id] = desired
         _write_auth(auth_path, file)
-    _retarget_agents(backend_dir)
+    _retarget_agent(config, backend_dir)
     return config
 
 
@@ -216,18 +231,13 @@ def _write_auth(path: Path, payload: dict) -> None:
     atomic_write(path, text)
 
 
-def _write_aki_provider(path: Path, config: AkiConfig) -> None:
-    file = _read_auth(path)
-    file["providers"]["aki"] = _aki_record(config)
-    _write_auth(path, file)
-
-
 def _aki_record(config: AkiConfig) -> dict:
     now = datetime.now().astimezone().isoformat()
+    provider_id = config.provider_id
     return {
-        "id": "local-provider-aki",
-        "name": "aki",
-        "provider_type": "aki",
+        "id": f"local-provider-{provider_id}",
+        "name": provider_id,
+        "provider_type": provider_id,
         "provider_category": "byok",
         "auth": {"type": "api", "key": config.proxy_token},
         "base_url": config.proxy_base_url,
@@ -247,21 +257,41 @@ def _backup_auth(auth_path: Path, letta_home: Path) -> None:
     os.chmod(target, 0o600)
 
 
-def _retarget_agents(backend_dir: Path) -> None:
+def _retarget_agent(config: AkiConfig, backend_dir: Path) -> None:
     agents = backend_dir / "agents"
     if not agents.is_dir():
         return
+    provider_id = config.provider_id
     for path in agents.glob("*.json"):
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if not isinstance(data, dict) or data.get("model") != DEEPSEEK_HANDLE:
+        if not isinstance(data, dict) or data.get("id") != config.agent_id:
             continue
-        data["model"] = AKI_HANDLE
+        model = data.get("model")
+        if not isinstance(model, str) or not model:
+            continue
+        if model == DEEPSEEK_HANDLE:
+            model_id = "deepseek-flash"
+        elif "/" in model:
+            current = model
+            matched = False
+            while "/" in current:
+                prefix, remainder = current.split("/", 1)
+                if not (prefix == provider_id or prefix == "aki" or prefix.startswith("aki-")):
+                    break
+                matched = True
+                current = remainder
+            if not matched or not current or "/" in current:
+                continue
+            model_id = current
+        else:
+            continue
+        data["model"] = f"{provider_id}/{model_id}"
         settings = data.get("model_settings")
         if not isinstance(settings, dict):
             settings = {}
-        settings["provider_type"] = "aki"
+        settings["provider_type"] = provider_id
         data["model_settings"] = settings
         atomic_write(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")

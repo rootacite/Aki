@@ -77,6 +77,7 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.conf = self.root / "aki.conf"
         atomic_write(self.conf, template_text())
         set_key(self.conf, "proxy", "token", "loopback-token")
+        set_key(self.conf, "gateway", "agent_id", "one")
         self.backend = self.root / "backend"
         (self.backend / "providers").mkdir(parents=True)
         (self.backend / "agents").mkdir()
@@ -98,7 +99,7 @@ class LettaProviderMigrationTests(unittest.TestCase):
             (self.backend / "agents" / name).write_text(
                 json.dumps(
                     {
-                        "id": name,
+                        "id": name.removesuffix(".json"),
                         "model": "deepseek/deepseek-flash",
                         "model_settings": {
                             "provider_type": "deepseek",
@@ -114,6 +115,9 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def test_moves_deepseek_key_and_retargets_agents(self) -> None:
+        legacy_mod = self.letta_home / "mods" / "aki-proxy.ts"
+        legacy_mod.parent.mkdir(parents=True)
+        legacy_mod.write_text("legacy\n", encoding="utf-8")
         config = load_config(self.conf)
         updated = prepare_letta(
             config, backend_dir=self.backend, letta_home=self.letta_home
@@ -127,15 +131,50 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertEqual(aki["auth"]["key"], "loopback-token")
         self.assertEqual(aki["base_url"], "http://127.0.0.1:7721/v1")
         self.assertNotIn("deepseek-secret", json.dumps(auth))
-        for name in ("one.json", "two.json"):
-            agent = json.loads((self.backend / "agents" / name).read_text())
-            self.assertEqual(agent["model"], "aki/deepseek-flash")
-            self.assertEqual(agent["model_settings"]["provider_type"], "aki")
-            self.assertEqual(agent["model_settings"]["reasoning_effort"], "high")
-        self.assertTrue((self.letta_home / "mods" / "aki-proxy.ts").is_file())
+        one = json.loads((self.backend / "agents" / "one.json").read_text())
+        self.assertEqual(one["model"], "aki/deepseek-flash")
+        self.assertEqual(one["model_settings"]["provider_type"], "aki")
+        self.assertEqual(one["model_settings"]["reasoning_effort"], "high")
+        two = json.loads((self.backend / "agents" / "two.json").read_text())
+        self.assertEqual(two["model"], "deepseek/deepseek-flash")
+        self.assertEqual(two["model_settings"]["provider_type"], "deepseek")
+        self.assertTrue((self.letta_home / "mods" / "aki-proxy-aki.ts").is_file())
+        self.assertFalse(legacy_mod.exists())
         backups = list((self.letta_home / "backups").glob("llm-proxy-*/auth.json"))
         self.assertEqual(len(backups), 1)
         self.assertIn("deepseek-secret", backups[0].read_text(encoding="utf-8"))
+
+
+    def test_two_profiles_keep_separate_providers_and_agents(self) -> None:
+        fuyu_conf = self.root / "fuyu.conf"
+        atomic_write(fuyu_conf, template_text(profile="fuyu"))
+        set_key(fuyu_conf, "gateway", "agent_id", "two")
+        set_key(fuyu_conf, "proxy", "token", "fuyu-token")
+        set_key(fuyu_conf, "proxy", "listen", "127.0.0.1:7722")
+        set_key(fuyu_conf, "upstream.deepseek", "api_key", "fuyu-secret")
+        two_path = self.backend / "agents" / "two.json"
+        two_data = json.loads(two_path.read_text())
+        two_data["model"] = "aki/aki/deepseek-flash"
+        two_path.write_text(json.dumps(two_data), encoding="utf-8")
+        aki = load_config(self.conf, profile="aki")
+        fuyu = load_config(fuyu_conf, profile="fuyu")
+        prepare_letta(aki, backend_dir=self.backend, letta_home=self.letta_home)
+        prepare_letta(fuyu, backend_dir=self.backend, letta_home=self.letta_home)
+        auth = json.loads((self.backend / "providers" / "auth.json").read_text())
+        self.assertIn("aki", auth["providers"])
+        self.assertIn("aki-fuyu", auth["providers"])
+        self.assertEqual(auth["providers"]["aki-fuyu"]["auth"]["key"], "fuyu-token")
+        self.assertEqual(
+            auth["providers"]["aki-fuyu"]["base_url"], "http://127.0.0.1:7722/v1"
+        )
+        one = json.loads((self.backend / "agents" / "one.json").read_text())
+        two = json.loads((self.backend / "agents" / "two.json").read_text())
+        self.assertEqual(one["model"], "aki/deepseek-flash")
+        self.assertEqual(one["model_settings"]["provider_type"], "aki")
+        self.assertEqual(two["model"], "aki-fuyu/deepseek-flash")
+        self.assertEqual(two["model_settings"]["provider_type"], "aki-fuyu")
+        self.assertTrue((self.letta_home / "mods" / "aki-proxy-aki.ts").is_file())
+        self.assertTrue((self.letta_home / "mods" / "aki-proxy-fuyu.ts").is_file())
 
 
 if __name__ == "__main__":

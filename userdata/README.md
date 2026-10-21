@@ -12,12 +12,14 @@
 - `character/relationship.md` — 与用户的关系定位模板
 - `character/boundaries.md` — 身份与安全边界
 - `character/examples.md` — 原创语气示例模板
-- `username.txt` — 当前称呼（默认“Master”）
+- `username.txt` — 旧版默认 profile 的称呼迁移源（新状态保存在 `<profile>.conf` 的 `[gateway] username`）
 - `MANIFEST.json` — 同步来源、MemFS commit 和模板哈希
 
 ## 占位符
 
-`{{USERNAME}}` 会在同步时替换成 `username.txt` 的内容。例如：
+`{{USERNAME}}` 会在同步时替换成当前称呼。`akictl set-username` 把称呼写入
+`<profile>.conf` 的 `[gateway] username`；手动运行同步脚本时仍可读取本目录的
+`username.txt`。例如：
 
 ```text
 对{{USERNAME}}，我会认真听。
@@ -47,7 +49,8 @@ akictl username                 # 查看当前称呼
 akictl set-username Master      # 修改、渲染并重编译当前会话
 ```
 
-也可以手动编辑 `username.txt`，然后运行同步脚本。
+`akictl set-username` 会把称呼写入当前 profile 的 `[gateway] username`，并只重编译
+该 agent 的会话。`username.txt` 仅用于旧版默认 profile 的迁移来源。
 
 ## 同步回 MemFS
 
@@ -59,7 +62,7 @@ akictl recompile                            # 手动同步后重编译当前会�
 
 脚本行为：
 
-- 读取 `username.txt`，把模板中的 `{{USERNAME}}` 替换成当前称呼
+- 读取 `--username` 覆盖值或 `username.txt`，把模板中的 `{{USERNAME}}` 替换成当前称呼
 - 校验 frontmatter 和文件编码
 - 把将被覆盖的旧文件备份到 `~/.letta/backups/userdata-sync-<timestamp>/`
 - 只写入白名单文件
