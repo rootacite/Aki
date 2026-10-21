@@ -272,8 +272,8 @@ def render_channel_context(
     self_member: ChannelMember,
     members: list[ChannelMember] | tuple[ChannelMember, ...],
     message: str,
-    initiation_remaining: int = 4,
-    initiation_limit: int = 4,
+    initiation_remaining: int = 3,
+    initiation_limit: int = 3,
     from_agent: bool = False,
     user_name: str = "Master",
 ) -> str:

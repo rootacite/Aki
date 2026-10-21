@@ -174,7 +174,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn("<wake-routing>", plain_text)
         self.assertIn("@Master", plain_text)
         self.assertIn("直接说话即可", plain_text)
-        self.assertIn('remaining="4"', plain_text)
+        self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
 
     def test_reply_wake_routing_uses_profile_user_name(self) -> None:
@@ -209,11 +209,11 @@ class ChannelContextTests(unittest.TestCase):
             members=members,
             message="@Fuyu hello",
             initiation_remaining=0,
-            initiation_limit=4,
+            initiation_limit=3,
             from_agent=True,
         )
         self.assertIn('remaining="0"', blocked)
-        self.assertIn('limit="4"', blocked)
+        self.assertIn('limit="3"', blocked)
         self.assertIn("[NO_REPLY]", blocked)
         self.assertIn("主动启动次数已经用完", blocked)
 

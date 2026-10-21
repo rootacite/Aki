@@ -1864,12 +1864,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "description": "",
             "last_seen": time.monotonic(),
         }
-        self.assertEqual(server._agent_initiation_remaining, 4)
+        self.assertEqual(server._agent_initiation_remaining, 3)
         await server._on_channel_text("Fuyu", "fuyu", "hello from another agent")
         await wait_until(lambda: bool(fake_channel.final_texts()))
-        self.assertEqual(server._agent_initiation_remaining, 3)
+        self.assertEqual(server._agent_initiation_remaining, 2)
         await server._on_channel_text("alice", "alice-1", "hello from user")
-        self.assertEqual(server._agent_initiation_remaining, 4)
+        self.assertEqual(server._agent_initiation_remaining, 3)
         await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
 
     async def test_agent_reply_budget_zero_suppresses_agent_to_agent_reply(self) -> None:
@@ -1893,7 +1893,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_agent_initiation_is_charged_at_most_once_per_turn(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
-        self.assertEqual(server._agent_initiation_remaining, 4)
+        self.assertEqual(server._agent_initiation_remaining, 3)
         conn = server.channel_conn
         turn_id = "turn-budget-once"
         await conn.send(
@@ -1905,7 +1905,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "2026-10-21T00:00:00Z",
             )
         )
-        self.assertEqual(server._agent_initiation_remaining, 3)
+        self.assertEqual(server._agent_initiation_remaining, 2)
         await conn.send(
             make_event(
                 turn_id,
@@ -1934,7 +1934,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
-        self.assertEqual(server._agent_initiation_remaining, 3)
+        self.assertEqual(server._agent_initiation_remaining, 2)
 
     async def test_last_initiation_does_not_truncate_the_current_turn(self) -> None:
         fake_channel = FakeChannel()
@@ -2012,7 +2012,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "Fuyu", "fuyu", "agent message", from_agent=True
         )
         self.assertIn('remaining="2"', prompt)
-        self.assertIn('limit="4"', prompt)
+        self.assertIn('limit="3"', prompt)
         self.assertIn("每产生一次可见回复", prompt)
 
     async def test_channel_status_metadata_is_complete(self) -> None:
