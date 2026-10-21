@@ -9,8 +9,10 @@ import hashlib
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
+from engine.aki_config import atomic_write
 from engine.mqtt_client import MqttClient, MqttError
 from engine.tokifactor import (
     AVATAR_TOPIC,
@@ -36,8 +38,10 @@ from engine.tokifactor import (
 
 TEXT_TOPIC = "tokifactor/text"
 DEFAULT_MAGIC = "akid-default-channel"
+DEDUP_MAX_IDS = 4096
+CHANNEL_INBOX_MAX = 4096
 
-TextHandler = Callable[[str, str, str, Mapping[str, str]], Awaitable[None]]
+TextHandler = Callable[[str, str, str, Mapping[str, str], str, int], Awaitable[None]]
 ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 
 
@@ -58,6 +62,7 @@ class TokifactorChannel:
         avatar_bytes: bytes | None = None,
         avatar_hash: str = "",
         avatar_mime: str = "",
+        dedup_path: Path | None = None,
         on_text: TextHandler,
         on_control: ControlHandler | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
@@ -69,6 +74,10 @@ class TokifactorChannel:
         self.topic = topic
         self.sender_name = sender_name
         self.sender_id = sender_id
+        material = f"{sender_id}\x00{host}\x00{port}\x00{topic}\x00{magic}"
+        self.session_client_id = "akid-" + hashlib.sha256(
+            material.encode("utf-8")
+        ).hexdigest()[:16]
         self._avatar_bytes = avatar_bytes
         self._avatar_hash = avatar_hash or (
             hashlib.sha256(avatar_bytes).hexdigest() if avatar_bytes else ""
@@ -83,16 +92,22 @@ class TokifactorChannel:
         self._task: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._client: MqttClient | None = None
-        self._inbox: asyncio.Queue[tuple[str, str, str, dict[str, str]]] = asyncio.Queue(
-            maxsize=256
-        )
+        self._inbox: asyncio.Queue[
+            tuple[str, str, str, dict[str, str], str, int]
+        ] = asyncio.Queue(maxsize=CHANNEL_INBOX_MAX)
         self._publish_lock = asyncio.Lock()
         self._image_lock = asyncio.Lock()
         self._avatar_publish_task: asyncio.Task[None] | None = None
         self._assembler = TextChunkAssembler(magic)
         self._recent: dict[str, float] = {}
+        self.dedup_path = dedup_path
+        self._seen_message_ids: list[str] = []
+        self._seen_message_id_set: set[str] = set()
+        self._duplicates_dropped = 0
+        self._load_dedup()
         self._state = "stopped"
         self._connected = False
+        self._session_present = False
         self._last_error: str | None = None
         self._last_message_at: float | None = None
         self._messages_received = 0
@@ -162,6 +177,8 @@ class TokifactorChannel:
             client = MqttClient(
                 self.host,
                 self.port,
+                client_id=self.session_client_id,
+                clean_session=False,
                 on_message=self._on_packet,
                 logger=self.logger,
             )
@@ -169,18 +186,19 @@ class TokifactorChannel:
             self._state = "connecting"
             try:
                 await client.connect()
+                self._session_present = client.session_present
                 granted = await client.subscribe(self.topic, qos=1)
                 if granted == 0x80:
                     raise MqttError("broker rejected subscription")
                 try:
-                    avatar_granted = await client.subscribe(AVATAR_TOPIC, qos=1)
+                    avatar_granted = await client.subscribe(AVATAR_TOPIC, qos=0)
                     if avatar_granted == 0x80:
                         raise MqttError("broker rejected avatar subscription")
                 except MqttError as exc:
                     self._avatar_last_error = f"avatar subscription failed: {exc}"
                     self.logger.warning(self._avatar_last_error)
                 try:
-                    control_granted = await client.subscribe(CONTROL_TOPIC, qos=1)
+                    control_granted = await client.subscribe(CONTROL_TOPIC, qos=0)
                     if control_granted == 0x80:
                         raise MqttError("broker rejected control subscription")
                 except MqttError as exc:
@@ -252,6 +270,7 @@ class TokifactorChannel:
         if not envelope.text:
             return
         if self._is_duplicate(envelope):
+            self._duplicates_dropped += 1
             return
         self._messages_received += 1
         self._last_message_at = time.time()
@@ -262,7 +281,14 @@ class TokifactorChannel:
                 if value is not None
             }
             self._inbox.put_nowait(
-                (envelope.sender, envelope.sender_id, envelope.text, metadata)
+                (
+                    envelope.sender,
+                    envelope.sender_id,
+                    envelope.text,
+                    metadata,
+                    envelope.message_id,
+                    envelope.sent_at,
+                )
             )
         except asyncio.QueueFull:
             self.logger.warning("channel inbox full; dropping message")
@@ -292,22 +318,72 @@ class TokifactorChannel:
             self.logger.exception("channel control handler failed")
 
     def _is_duplicate(self, envelope: TextEnvelope) -> bool:
+        if envelope.message_id:
+            if envelope.message_id in self._seen_message_id_set:
+                return True
+            self._remember_message_id(envelope.message_id)
+            return False
         now = time.monotonic()
         cutoff = now - 10.0
         self._recent = {key: value for key, value in self._recent.items() if value >= cutoff}
         key = hashlib.sha256(
-            (envelope.sender_id + "\x00" + envelope.text).encode("utf-8")
+            (
+                envelope.sender_id
+                + "\x00"
+                + str(envelope.sent_at)
+                + "\x00"
+                + envelope.text
+            ).encode("utf-8")
         ).hexdigest()
         if key in self._recent:
             return True
         self._recent[key] = now
         return False
 
+    def _load_dedup(self) -> None:
+        if self.dedup_path is None or not self.dedup_path.is_file():
+            return
+        try:
+            payload = json.loads(self.dedup_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        values = payload.get("ids") if isinstance(payload, dict) else None
+        if not isinstance(values, list):
+            return
+        for value in values[-DEDUP_MAX_IDS:]:
+            if isinstance(value, str) and value and value not in self._seen_message_id_set:
+                self._seen_message_ids.append(value)
+                self._seen_message_id_set.add(value)
+
+    def _remember_message_id(self, message_id: str) -> None:
+        self._seen_message_ids.append(message_id)
+        self._seen_message_id_set.add(message_id)
+        if len(self._seen_message_ids) > DEDUP_MAX_IDS:
+            removed = self._seen_message_ids[:-DEDUP_MAX_IDS]
+            self._seen_message_ids = self._seen_message_ids[-DEDUP_MAX_IDS:]
+            for value in removed:
+                self._seen_message_id_set.discard(value)
+        if self.dedup_path is None:
+            return
+        try:
+            atomic_write(
+                self.dedup_path,
+                json.dumps(
+                    {"version": 1, "ids": self._seen_message_ids},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        except OSError as exc:
+            self.logger.warning("failed to persist channel dedup state: %s", exc)
+
     async def _worker_loop(self) -> None:
         while True:
-            sender, sender_id, text, metadata = await self._inbox.get()
+            sender, sender_id, text, metadata, message_id, sent_at = await self._inbox.get()
             try:
-                await self.on_text(sender, sender_id, text, metadata)
+                await self.on_text(
+                    sender, sender_id, text, metadata, message_id, sent_at
+                )
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -353,7 +429,7 @@ class TokifactorChannel:
         )
         async with self._publish_lock:
             for payload in payloads:
-                await client.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=1)
+                await client.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=0)
         self._control_sent += 1
 
     async def publish_notice(self, text: str) -> None:
@@ -504,7 +580,7 @@ class TokifactorChannel:
                 encrypt_bytes(self._avatar_bytes, self.magic)
             ).decode("ascii")
             payload = encode_avatar_have(self.sender_id, self._avatar_hash, data)
-            await client.publish(AVATAR_TOPIC, payload.encode("utf-8"), qos=1)
+            await client.publish(AVATAR_TOPIC, payload.encode("utf-8"), qos=0)
         except Exception as exc:
             self._avatar_last_error = f"avatar publish failed: {exc}"
             self.logger.warning(self._avatar_last_error)
@@ -538,10 +614,18 @@ class TokifactorChannel:
             "last_error": self._last_error,
             "last_message_at": self._last_message_at,
             "messages_received": self._messages_received,
+            "duplicates_dropped": self._duplicates_dropped,
             "replies_sent": self._replies_sent,
             "decode_failures": self._decode_failures,
             "images_sent": self._images_sent,
             "last_image_at": self._last_image_at,
+            "session": {
+                "client_id": self.session_client_id,
+                "persistent": True,
+                "session_present": self._session_present,
+                "dedup_path": str(self.dedup_path) if self.dedup_path else None,
+                "dedup_ids": len(self._seen_message_id_set),
+            },
             "avatar": {
                 "configured": bool(self._avatar_bytes),
                 "sender_id": self.sender_id,

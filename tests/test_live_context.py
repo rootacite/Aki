@@ -323,6 +323,32 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertIn("message-19", block)
         self.assertNotIn("message-0-", block)
 
+    def test_sender_timestamp_orders_offline_messages(self) -> None:
+        entries = [
+            ChannelTranscriptEntry(
+                seq=1,
+                sender="alice",
+                sender_id="alice-1",
+                text="newer arrival",
+                timestamp="2026-10-21T10:00:00Z",
+                sent_at=1_700_000_002_000,
+            ),
+            ChannelTranscriptEntry(
+                seq=2,
+                sender="alice",
+                sender_id="alice-1",
+                text="older sender time",
+                timestamp="2026-10-21T10:00:01Z",
+                sent_at=1_700_000_001_000,
+            ),
+        ]
+        block = render_channel_transcript(entries, new_seq=1)
+        self.assertLess(
+            block.index("older sender time"), block.index("newer arrival")
+        )
+        self.assertIn('seq="1"', block)
+        self.assertIn('new="true"', block)
+
     def test_apply_is_idempotent_and_clear_removes_block(self) -> None:
         block = render_channel_transcript(self.entries(), new_seq=2)
         once = apply_channel_transcript("BASE PROMPT\n", block)

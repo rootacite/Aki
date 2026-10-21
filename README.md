@@ -469,6 +469,12 @@ turn。其他智能体的消息无论是否跨过这个边界都不会补 turn�
 长消息是加密的 `TextChunk` 分片。实现位于 `engine/tokifactor.py`、
 `engine/mqtt_client.py` 和 `engine/channel.py`。
 
+akid 使用基于 `sender_id + broker + topic + magic` 的稳定 MQTT client id 和非 clean
+session，因此 broker 会在 akid 离线时保留 text/picture/file 的 QoS 1 消息；control 和 avatar
+仍使用 QoS 0。文本 envelope 和分片携带 `messageId` 与毫秒级 `sentAt`，已处理的消息 ID
+持久化在该 profile 的频道历史目录（`<profile>.seen.json`），重启后仍会丢弃 broker
+重发的重复消息。频道 transcript 按 `sentAt` 排序，缺少该字段的旧客户端回退到接收时间。
+
 收到频道消息后，akid 会把它作为新的 Agent turn 处理，并在提示词中要求 Agent
 自行判断是否需要回复；不需要回复时 Agent 输出 `[NO_REPLY]`，网关会抑制发布。
 需要回复时会发布阶段里程碑：处理状态、assistant 文本阶段、工具开始/结束和最终

@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import tempfile
 import unittest
+from pathlib import Path
 
 from engine.channel import TokifactorChannel
 from engine.mqtt_client import MqttClient
@@ -73,6 +75,8 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         sender_id: str,
         text: str,
         metadata: dict[str, str],
+        message_id: str = "",
+        sent_at: int = 0,
     ) -> None:
         self.received.append((sender, sender_id, text, metadata))
 
@@ -131,6 +135,80 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["messages_received"], 1)
         self.assertEqual(health["replies_sent"], 1)
         self.assertTrue(health["connected"])
+
+    async def test_persistent_session_delivers_offline_and_dedups_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            self.channel.dedup_path = Path(tempdir) / "dedup.json"
+            await self.channel.start()
+            await wait_until(lambda: self.channel.connected)
+            first_connect = self.broker.connects[-1]
+            self.assertEqual(first_connect["client_id"], self.channel.session_client_id)
+            self.assertFalse(first_connect["clean_session"])
+
+            payloads = encode_text_payloads(
+                "offline hello",
+                MAGIC,
+                sender="alice",
+                sender_id="alice-1",
+                message_id="offline-message-1",
+                sent_at=1_700_000_000_000,
+            )
+            await self.channel.stop()
+            await asyncio.sleep(0.1)
+
+            self.peer = MqttClient(
+                "127.0.0.1",
+                self.broker.port,
+                client_id="peer-offline-test",
+                on_message=self._peer_message,
+            )
+            await self.peer.connect()
+            for payload in payloads:
+                await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
+            await wait_until(
+                lambda: bool(
+                    self.broker._offline.get(self.channel.session_client_id)
+                )
+            )
+
+            await self.channel.start()
+            await wait_until(lambda: bool(self.received))
+            self.assertEqual(
+                self.received[0],
+                ("alice", "alice-1", "offline hello", {}),
+            )
+            self.assertEqual(
+                self.broker.connects[-1]["client_id"],
+                self.channel.session_client_id,
+            )
+            self.assertFalse(self.broker.connects[-1]["clean_session"])
+
+            await self.channel.stop()
+            await self.channel.start()
+            await wait_until(lambda: self.channel.connected)
+            for payload in payloads:
+                await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(self.received), 1)
+            self.assertGreaterEqual(self.channel.health()["duplicates_dropped"], 1)
+
+    async def test_text_uses_qos1_and_control_uses_qos0(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        await self.channel.publish_text("chat message")
+        await self.channel.publish_control(
+            "probe", {"schema": "akid.v1", "kind": "probe", "probeId": "qos-test"}
+        )
+        await wait_until(
+            lambda: len(self.broker.published_qos) >= 2
+        )
+        by_topic: dict[str, int] = {}
+        for (topic, _payload), qos in zip(
+            self.broker.published, self.broker.published_qos
+        ):
+            by_topic[topic] = qos
+        self.assertEqual(by_topic[TOPIC], 1)
+        self.assertEqual(by_topic[CONTROL_TOPIC], 0)
 
     async def test_structured_metadata_reaches_text_handler(self) -> None:
         await self.channel.start()
@@ -255,8 +333,18 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
             "queueDepth": "2",
         }
         await self.channel.publish_control("Aki status", status)
-        await wait_until(lambda: bool(self.control_payloads))
-        self.assertEqual(self.control_payloads[-1].metadata, status)
+        await wait_until(
+            lambda: any(
+                envelope.metadata.get("kind") == "status"
+                for envelope in self.control_payloads
+            )
+        )
+        status_payload = next(
+            envelope
+            for envelope in self.control_payloads
+            if envelope.metadata.get("kind") == "status"
+        )
+        self.assertEqual(status_payload.metadata, status)
         self.assertEqual(self.peer_messages, [])
         self.assertGreaterEqual(self.channel.health()["control"]["messages_sent"], 1)
 

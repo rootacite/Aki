@@ -21,6 +21,7 @@ from engine.tokifactor import (
     encrypt_bytes,
     decrypt_bytes,
     looks_like_chunk,
+    message_id_for,
     parse_text_chunk,
     parse_avatar_envelope,
 )
@@ -55,6 +56,54 @@ class TokifactorWireTests(unittest.TestCase):
         encoded = encode_envelope(envelope)
         decoded = decode_envelope(encoded)
         self.assertEqual(decoded, envelope)
+
+    def test_message_identity_and_timestamp_round_trip(self) -> None:
+        message_id = message_id_for("alice-1", 1_700_000_000_000, "hello")
+        self.assertEqual(
+            message_id,
+            message_id_for("alice-1", 1_700_000_000_000, "hello"),
+        )
+        self.assertNotEqual(
+            message_id,
+            message_id_for("alice-1", 1_700_000_000_001, "hello"),
+        )
+        envelope = TextEnvelope(
+            sender="alice",
+            text="hello",
+            sender_id="alice-1",
+            message_id=message_id,
+            sent_at=1_700_000_000_000,
+        )
+        decoded = decode_envelope(encode_envelope(envelope))
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded.message_id, message_id)
+        self.assertEqual(decoded.sent_at, 1_700_000_000_000)
+
+    def test_chunked_text_preserves_message_identity(self) -> None:
+        payloads = encode_text_payloads(
+            "x" * 5000,
+            MAGIC,
+            sender="alice",
+            sender_id="alice-1",
+            message_id="message-123",
+            sent_at=1_700_000_000_123,
+        )
+        self.assertTrue(all(looks_like_chunk(payload) for payload in payloads))
+        chunk = parse_text_chunk(payloads[0])
+        self.assertIsNotNone(chunk)
+        assert chunk is not None
+        assembler = TextChunkAssembler(MAGIC)
+        assembled = None
+        for payload in payloads:
+            parsed = parse_text_chunk(payload)
+            self.assertIsNotNone(parsed)
+            assert parsed is not None
+            assembled = assembler.add(parsed) or assembled
+        self.assertIsNotNone(assembled)
+        assert assembled is not None
+        self.assertEqual(assembled.message_id, "message-123")
+        self.assertEqual(assembled.sent_at, 1_700_000_000_123)
 
     def test_structured_envelope_round_trip(self) -> None:
         metadata = {

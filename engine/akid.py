@@ -1254,6 +1254,7 @@ class GatewayServer:
                 avatar_bytes=self.avatar.data if self.avatar is not None else None,
                 avatar_hash=self.avatar.sha256 if self.avatar is not None else "",
                 avatar_mime=self.avatar.mime if self.avatar is not None else "",
+                dedup_path=self.channel_history_path.with_suffix(".seen.json"),
                 on_text=self._on_channel_text,
                 on_control=self._on_channel_control,
                 on_connected=self._on_channel_connected,
@@ -2039,6 +2040,8 @@ class GatewayServer:
         sender_id: str,
         text: str,
         from_agent: bool,
+        message_id: str = "",
+        sent_at: int = 0,
         phase: str = "final",
         arrived_while_busy: bool = False,
     ) -> ChannelTranscriptEntry:
@@ -2050,6 +2053,8 @@ class GatewayServer:
             text=text,
             from_agent=from_agent,
             timestamp=now_iso(),
+            sent_at=sent_at if sent_at > 0 else int(time.time() * 1000),
+            message_id=message_id,
             phase=phase,
             arrived_while_busy=arrived_while_busy,
         )
@@ -2095,6 +2100,8 @@ class GatewayServer:
             "text": entry.text,
             "from_agent": entry.from_agent,
             "timestamp": entry.timestamp,
+            "sent_at": entry.sent_at,
+            "message_id": entry.message_id,
             "phase": entry.phase,
             "arrived_while_busy": entry.arrived_while_busy,
         }
@@ -2131,6 +2138,8 @@ class GatewayServer:
                         text=str(payload.get("text") or "")[:MAX_CHANNEL_TEXT_CHARS],
                         from_agent=bool(payload.get("from_agent")),
                         timestamp=str(payload.get("timestamp") or ""),
+                        sent_at=int(payload.get("sent_at") or 0),
+                        message_id=str(payload.get("message_id") or ""),
                         phase=str(payload.get("phase") or "final"),
                         arrived_while_busy=bool(payload.get("arrived_while_busy")),
                     )
@@ -3296,6 +3305,9 @@ class GatewayServer:
             old = self.channel
             with contextlib.suppress(Exception):
                 await old.stop()
+            self.config.mqtt_host = host
+            self.config.mqtt_port = port
+            self._load_channel_history()
             new_channel = TokifactorChannel(
                 host=host,
                 port=port,
@@ -3303,15 +3315,13 @@ class GatewayServer:
                 topic=self.config.mqtt_topic,
                 sender_name=self.config.mqtt_sender_name,
                 sender_id=self.config.mqtt_sender_id,
+                dedup_path=self.channel_history_path.with_suffix(".seen.json"),
                 on_text=self._on_channel_text,
                 on_control=self._on_channel_control,
                 on_connected=self._on_channel_connected,
                 logger=logging.getLogger("akid.channel"),
             )
             self.channel = new_channel
-            self.config.mqtt_host = host
-            self.config.mqtt_port = port
-            self._load_channel_history()
             await new_channel.start()
             deadline = time.monotonic() + 10.0
             while not new_channel.connected and time.monotonic() < deadline:
@@ -3801,6 +3811,8 @@ class GatewayServer:
         sender_id: str,
         text: str,
         metadata: Mapping[str, str] | None = None,
+        message_id: str = "",
+        sent_at: int = 0,
     ) -> None:
         text = text.strip()
         if not text:
@@ -3818,6 +3830,8 @@ class GatewayServer:
                 sender_id=sender_id,
                 text=text,
                 from_agent=True,
+                message_id=message_id,
+                sent_at=sent_at,
                 phase="progress",
                 arrived_while_busy=busy,
             )
@@ -3836,6 +3850,8 @@ class GatewayServer:
             sender_id=sender_id,
             text=text,
             from_agent=from_agent,
+            message_id=message_id,
+            sent_at=sent_at,
             phase="final",
             arrived_while_busy=busy,
         )

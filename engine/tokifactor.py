@@ -119,6 +119,8 @@ class TextEnvelope:
     text: str
     sender_id: str = ""
     avatar_hash: str = ""
+    message_id: str = ""
+    sent_at: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
 
 
@@ -137,6 +139,8 @@ class _InboundTransfer:
     expected_hash: str = ""
     sender: str = "Unknown"
     sender_id: str = ""
+    message_id: str = ""
+    sent_at: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
     size: int = 0
     last_seen: float = field(default_factory=time.monotonic)
@@ -220,6 +224,10 @@ def encode_envelope(envelope: TextEnvelope) -> str:
         ("id", envelope.sender_id),
         ("avatarHash", envelope.avatar_hash),
     ]
+    if envelope.message_id:
+        pairs.append(("messageId", envelope.message_id))
+    if envelope.sent_at > 0:
+        pairs.append(("sentAt", str(envelope.sent_at)))
     pairs.extend(
         (key, str(envelope.metadata[key]))
         for key in STRUCTURED_FIELDS
@@ -233,6 +241,8 @@ def decode_envelope(payload: str) -> TextEnvelope | None:
     text: Any = None
     sender_id: Any = ""
     avatar_hash: Any = ""
+    message_id: Any = ""
+    sent_at: Any = 0
     metadata: dict[str, str] = {}
     try:
         value = json.loads(payload)
@@ -241,6 +251,8 @@ def decode_envelope(payload: str) -> TextEnvelope | None:
             text = value.get("text")
             sender_id = value.get("id", "")
             avatar_hash = value.get("avatarHash", "")
+            message_id = value.get("messageId", "")
+            sent_at = value.get("sentAt", 0)
             for key in STRUCTURED_FIELDS:
                 if key in value and value[key] is not None:
                     metadata[key] = str(value[key])
@@ -251,6 +263,8 @@ def decode_envelope(payload: str) -> TextEnvelope | None:
         text = extract_string(payload, "text")
         sender_id = extract_string(payload, "id") or ""
         avatar_hash = extract_string(payload, "avatarHash") or ""
+        message_id = extract_string(payload, "messageId") or ""
+        sent_at = extract_string(payload, "sentAt") or 0
         metadata = {
             key: value
             for key in STRUCTURED_FIELDS
@@ -263,8 +277,25 @@ def decode_envelope(payload: str) -> TextEnvelope | None:
         text=text,
         sender_id=str(sender_id or ""),
         avatar_hash=str(avatar_hash or ""),
+        message_id=str(message_id or ""),
+        sent_at=_int_value(sent_at),
         metadata=metadata,
     )
+
+
+def message_id_for(sender_id: str, sent_at: int, text: str) -> str:
+    """Match tokifactor's UUID.nameUUIDFromBytes identity derivation."""
+    digest = hashlib.md5(
+        f"{sender_id}\x00{int(sent_at)}\x00{text}".encode("utf-8")
+    ).digest()
+    return str(uuid.UUID(bytes=digest, version=3))
+
+
+def _int_value(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def encode_avatar_have(sender_id: str, avatar_hash: str, data: str) -> str:
@@ -330,6 +361,8 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
                 "sender",
                 "senderId",
                 "avatarHash",
+                "messageId",
+                "sentAt",
                 "size",
                 "caption",
                 "status",
@@ -340,12 +373,16 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
     transfer_id = str(value.get("id") or "")
     sender = str(value.get("sender") or "Unknown")
     sender_id = str(value.get("senderId") or "")
+    message_id = str(value.get("messageId") or "")
+    sent_at = _int_value(value.get("sentAt"))
     if str(value.get("status") or "").lower() == "abort":
         return {
             "abort": True,
             "transfer_id": transfer_id.split(":", 1)[0],
             "sender": sender,
             "sender_id": sender_id,
+            "message_id": message_id,
+            "sent_at": sent_at,
             "reason": str(value.get("reason") or "cancel"),
         }
     parts = transfer_id.split(":")
@@ -380,6 +417,8 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
         "encrypted_data": encrypted,
         "sender": sender,
         "sender_id": sender_id,
+        "message_id": message_id,
+        "sent_at": sent_at,
         "metadata": metadata,
         "size": size,
         "caption": str(value.get("caption") or ""),
@@ -410,6 +449,8 @@ class TextChunkAssembler:
                 expected_hash=str(chunk.get("hash") or ""),
                 sender=str(chunk.get("sender") or "Unknown"),
                 sender_id=str(chunk.get("sender_id") or ""),
+                message_id=str(chunk.get("message_id") or ""),
+                sent_at=_int_value(chunk.get("sent_at")),
                 metadata=dict(chunk.get("metadata") or {}),
                 size=int(chunk.get("size") or 0),
             )
@@ -441,6 +482,8 @@ class TextChunkAssembler:
             sender=transfer.sender,
             text=text,
             sender_id=transfer.sender_id,
+            message_id=transfer.message_id,
+            sent_at=transfer.sent_at,
             metadata=transfer.metadata,
         )
 
@@ -473,6 +516,8 @@ def encode_text_payloads(
     sender: str,
     sender_id: str,
     avatar_hash: str = "",
+    message_id: str | None = None,
+    sent_at: int | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> list[str]:
     extra = {
@@ -481,18 +526,22 @@ def encode_text_payloads(
         if metadata is not None and key in metadata and metadata[key] is not None
     }
     raw = text.encode("utf-8")
+    event_at = int(sent_at if sent_at is not None else time.time() * 1000)
+    identity = message_id or message_id_for(sender_id, event_at, text)
     if len(raw) <= TEXT_CHUNK_THRESHOLD_BYTES:
         envelope = TextEnvelope(
             sender=sender,
             text=text,
             sender_id=sender_id,
             avatar_hash=avatar_hash,
+            message_id=identity,
+            sent_at=event_at,
             metadata=extra,
         )
         encrypted = encrypt_bytes(encode_envelope(envelope).encode("utf-8"), magic_string)
         return [base64.b64encode(encrypted).decode("ascii")]
 
-    transfer_id = str(uuid.uuid4())
+    transfer_id = identity
     digest = hashlib.sha256(raw).hexdigest()
     total = max(1, (len(raw) + TEXT_CHUNK_BYTES - 1) // TEXT_CHUNK_BYTES)
     payloads: list[str] = []
@@ -506,6 +555,8 @@ def encode_text_payloads(
             ("sender", sender),
             ("senderId", sender_id),
             ("avatarHash", avatar_hash),
+            ("messageId", identity),
+            ("sentAt", str(event_at)),
             ("size", str(len(raw))),
         ]
         pairs.extend((key, extra[key]) for key in STRUCTURED_FIELDS if key in extra)
@@ -534,6 +585,7 @@ def encode_picture_payloads(
     sender_id: str,
     avatar_hash: str = "",
     caption: str = "",
+    sent_at: int | None = None,
 ) -> tuple[str, list[str]]:
     if not data:
         raise ValueError("image is empty")
@@ -545,6 +597,7 @@ def encode_picture_payloads(
         else ""
     )
     total = max(1, (len(data) + TEXT_CHUNK_BYTES - 1) // TEXT_CHUNK_BYTES)
+    event_at = int(sent_at if sent_at is not None else time.time() * 1000)
     payloads: list[str] = []
     for index in range(total):
         part = data[index * TEXT_CHUNK_BYTES : (index + 1) * TEXT_CHUNK_BYTES]
@@ -558,6 +611,8 @@ def encode_picture_payloads(
             ("avatarHash", avatar_hash),
             ("size", str(len(data))),
         ]
+        if event_at > 0:
+            pairs.append(("sentAt", str(event_at)))
         if caption_cipher:
             pairs.append(("caption", caption_cipher))
         chunk = _encode_object(pairs)

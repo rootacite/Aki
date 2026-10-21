@@ -59,6 +59,7 @@ class MqttClient:
         *,
         client_id: str | None = None,
         keepalive: int = 30,
+        clean_session: bool = True,
         on_message: Callable[[str, bytes], Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
@@ -66,6 +67,7 @@ class MqttClient:
         self.port = port
         self.client_id = client_id or f"akid-{uuid.uuid4().hex[:12]}"
         self.keepalive = keepalive
+        self.clean_session = clean_session
         self.on_message = on_message
         self.logger = logger or logging.getLogger("akid.mqtt")
 
@@ -82,6 +84,7 @@ class MqttClient:
         self._closing = False
         self._last_error: str | None = None
         self._connected_at: float | None = None
+        self._session_present = False
 
     @property
     def connected(self) -> bool:
@@ -99,6 +102,10 @@ class MqttClient:
     def connected_at(self) -> float | None:
         return self._connected_at
 
+    @property
+    def session_present(self) -> bool:
+        return self._session_present
+
     async def connect(self, timeout: float = 12.0) -> None:
         self._closed.clear()
         self._closing = False
@@ -114,7 +121,7 @@ class MqttClient:
         self._reader_task = asyncio.create_task(self._read_loop(), name="mqtt-reader")
         connect_body = (
             encode_utf8("MQTT")
-            + bytes([4, 0x02])
+            + bytes([4, 0x02 if self.clean_session else 0x00])
             + self.keepalive.to_bytes(2, "big")
             + encode_utf8(self.client_id)
         )
@@ -219,6 +226,7 @@ class MqttClient:
                 if packet_type == CONNACK:
                     if len(body) < 2:
                         raise MqttError("invalid CONNACK")
+                    self._session_present = bool(body[0] & 0x01)
                     if self._connack is not None and not self._connack.done():
                         self._connack.set_result(body[1])
                 elif packet_type == SUBACK:

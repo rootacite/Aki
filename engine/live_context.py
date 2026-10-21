@@ -160,6 +160,8 @@ class ChannelTranscriptEntry:
     text: str
     from_agent: bool = False
     timestamp: str = ""
+    sent_at: int = 0
+    message_id: str = ""
     phase: str = "final"
     arrived_while_busy: bool = False
 
@@ -411,7 +413,7 @@ def _channel_transcript_entry(
     source = "agent" if entry.from_agent else "user"
     new_attr = ' new="true"' if new_seq is not None and entry.seq == new_seq else ""
     busy_attr = ' during-work="true"' if entry.arrived_while_busy else ""
-    timestamp = entry.timestamp or "unknown"
+    timestamp = _channel_entry_time(entry)
     return "\n".join(
         [
             f"<message seq={_attr(str(entry.seq))} sender={_attr(entry.sender)} "
@@ -422,6 +424,29 @@ def _channel_transcript_entry(
             "</message>",
         ]
     )
+
+
+def _channel_entry_time(entry: ChannelTranscriptEntry) -> str:
+    if entry.sent_at > 0:
+        try:
+            return datetime.fromtimestamp(
+                entry.sent_at / 1000.0, tz=timezone.utc
+            ).astimezone().isoformat(timespec="seconds")
+        except (OSError, OverflowError, ValueError):
+            pass
+    return entry.timestamp or "unknown"
+
+
+def _channel_entry_sort_key(entry: ChannelTranscriptEntry) -> tuple[int, int]:
+    if entry.sent_at > 0:
+        return entry.sent_at, entry.seq
+    if entry.timestamp:
+        try:
+            value = datetime.fromisoformat(entry.timestamp.replace("Z", "+00:00"))
+            return int(value.timestamp() * 1000), entry.seq
+        except (OverflowError, ValueError):
+            pass
+    return 0, entry.seq
 
 
 def _truncate_to_tokens(text: str, max_tokens: int) -> str:
@@ -451,7 +476,7 @@ def render_channel_transcript(
 ) -> str:
     """Render recent final channel text within a conservative byte budget."""
     budget = max(1024, min(int(budget_tokens), DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS))
-    all_entries = list(entries)
+    all_entries = sorted(entries, key=_channel_entry_sort_key)
     if not all_entries:
         return ""
 
