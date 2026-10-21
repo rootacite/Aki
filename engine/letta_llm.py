@@ -8,8 +8,15 @@ from datetime import datetime
 from pathlib import Path
 
 from engine.aki_config import AkiConfig, ModelRoute, atomic_write, load_config, set_key
+from engine.execution_policy import (
+    LOCK_ACQUIRE_TOOL,
+    LOCK_RELEASE_TOOL,
+    READ_ONLY_MCP_TOOLS,
+    READ_ONLY_TOOLS,
+)
 
 DEEPSEEK_HANDLE = "deepseek/deepseek-flash"
+EXECUTION_LOCK_MOD_NAME = "aki-execution-lock.ts"
 
 
 def render_provider_mod(config: AkiConfig) -> str:
@@ -152,6 +159,68 @@ def write_provider_mod(letta_home: Path, config: AkiConfig) -> Path:
     return path
 
 
+def render_execution_lock_mod() -> str:
+    readonly = json.dumps(sorted(READ_ONLY_TOOLS))
+    readonly_mcp = json.dumps(sorted(READ_ONLY_MCP_TOOLS))
+    lock_tools = json.dumps(sorted((LOCK_ACQUIRE_TOOL, LOCK_RELEASE_TOOL)))
+    return f"""import {{ readFileSync }} from "node:fs";
+
+const READ_ONLY = new Set({readonly});
+const READ_ONLY_MCP = new Set({readonly_mcp});
+const LOCK_TOOLS = new Set({lock_tools});
+
+function pidAlive(pid) {{
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {{
+    process.kill(pid, 0);
+    return true;
+  }} catch (error) {{
+    return error && error.code === "EPERM";
+  }}
+}}
+
+function readHolder() {{
+  const path = process.env.AKI_EXECUTION_LOCK_STATUS;
+  if (!path) return null;
+  try {{
+    const value = JSON.parse(readFileSync(path, "utf8"));
+    return value && typeof value === "object" ? value : null;
+  }} catch (error) {{
+    return null;
+  }}
+}}
+
+function denies(toolName) {{
+  if (LOCK_TOOLS.has(toolName)) return;
+  if (READ_ONLY.has(toolName) || READ_ONLY_MCP.has(toolName)) return;
+  const profile = process.env.AKI_PROFILE || "";
+  const holder = readHolder();
+  if (holder && holder.profile === profile && pidAlive(holder.pid)) return;
+  const reason = holder
+    ? `EXECUTION_LOCK_REQUIRED: the device-wide execution lock is held by ${{holder.profile || "another profile"}}. Do not retry; end this turn.`
+    : "EXECUTION_LOCK_REQUIRED: call acquire_execution_lock before any non-read-only tool. Do not retry; end this turn.";
+  return {{ decision: "deny", reason }};
+}}
+
+export default function activate(letta) {{
+  if (!letta.capabilities || !letta.capabilities.permissions) return;
+  return letta.permissions.register({{
+    id: "aki-execution-lock",
+    description: "Require the device-wide execution lock for non-read-only tools",
+    isEnabled: () => Boolean(process.env.AKI_PROFILE),
+    check: (event) => denies(event.toolName),
+  }});
+}}
+"""
+
+
+def write_execution_lock_mod(letta_home: Path) -> Path:
+    path = letta_home / "mods" / EXECUTION_LOCK_MOD_NAME
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_write(path, render_execution_lock_mod())
+    return path
+
+
 def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> AkiConfig:
     """Publish this profile's loopback provider and retarget only its agent.
 
@@ -169,6 +238,7 @@ def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> 
                 set_key(config.path, "upstream.deepseek", "api_key", key)
                 config = load_config(config.path, profile=config.profile)
     write_provider_mod(letta_home, config)
+    write_execution_lock_mod(letta_home)
     provider_id = config.provider_id
     ready = bool(config.enabled_models)
     file = _read_auth(auth_path)

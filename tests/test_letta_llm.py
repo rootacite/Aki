@@ -7,7 +7,13 @@ from pathlib import Path
 
 from engine.aki_config import atomic_write, load_config, set_key, template_text
 from engine.aki_config import ModelRoute
-from engine.letta_llm import _compat, prepare_letta, supported_reasoning_efforts
+from engine.letta_llm import (
+    EXECUTION_LOCK_MOD_NAME,
+    _compat,
+    prepare_letta,
+    render_execution_lock_mod,
+    supported_reasoning_efforts,
+)
 
 
 class ReasoningEffortTests(unittest.TestCase):
@@ -139,6 +145,9 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertEqual(two["model"], "deepseek/deepseek-flash")
         self.assertEqual(two["model_settings"]["provider_type"], "deepseek")
         self.assertTrue((self.letta_home / "mods" / "aki-proxy-aki.ts").is_file())
+        self.assertTrue(
+            (self.letta_home / "mods" / EXECUTION_LOCK_MOD_NAME).is_file()
+        )
         self.assertFalse(legacy_mod.exists())
         backups = list((self.letta_home / "backups").glob("llm-proxy-*/auth.json"))
         self.assertEqual(len(backups), 1)
@@ -175,6 +184,18 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertEqual(two["model_settings"]["provider_type"], "aki-fuyu")
         self.assertTrue((self.letta_home / "mods" / "aki-proxy-aki.ts").is_file())
         self.assertTrue((self.letta_home / "mods" / "aki-proxy-fuyu.ts").is_file())
+
+    def test_execution_lock_mod_is_generated_fail_closed(self) -> None:
+        mod = render_execution_lock_mod()
+        self.assertIn("letta.permissions.register", mod)
+        self.assertIn("EXECUTION_LOCK_REQUIRED", mod)
+        self.assertIn("mcp__tavily__tavily_search", mod)
+        self.assertIn("acquire_execution_lock", mod)
+        self.assertNotIn("mcp__local__", mod)
+        self.assertIn("desktop_take_screenshot", mod)
+        self.assertIn("camera_take_photo", mod)
+        self.assertNotIn("if (LOCK_TOOLS.has(toolName)) return null", mod)
+        self.assertNotIn("pidAlive(holder.pid)) return null", mod)
 
 
 if __name__ == "__main__":

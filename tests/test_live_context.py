@@ -35,6 +35,7 @@ from engine.live_context import (
     render_channel_transcript,
     render_live_context,
     route_channel_reply,
+    select_execution_responder,
 )
 
 
@@ -176,6 +177,41 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn("直接说话即可", plain_text)
         self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
+
+    def test_execution_responder_is_single_and_deterministic(self) -> None:
+        members = self.members()
+        aki = render_channel_context(
+            self_member=members[0], members=members, message="do this"
+        )
+        self.assertIn('<execution-ownership responder="aki" self="true">', aki)
+        self.assertIn("唯一负责确认", aki)
+        fuyu = render_channel_context(
+            self_member=members[1], members=members, message="do this"
+        )
+        self.assertIn('<execution-ownership responder="aki" self="false">', fuyu)
+        self.assertIn("不要尝试执行", fuyu)
+        mentioned = render_channel_context(
+            self_member=members[1], members=members, message="@Fuyu do this"
+        )
+        self.assertNotIn("<execution-ownership", mentioned)
+        self.assertEqual(
+            select_execution_responder(
+                [
+                    ChannelMember(id="haru", name="Haru"),
+                    ChannelMember(id="fuyu", name="Fuyu"),
+                ]
+            ),
+            "fuyu",
+        )
+
+    def test_single_member_gets_lock_guidance_without_ownership_block(self) -> None:
+        member = ChannelMember(id="fuyu", name="Fuyu", aliases=("Fuyu",))
+        text = render_channel_context(
+            self_member=member, members=[member], message="do this"
+        )
+        self.assertNotIn("<execution-ownership", text)
+        self.assertIn("唯一在线成员", text)
+        self.assertIn("acquire_execution_lock", text)
 
     def test_reply_wake_routing_uses_profile_user_name(self) -> None:
         members = self.members()

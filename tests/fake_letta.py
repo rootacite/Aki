@@ -77,6 +77,43 @@ class FakeLetta:
         )
         return self.wait_for_response(request_id)
 
+    def acquire_execution_lock(self, number: int) -> None:
+        tool_call_id = f"lock-{number}"
+        emit(
+            {
+                "type": "control_request",
+                "request_id": f"ext-{tool_call_id}",
+                "request": {
+                    "subtype": "execute_external_tool",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": "acquire_execution_lock",
+                    "input": {},
+                },
+            }
+        )
+        self.wait_for_response(f"ext-{tool_call_id}")
+
+    def call_external_tool(self, name: str, tool_input: dict, tool_call_id: str) -> str:
+        emit(
+            {
+                "type": "control_request",
+                "request_id": f"ext-{tool_call_id}",
+                "request": {
+                    "subtype": "execute_external_tool",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": name,
+                    "input": tool_input,
+                },
+            }
+        )
+        response = self.wait_for_response(f"ext-{tool_call_id}") or {}
+        parts = response.get("content") or []
+        return "".join(
+            part.get("text", "")
+            for part in parts
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+
     def run_turn(self, content: str) -> None:
         self.turn_number += 1
         number = self.turn_number
@@ -209,10 +246,65 @@ class FakeLetta:
             )
             return
         is_channel = content.startswith("[akid MQTT channel message]")
+        if content in ("LOCK_ACQUIRE", "LOCK_ACQUIRE_RELEASE"):
+            acquired = self.call_external_tool(
+                "acquire_execution_lock", {}, f"lock-acquire-{number}"
+            )
+            released = ""
+            if content == "LOCK_ACQUIRE_RELEASE":
+                released = " | " + self.call_external_tool(
+                    "release_execution_lock", {}, f"lock-release-{number}"
+                )
+            text = acquired + released
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": text}],
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": text,
+                }
+            )
+            return
+        if content == "LOCK_ACQUIRE_SLOW":
+            self.call_external_tool(
+                "acquire_execution_lock", {}, f"lock-slow-{number}"
+            )
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": "lock held"}],
+                }
+            )
+            if self.interrupt.wait(20.0):
+                emit(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "stop_reason": "cancelled",
+                        "result": "cancelled",
+                    }
+                )
+            else:
+                emit(
+                    {
+                        "type": "result",
+                        "subtype": "success",
+                        "stop_reason": "end_turn",
+                        "result": "done",
+                    }
+                )
+            return
         if "EXTERNAL_IMAGE:" in content:
             marker = "EXTERNAL_IMAGE:"
             path_value = content.split(marker, 1)[1].splitlines()[0].strip()
             tool_call_id = f"image-tool-{number}"
+            self.acquire_execution_lock(number)
             self.request_tool(
                 "tokifactor_send_image",
                 {"path": path_value, "caption": "fake caption"},
@@ -333,6 +425,7 @@ class FakeLetta:
                 emit_chunk(
                     {"message_type": "assistant_message", "content": [{"type": "text", "text": "checking channel tool\n"}]}
                 )
+                self.acquire_execution_lock(number)
                 response = self.request_tool("Bash", {"command": "echo channel-unsafe"}, f"tool-ch-{number}")
                 body = (response or {}).get("response") or {}
                 allowed = body.get("behavior") == "allow"
@@ -392,12 +485,14 @@ class FakeLetta:
                 )
                 emit({"type": "result", "subtype": "success", "stop_reason": "end_turn", "result": "done"})
             return
-        if content in ("dangerous", "timeout", "safe"):
+        if content in ("dangerous", "timeout", "safe", "unlocked-bash"):
             tool_name = "Read" if content == "safe" else "Bash"
             tool_input = {"path": "MEMORY.md"} if content == "safe" else {"command": "echo unsafe"}
             emit_chunk(
                 {"message_type": "assistant_message", "content": [{"type": "text", "text": "checking tool\n"}]}
             )
+            if content in ("dangerous", "timeout"):
+                self.acquire_execution_lock(number)
             response = self.request_tool(tool_name, tool_input, f"tool-{number}")
             body = (response or {}).get("response") or {}
             allowed = body.get("behavior") == "allow"

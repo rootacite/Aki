@@ -22,6 +22,7 @@ from engine.akid import (
     Turn,
     _b64url,
     _normalize_mcp_result,
+    unique_capture_path,
 )
 from engine.letta_process import LettaProcess
 from engine.live_context import WindowInfo, estimate_tokens
@@ -352,6 +353,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             username_source=username_source,
             username_path=username_path,
             profile_config_path=profile_config_path or (self.root / "aki.conf"),
+            execution_lock_path=self.root / "execution.lock",
+            execution_lock_status_path=self.root / "execution.lock.json",
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -1087,6 +1090,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             memory_dir=self.memory,
             backend_dir=self.root / "backend",
             mcp_native_tools_enabled=False,
+            execution_lock_path=self.root / "execution.lock",
+            execution_lock_status_path=self.root / "execution.lock.json",
         )
 
         def factory(on_message, on_ready, on_exit):
@@ -1426,6 +1431,134 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(body, prompt)
         self.assertIn("not a user message", prompt)
         self.assertIn("<aki-channel-transcript>", prompt)
+
+    async def test_execution_lock_policy_is_injected_into_system_prompt(self) -> None:
+        agent_path = self._write_test_agent()
+        server = await self.start_server()
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "hello"})
+        await client.collect_turn(turn["turn_id"])
+        system = self._agent_system(agent_path)
+        self.assertIn("<aki-execution-lock", system)
+        self.assertIn('authorized="true"', system)
+        self.assertIn("acquire_execution_lock", system)
+        self.assertIn("只读工具不需要锁", system)
+
+    async def test_channel_execution_lock_authorization_matrix(self) -> None:
+        agent_path = self._write_test_agent()
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu", "冬"),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        self.assertEqual(
+            server._channel_lock_authorization("do this", from_agent=False),
+            (False, "user-must-name-executor"),
+        )
+        self.assertEqual(
+            server._channel_lock_authorization("@Aki do this", from_agent=False),
+            (True, "user-mentioned"),
+        )
+        self.assertEqual(
+            server._channel_lock_authorization("@Fuyu do this", from_agent=False),
+            (False, "mentioned-other-members"),
+        )
+        self.assertEqual(
+            server._channel_lock_authorization("@Aki do this", from_agent=True),
+            (False, "agent-message"),
+        )
+        await server._on_channel_text("alice", "alice-1", "do this")
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        system = self._agent_system(agent_path)
+        self.assertIn("<aki-execution-lock", system)
+        self.assertIn('authorized="false"', system)
+        self.assertIn('reason="user-must-name-executor"', system)
+        prompt = server._channel_prompt("alice", "alice-1", "do this")
+        self.assertIn('<execution-ownership responder="aki" self="true">', prompt)
+        self.assertIn("唯一负责确认", prompt)
+
+    async def test_single_channel_member_may_acquire_lock_without_mention(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        self.assertEqual(
+            self.server._channel_lock_authorization("do this", from_agent=False),
+            (True, "single-online-member"),
+        )
+
+    async def test_execution_lock_tools_acquire_and_auto_release(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE"})
+        events = await client.collect_turn(turn["turn_id"])
+        text = "".join(
+            str(event["data"].get("text") or "")
+            for event in events
+            if event["type"] == "assistant_message"
+        )
+        self.assertIn("EXECUTION_LOCK_ACQUIRED", text)
+        await wait_until(lambda: not self.server.execution_lock.status()["held"])
+
+        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE_RELEASE"})
+        events = await client.collect_turn(turn["turn_id"])
+        text = "".join(
+            str(event["data"].get("text") or "")
+            for event in events
+            if event["type"] == "assistant_message"
+        )
+        self.assertIn("EXECUTION_LOCK_ACQUIRED", text)
+        self.assertIn("EXECUTION_LOCK_RELEASED", text)
+        self.assertFalse(self.server.execution_lock.status()["held"])
+
+    async def test_execution_lock_contention_returns_owner_and_ends_turn(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        holder = self.server.execution_lock
+        acquired, _ = holder.acquire(
+            profile="fuyu", agent_id="fuyu-agent", turn_id="foreign-turn"
+        )
+        self.assertTrue(acquired)
+        try:
+            client = await self.client()
+            await client.hello()
+            turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE"})
+            events = await client.collect_turn(turn["turn_id"])
+            text = "".join(
+                str(event["data"].get("text") or "")
+                for event in events
+                if event["type"] == "assistant_message"
+            )
+            self.assertIn("EXECUTION_LOCK_UNAVAILABLE", text)
+            self.assertIn("fuyu", text)
+            self.assertTrue(holder.status()["held"])
+        finally:
+            holder.release(profile="fuyu", turn_id="foreign-turn")
+
+    async def test_execution_lock_is_released_when_turn_is_cancelled(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE_SLOW"})
+        await wait_until(lambda: self.server.execution_lock.status()["held"])
+        await client.call("aki.chat.cancel", {"turn_id": turn["turn_id"]})
+        await wait_until(lambda: not self.server.execution_lock.status()["held"])
+
+    async def test_unlocked_non_read_only_tool_is_denied(self) -> None:
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "unlocked-bash"})
+        events = await client.collect_turn(turn["turn_id"])
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        self.assertEqual(tool_result["data"]["status"], "error")
+        self.assertIn("EXECUTION_LOCK_REQUIRED", str(tool_result["data"]["tool_return"]))
 
     async def test_user_channel_message_stays_user_and_enters_transcript(self) -> None:
         agent_path = self._write_test_agent()
@@ -2273,6 +2406,17 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+    async def test_foreign_approval_command_is_ignored_silently(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel, approval_timeout=5.0)
+        handled = await server._handle_channel_command(
+            "akid-approve perm-owned-by-another-agent", "alice-1"
+        )
+        self.assertTrue(handled)
+        await asyncio.sleep(0.1)
+        self.assertEqual(fake_channel.published, [])
+        self.assertEqual(fake_channel.events, [])
+
     async def test_channel_cannot_approve_local_turn(self) -> None:
         server = await self.start_server(approval_timeout=5.0)
         fake_channel = FakeChannel()
@@ -2768,8 +2912,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("firefox", first_system)
                 self.assertIn("python", first_system)
                 self.assertIn("echo { CORE_MEMORY }", first_system)
-                self.assertIn("live/desktop.png", first_system)
-                self.assertTrue((self.root / "live-shots" / "live" / "desktop.png").is_file())
+                self.assertIn("live/desktop-", first_system)
+                live_files = list(
+                    (self.root / "live-shots" / "live").glob("desktop-*.png")
+                )
+                self.assertEqual(len(live_files), 1)
 
                 await asyncio.sleep(1.05)
                 second = await client.call("aki.chat.send", {"message": "again"})
@@ -2787,9 +2934,27 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 health = await client.call("aki.status", {})
                 self.assertTrue(health["live_context"]["updated"])
                 self.assertTrue(health["live_context"]["last_sections"]["screenshot"])
+                self.assertEqual(
+                    len(list((self.root / "live-shots" / "live").glob("desktop-*.png"))),
+                    2,
+                )
         finally:
             for sock in sockets:
                 sock.close()
+
+    def test_unique_capture_paths_do_not_collide(self) -> None:
+        directory = self.root / "unique-captures"
+        paths = {
+            unique_capture_path(directory, "capture", ".png")
+            for _ in range(25)
+        }
+        self.assertEqual(len(paths), 25)
+        for path in paths:
+            self.assertEqual(path.parent, directory)
+            self.assertRegex(
+                path.name,
+                r"^capture-\d{8}-\d{6}-\d{6}-[0-9a-f]{8}\.png$",
+            )
 
     async def test_live_context_screenshot_failure_omits_section(self) -> None:
         runtime, sockets = self._wayland_runtime()

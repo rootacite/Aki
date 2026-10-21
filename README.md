@@ -414,6 +414,26 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 三种选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
 `<aki-channel-transcript>` 使用。
 
+### 非只读执行锁
+
+工具是否只读由代码静态分类，不交给模型判断。`Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、
+`ListDir`、`ViewImage`、桌面截图、摄像头和 Tavily 的只读 MCP 工具可直接使用；`Bash`、
+`Memory`、`Agent`、写入/编辑/补丁、任务状态写入、发图、未知 MCP 以及所有未明确列出的
+工具都按非只读处理。截图和摄像头输出使用时间戳加随机后缀，避免并发调用互相覆盖。
+
+非只读工具受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn。模型必须
+先调用 `acquire_execution_lock`；锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是
+重试。完成后可调用 `release_execution_lock`，turn 正常结束、取消、异常或进程退出时也会
+自动释放。
+
+Letta permission overlay 会拦截未持锁的非只读工具调用，外部工具处理器也会复查。锁状态
+通过 `aki.health` / `aki.status` 的 `execution_lock` 字段公开。
+
+用户消息没有有效 `@` 且存在多个在线成员时，纯聊天和只读工具仍可直接回复；如果完成任务
+需要非只读操作，所有成员都不能自行执行。固定确认者优先选择 `aki`，否则选择 channel id
+字典序最小的在线成员，由它请用户用有效 `@成员名` 指定执行者。只有一个在线成员时，无 `@`
+的动作请求可以直接获取锁并执行。其他智能体的 `@` 不能授权非只读执行。
+
 最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user

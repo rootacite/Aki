@@ -64,6 +64,23 @@ from engine.channel import (
     ChannelUnavailable,
     TokifactorChannel,
 )
+from engine.execution_lock import (
+    ExecutionLock,
+    default_execution_lock_path,
+    default_execution_lock_status_path,
+)
+from engine.execution_policy import (
+    LOCK_ACQUIRE_TOOL,
+    LOCK_BUSY_ERROR,
+    LOCK_NOT_AUTHORIZED_ERROR,
+    LOCK_RELEASE_TOOL,
+    LOCK_REQUIRED_ERROR,
+    apply_execution_lock_policy,
+    clear_execution_lock_policy,
+    is_lock_control_tool,
+    render_execution_lock_policy,
+    requires_execution_lock,
+)
 from engine.live_context import (
     DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
     DEFAULT_BUDGET_TOKENS as DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS,
@@ -133,6 +150,8 @@ EXTERNAL_TOOL_NAMES = {
     TOKIFACTOR_IMAGE_TOOL_NAME,
     CAMERA_TOOL_NAME,
     SCREENSHOT_TOOL_NAME,
+    LOCK_ACQUIRE_TOOL,
+    LOCK_RELEASE_TOOL,
 }
 MCP_TOOL_PREFIX = "mcp__"
 MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
@@ -205,7 +224,8 @@ CAMERA_TOOL = {
         "absolute image path, size, dimensions, device, and MIME type; image "
         "bytes are never attached to this result. Call Read or ViewImage on the "
         "returned path only if you need to inspect the photo. Files under /tmp "
-        "are ephemeral and may disappear after reboot."
+        "are ephemeral and may disappear after reboot. Each capture uses a unique "
+        "timestamped filename."
     ),
     "parameters": {
         "type": "object",
@@ -241,7 +261,8 @@ SCREENSHOT_TOOL = {
         "Returns only the absolute image path, size, dimensions, display, and "
         "capture backend; image bytes are never attached to this result. Call "
         "Read or ViewImage on the returned path only if you need to inspect the "
-        "image. Files under /tmp are ephemeral and may disappear after reboot."
+        "image. Files under /tmp are ephemeral and may disappear after reboot. "
+        "Each capture uses a unique timestamped filename."
     ),
     "parameters": {
         "type": "object",
@@ -263,6 +284,41 @@ SCREENSHOT_TOOL = {
 
 SAFE_TOOLS = {"Read", "ReadLSP", "Grep", "Glob", "LS", "Memory", "ViewImage"}
 SAFE_TOOL_PREFIXES = ("mcp__tavily__",)
+
+ACQUIRE_EXECUTION_LOCK_TOOL = {
+    "name": LOCK_ACQUIRE_TOOL,
+    "label": "Acquire execution lock",
+    "description": (
+        "Acquire the device-wide exclusive lock required for non-read-only tools. "
+        "Call this before Bash, Memory, Agent, file writes, MCP tools not explicitly "
+        "classified read-only, or sending images. If acquisition "
+        "fails, do not retry; end the turn. The lock is released automatically when "
+        "the turn ends."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "auto_background": False,
+    "timeout_ms": 10000,
+}
+
+RELEASE_EXECUTION_LOCK_TOOL = {
+    "name": LOCK_RELEASE_TOOL,
+    "label": "Release execution lock",
+    "description": (
+        "Release the device-wide execution lock held by this turn. The gateway also "
+        "releases it automatically when the turn ends."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": False,
+    },
+    "auto_background": False,
+    "timeout_ms": 10000,
+}
 CAPABILITIES = {
     "streaming": True,
     "approvals": True,
@@ -297,6 +353,12 @@ def default_camera_dir() -> Path:
 
 def default_screenshot_dir() -> Path:
     return Path("/tmp") / "aki" / "screenshots"
+
+
+def unique_capture_path(directory: Path, prefix: str, suffix: str) -> Path:
+    """Return a timestamped path with a random suffix to avoid capture collisions."""
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    return directory / f"{prefix}-{stamp}-{uuid.uuid4().hex[:8]}{suffix}"
 
 
 def prepare_private_output_dir(path: Path, label: str) -> None:
@@ -612,6 +674,8 @@ class GatewayConfig:
     mcp_native_state: Path | None = None
     mcp_native_max_tools: int = DEFAULT_MCP_NATIVE_MAX_TOOLS
     mcp_tool_timeout: float = DEFAULT_MCP_TOOL_TIMEOUT
+    execution_lock_path: Path | None = None
+    execution_lock_status_path: Path | None = None
 
 
 @dataclass(eq=False)
@@ -1016,6 +1080,9 @@ class Turn:
     origin: str = "local"
     origin_sender_id: str = ""
     origin_is_agent: bool = False
+    lock_authorized: bool = True
+    lock_authorization: str = "local-turn"
+    lock_held: bool = False
     channel_message_seq: int | None = None
     conversation_snapshot: dict[str, Any] | None = None
     busy_messages: list[dict[str, Any]] = field(default_factory=list)
@@ -1158,6 +1225,14 @@ class GatewayServer:
         )
         self._mcp_lock = asyncio.Lock()
         self._load_mcp_native_state()
+        lock_path = config.execution_lock_path or default_execution_lock_path()
+        self.execution_lock = ExecutionLock(
+            path=lock_path,
+            status_path=(
+                config.execution_lock_status_path
+                or default_execution_lock_status_path(lock_path)
+            ),
+        )
         self.avatar_path = config.avatar_path or default_avatar_path()
         self.avatar: AvatarAsset | None = None
         self.avatar_error: str | None = None
@@ -1214,6 +1289,14 @@ class GatewayServer:
         ]
         command = letta_command
         env = dict(os.environ)
+        env.update(
+            {
+                "AKI_PROFILE": self.config.profile,
+                "AKI_EXECUTION_LOCK_STATUS": str(
+                    self.execution_lock.status_path
+                ),
+            }
+        )
         if self.config.sandbox_enabled:
             command = [
                 sys.executable,
@@ -1330,6 +1413,8 @@ class GatewayServer:
         for task in all_tasks:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        if self.active is not None:
+            self._release_turn_lock(self.active)
         if server is not None:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await server.wait_closed()
@@ -1353,8 +1438,10 @@ class GatewayServer:
                 await self.channel.stop()
         with contextlib.suppress(Exception):
             await self.backend.stop()
+        self.execution_lock.close()
         self._clear_live_context_block()
         self._clear_channel_transcript_block()
+        self._clear_execution_lock_policy()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
         LOGGER.info("akid stopped")
@@ -1867,6 +1954,7 @@ class GatewayServer:
                 "remaining": self._agent_initiation_remaining,
                 "limit": self.config.agent_initiation_limit,
             },
+            "execution_lock": self.execution_lock.status(),
             "backend": backend,
             "channel": channel,
             "sandbox": sandbox,
@@ -2161,9 +2249,50 @@ class GatewayServer:
             except (OSError, ValueError) as exc:
                 LOGGER.warning("failed to refresh channel transcript: %s", exc)
 
+    async def _refresh_execution_lock_policy(self, turn: Turn) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        holder = self.execution_lock.status().get("holder")
+        block = render_execution_lock_policy(
+            authorized=turn.lock_authorized,
+            reason=turn.lock_authorization,
+            holder=holder if isinstance(holder, dict) else None,
+        )
+        async with self._channel_transcript_lock:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict):
+                    raise ValueError("agent record is not a JSON object")
+                system = record.get("system")
+                if not isinstance(system, str) or not system:
+                    raise ValueError("agent system prompt is not a string")
+                updated = apply_execution_lock_policy(system, block)
+                if updated != system:
+                    self._write_agent_record(path, record, updated)
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("failed to refresh execution lock policy: %s", exc)
+
+    def _clear_execution_lock_policy(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                return
+            system = record.get("system")
+            if not isinstance(system, str) or not system:
+                return
+            cleared = clear_execution_lock_policy(system)
+            if cleared != system:
+                self._write_agent_record(path, record, cleared)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("failed to clear execution lock policy: %s", exc)
+
     async def _capture_live_screenshot(self) -> dict[str, Any] | None:
         output_dir = self.config.screenshot_output_dir or default_screenshot_dir()
-        output = output_dir / "live" / "desktop.png"
+        output = unique_capture_path(output_dir / "live", "desktop", ".png")
         return await self._execute_screenshot_capture(
             {"include_cursor": False},
             output_path=output,
@@ -2303,6 +2432,7 @@ class GatewayServer:
                 "remaining": self._agent_initiation_remaining,
                 "limit": self.config.agent_initiation_limit,
             },
+            "execution_lock": self.execution_lock.status(),
             "model": model,
             "reasoning": reasoning,
             "context_limit": context_limit,
@@ -2427,6 +2557,7 @@ class GatewayServer:
                 )
                 await self._finish_turn(turn, "backend_unavailable")
                 return
+            await self._refresh_execution_lock_policy(turn)
             if turn.origin == "mqtt":
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
@@ -2549,6 +2680,7 @@ class GatewayServer:
         if turn.end_sent:
             return
         turn.end_sent = True
+        self._release_turn_lock(turn)
         turn.finished_at = time.time()
         turn.state = "finished"
         assistant_text = "".join(turn.assistant_parts)
@@ -2603,16 +2735,22 @@ class GatewayServer:
             if handled:
                 continue
             origin_is_agent = bool(item.get("origin_is_agent", False))
+            text = str(item["text"])
+            lock_authorized, lock_authorization = self._channel_lock_authorization(
+                text, from_agent=origin_is_agent
+            )
             self._enqueue_channel_turn(
                 self._channel_prompt(
                     str(item["sender"]),
                     str(item["sender_id"]),
-                    str(item["text"]),
+                    text,
                     from_agent=origin_is_agent,
                 ),
                 str(item["sender_id"]),
                 origin_is_agent=origin_is_agent,
                 channel_message_seq=int(item["seq"]),
+                lock_authorized=lock_authorized,
+                lock_authorization=lock_authorization,
             )
             queued += 1
         if queued:
@@ -2633,6 +2771,7 @@ class GatewayServer:
             await self._finalize_turn_state(turn)
 
     async def _finalize_turn_state(self, turn: Turn) -> None:
+        self._release_turn_lock(turn)
         turn.done_event.set()
         if self.active is turn:
             self.active = None
@@ -2647,6 +2786,7 @@ class GatewayServer:
             if approval.turn is turn and not approval.future.done():
                 approval.future.set_result((False, "turn cancelled"))
         if self._shutting_down:
+            self._release_turn_lock(turn)
             turn.end_sent = True
             turn.done_event.set()
             if self.active is turn:
@@ -2664,6 +2804,16 @@ class GatewayServer:
                 "cancelled",
                 {"message": "turn cancelled by client" if not disconnect else "client disconnected"},
             )
+
+    def _release_turn_lock(self, turn: Turn) -> None:
+        if not turn.lock_held and not self.execution_lock.held_by(
+            profile=self.config.profile, turn_id=turn.turn_id
+        ):
+            return
+        self.execution_lock.release(
+            profile=self.config.profile, turn_id=turn.turn_id
+        )
+        turn.lock_held = False
 
     def _find_turn(self, turn_id: str) -> Turn | None:
         if self.active is not None and self.active.turn_id == turn_id:
@@ -3611,6 +3761,20 @@ class GatewayServer:
     def _channel_message_mentions(self, text: str) -> set[str]:
         return match_channel_mentions(text, self._channel_member_views())
 
+    def _channel_lock_authorization(
+        self, text: str, *, from_agent: bool
+    ) -> tuple[bool, str]:
+        if from_agent:
+            return False, "agent-message"
+        mentions = self._channel_message_mentions(text)
+        if self.config.channel_id in mentions:
+            return True, "user-mentioned"
+        if mentions:
+            return False, "mentioned-other-members"
+        if len(self._channel_member_views()) <= 1:
+            return True, "single-online-member"
+        return False, "user-must-name-executor"
+
     def _channel_busy(self) -> bool:
         return self.active is not None or bool(self.queue)
 
@@ -3758,6 +3922,9 @@ class GatewayServer:
             return
         if busy:
             await self._refresh_channel_transcript()
+        lock_authorized, lock_authorization = self._channel_lock_authorization(
+            text, from_agent=from_agent
+        )
         self._enqueue_channel_turn(
             self._channel_prompt(
                 sender, sender_id, text, from_agent=from_agent
@@ -3765,6 +3932,8 @@ class GatewayServer:
             sender_id,
             origin_is_agent=from_agent,
             channel_message_seq=entry.seq,
+            lock_authorized=lock_authorized,
+            lock_authorization=lock_authorization,
         )
 
     async def _handle_channel_command(self, text: str, sender_id: str = "") -> bool:
@@ -3797,7 +3966,10 @@ class GatewayServer:
         else:
             approval = next(iter(self.approvals.values()), None)
         if approval is None:
-            self._schedule_channel_notice("akid: no pending approval request")
+            LOGGER.info(
+                "channel approval command ignored: no matching local approval id=%s",
+                approval_id or "(oldest)",
+            )
             return True
         if approval.turn.origin != "mqtt":
             self._schedule_channel_notice(
@@ -3881,6 +4053,8 @@ class GatewayServer:
         *,
         origin_is_agent: bool = False,
         channel_message_seq: int | None = None,
+        lock_authorized: bool = False,
+        lock_authorization: str = "channel-unknown",
     ) -> None:
         if len(self.queue) >= self.config.queue_max:
             self._schedule_channel_notice("akid: queue is full; channel message dropped")
@@ -3894,6 +4068,8 @@ class GatewayServer:
             origin="mqtt",
             origin_sender_id=sender_id,
             origin_is_agent=origin_is_agent,
+            lock_authorized=lock_authorized,
+            lock_authorization=lock_authorization,
             channel_message_seq=channel_message_seq,
         )
         if (
@@ -4004,7 +4180,10 @@ class GatewayServer:
             await self._maybe_start_next()
 
     def _external_tools(self) -> list[dict[str, Any]]:
-        tools: list[dict[str, Any]] = []
+        tools: list[dict[str, Any]] = [
+            ACQUIRE_EXECUTION_LOCK_TOOL,
+            RELEASE_EXECUTION_LOCK_TOOL,
+        ]
         if self.config.camera_enabled and shutil.which(self.config.ffmpeg_bin):
             tools.append(CAMERA_TOOL)
         if self.config.screenshot_enabled and self._screenshot_backends():
@@ -4416,6 +4595,10 @@ class GatewayServer:
 
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
 
+        if requires_execution_lock(tool_name) and not turn.lock_held:
+            await self._safe_deny(request_id, LOCK_REQUIRED_ERROR)
+            return
+
         if (
             tool_is_safe(tool_name)
             or tool_name in EXTERNAL_TOOL_NAMES
@@ -4550,8 +4733,14 @@ class GatewayServer:
                 tool_call_id, "external tool is not available in an internal backend turn", True
             )
             return
+        await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
+        if is_lock_control_tool(tool_name):
+            await self._handle_execution_lock_tool(turn, tool_call_id, tool_name)
+            return
+        if requires_execution_lock(tool_name) and not turn.lock_held:
+            await self._send_external_result(tool_call_id, LOCK_REQUIRED_ERROR, True)
+            return
         if tool_name.startswith(MCP_TOOL_PREFIX):
-            await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
             await self._handle_mcp_tool(turn, tool_call_id, tool_name, tool_input)
             return
         if tool_name not in (
@@ -4562,7 +4751,6 @@ class GatewayServer:
             text = f"unknown external tool: {tool_name}"
             await self._send_external_result(tool_call_id, text, True)
             return
-        await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
         if tool_name == TOKIFACTOR_IMAGE_TOOL_NAME:
             await self._handle_tokifactor_image_tool(
                 turn, tool_call_id, tool_name, tool_input
@@ -4573,6 +4761,69 @@ class GatewayServer:
             )
         else:
             await self._handle_camera_tool(turn, tool_call_id, tool_name, tool_input)
+
+    async def _handle_execution_lock_tool(
+        self, turn: Turn, tool_call_id: str, tool_name: str
+    ) -> None:
+        if tool_name == LOCK_ACQUIRE_TOOL:
+            if not turn.lock_authorized:
+                await self._send_external_result(
+                    tool_call_id, LOCK_NOT_AUTHORIZED_ERROR, True
+                )
+                return
+            if self.execution_lock.held_by(
+                profile=self.config.profile, turn_id=turn.turn_id
+            ):
+                turn.lock_held = True
+                await self._send_external_result(
+                    tool_call_id,
+                    "EXECUTION_LOCK_ACQUIRED: this turn already holds the lock.",
+                    False,
+                )
+                return
+            try:
+                acquired, holder = self.execution_lock.acquire(
+                    profile=self.config.profile,
+                    agent_id=self.config.agent_id,
+                    turn_id=turn.turn_id,
+                )
+            except OSError as exc:
+                self.execution_lock.last_error = str(exc)
+                await self._send_external_result(
+                    tool_call_id,
+                    f"EXECUTION_LOCK_UNAVAILABLE: {exc}. Do not retry; end this turn.",
+                    True,
+                )
+                return
+            if acquired:
+                turn.lock_held = True
+                await self._send_external_result(
+                    tool_call_id,
+                    "EXECUTION_LOCK_ACQUIRED: device-wide non-read-only execution "
+                    "is now exclusive to this turn.",
+                    False,
+                )
+                return
+            held_by = str(holder.get("profile") or "another profile")
+            held_turn = str(holder.get("turn_id") or "unknown turn")
+            await self._send_external_result(
+                tool_call_id,
+                f"{LOCK_BUSY_ERROR} holder={held_by} turn={held_turn}",
+                True,
+            )
+            return
+
+        released = self.execution_lock.release(
+            profile=self.config.profile, turn_id=turn.turn_id
+        )
+        turn.lock_held = False
+        await self._send_external_result(
+            tool_call_id,
+            "EXECUTION_LOCK_RELEASED"
+            if released
+            else "EXECUTION_LOCK_NOT_HELD: this turn did not hold the lock.",
+            False,
+        )
 
     async def _external_tool_failure(
         self, turn: Turn, tool_call_id: str, text: str
@@ -4866,8 +5117,7 @@ class GatewayServer:
         height = self._camera_dimension(args.get("height"), self.config.camera_height)
         output_dir = self.config.camera_output_dir or default_camera_dir()
         prepare_private_output_dir(output_dir, "camera")
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        output = output_dir / f"camera-{stamp}-{uuid.uuid4().hex[:8]}.jpg"
+        output = unique_capture_path(output_dir, "camera", ".jpg")
         command = [
             ffmpeg,
             "-hide_banner",
@@ -4999,8 +5249,7 @@ class GatewayServer:
                 self.config.screenshot_output_dir or default_screenshot_dir()
             )
             prepare_private_output_dir(output_dir, "screenshot")
-            stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-            output = output_dir / f"screenshot-{stamp}-{uuid.uuid4().hex[:8]}.png"
+            output = unique_capture_path(output_dir, "screenshot", ".png")
         errors: list[str] = []
         for backend, executable in backends:
             for display in candidates:
