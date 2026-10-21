@@ -44,6 +44,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.broker = FakeMqttBroker()
         await self.broker.start()
         self.received: list[tuple[str, str, str, dict[str, str]]] = []
+        self.replayed: list[bool] = []
         self.channel = TokifactorChannel(
             host="127.0.0.1",
             port=self.broker.port,
@@ -77,13 +78,15 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         metadata: dict[str, str],
         message_id: str = "",
         sent_at: int = 0,
+        replayed: bool = False,
     ) -> None:
         self.received.append((sender, sender_id, text, metadata))
+        self.replayed.append(replayed)
 
     async def _on_control(self, envelope: TextEnvelope) -> None:
         self.control_messages.append(envelope)
 
-    def _peer_message(self, topic: str, payload: bytes) -> None:
+    def _peer_message(self, topic: str, payload: bytes, replayed: bool = False) -> None:
         if topic == AVATAR_TOPIC:
             self.avatar_messages.append(payload.decode("utf-8"))
             return
@@ -126,6 +129,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.received[0], ("alice", "alice-1", "hello from alice", {})
         )
+        self.assertFalse(self.replayed[0])
 
         await self.channel.publish_text("reply from akid")
         await wait_until(
@@ -177,6 +181,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
                 self.received[0],
                 ("alice", "alice-1", "offline hello", {}),
             )
+            self.assertTrue(self.replayed[0])
             self.assertEqual(
                 self.broker.connects[-1]["client_id"],
                 self.channel.session_client_id,

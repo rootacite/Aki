@@ -474,6 +474,9 @@ session，因此 broker 会在 akid 离线时保留 text/picture/file 的 QoS 1 
 仍使用 QoS 0。文本 envelope 和分片携带 `messageId` 与毫秒级 `sentAt`，已处理的消息 ID
 持久化在该 profile 的频道历史目录（`<profile>.seen.json`），重启后仍会丢弃 broker
 重发的重复消息。频道 transcript 按 `sentAt` 排序，缺少该字段的旧客户端回退到接收时间。
+broker 在重连后补发的积压消息只写入频道 transcript 和去重状态，不会创建新 turn，也不会
+重置主动启动次数；重连后的补发识别窗口为 1 秒。Agent 已经发布的消息仍由用户端
+tokifactor 的持久会话补收，akid 不重复转发，避免产生重复消息或伪造发送者。
 
 收到频道消息后，akid 会把它作为新的 Agent turn 处理，并在提示词中要求 Agent
 自行判断是否需要回复；不需要回复时 Agent 输出 `[NO_REPLY]`，网关会抑制发布。

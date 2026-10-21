@@ -60,7 +60,7 @@ class MqttClient:
         client_id: str | None = None,
         keepalive: int = 30,
         clean_session: bool = True,
-        on_message: Callable[[str, bytes], Awaitable[None]] | None = None,
+        on_message: Callable[[str, bytes, bool], Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self.host = host
@@ -85,6 +85,7 @@ class MqttClient:
         self._last_error: str | None = None
         self._connected_at: float | None = None
         self._session_present = False
+        self._replaying = False
 
     @property
     def connected(self) -> bool:
@@ -105,6 +106,9 @@ class MqttClient:
     @property
     def session_present(self) -> bool:
         return self._session_present
+
+    def mark_replay_complete(self) -> None:
+        self._replaying = False
 
     async def connect(self, timeout: float = 12.0) -> None:
         self._closed.clear()
@@ -227,6 +231,7 @@ class MqttClient:
                     if len(body) < 2:
                         raise MqttError("invalid CONNACK")
                     self._session_present = bool(body[0] & 0x01)
+                    self._replaying = self._session_present
                     if self._connack is not None and not self._connack.done():
                         self._connack.set_result(body[1])
                 elif packet_type == SUBACK:
@@ -296,7 +301,7 @@ class MqttClient:
         if qos == 1 and packet_id is not None:
             await self._send((PUBACK << 4), packet_id.to_bytes(2, "big"))
         if self.on_message is not None:
-            result = self.on_message(topic, payload)
+            result = self.on_message(topic, payload, self._replaying)
             if asyncio.iscoroutine(result):
                 asyncio.create_task(result)
 

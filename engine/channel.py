@@ -40,8 +40,11 @@ TEXT_TOPIC = "tokifactor/text"
 DEFAULT_MAGIC = "akid-default-channel"
 DEDUP_MAX_IDS = 4096
 CHANNEL_INBOX_MAX = 4096
+REPLAY_GRACE_SECONDS = 1.0
 
-TextHandler = Callable[[str, str, str, Mapping[str, str], str, int], Awaitable[None]]
+TextHandler = Callable[
+    [str, str, str, Mapping[str, str], str, int, bool], Awaitable[None]
+]
 ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 
 
@@ -93,7 +96,7 @@ class TokifactorChannel:
         self._worker: asyncio.Task[None] | None = None
         self._client: MqttClient | None = None
         self._inbox: asyncio.Queue[
-            tuple[str, str, str, dict[str, str], str, int]
+            tuple[str, str, str, dict[str, str], str, int, bool]
         ] = asyncio.Queue(maxsize=CHANNEL_INBOX_MAX)
         self._publish_lock = asyncio.Lock()
         self._image_lock = asyncio.Lock()
@@ -203,6 +206,9 @@ class TokifactorChannel:
                         raise MqttError("broker rejected control subscription")
                 except MqttError as exc:
                     self.logger.warning("control subscription failed: %s", exc)
+                if client.session_present:
+                    await asyncio.sleep(REPLAY_GRACE_SECONDS)
+                client.mark_replay_complete()
                 self._connected = True
                 self._state = "connected"
                 self._last_error = None
@@ -237,7 +243,7 @@ class TokifactorChannel:
         self._state = "stopped"
         self._connected = False
 
-    async def _on_packet(self, topic: str, payload: bytes) -> None:
+    async def _on_packet(self, topic: str, payload: bytes, replayed: bool = False) -> None:
         if self._stop.is_set():
             return
         if topic == AVATAR_TOPIC:
@@ -288,6 +294,7 @@ class TokifactorChannel:
                     metadata,
                     envelope.message_id,
                     envelope.sent_at,
+                    replayed,
                 )
             )
         except asyncio.QueueFull:
@@ -379,10 +386,24 @@ class TokifactorChannel:
 
     async def _worker_loop(self) -> None:
         while True:
-            sender, sender_id, text, metadata, message_id, sent_at = await self._inbox.get()
+            (
+                sender,
+                sender_id,
+                text,
+                metadata,
+                message_id,
+                sent_at,
+                replayed,
+            ) = await self._inbox.get()
             try:
                 await self.on_text(
-                    sender, sender_id, text, metadata, message_id, sent_at
+                    sender,
+                    sender_id,
+                    text,
+                    metadata,
+                    message_id,
+                    sent_at,
+                    replayed,
                 )
             except asyncio.CancelledError:
                 raise
@@ -623,6 +644,7 @@ class TokifactorChannel:
                 "client_id": self.session_client_id,
                 "persistent": True,
                 "session_present": self._session_present,
+                "replay_grace_s": REPLAY_GRACE_SECONDS,
                 "dedup_path": str(self.dedup_path) if self.dedup_path else None,
                 "dedup_ids": len(self._seen_message_id_set),
             },

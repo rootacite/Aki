@@ -3813,6 +3813,7 @@ class GatewayServer:
         metadata: Mapping[str, str] | None = None,
         message_id: str = "",
         sent_at: int = 0,
+        replayed: bool = False,
     ) -> None:
         text = text.strip()
         if not text:
@@ -3835,11 +3836,19 @@ class GatewayServer:
                 phase="progress",
                 arrived_while_busy=busy,
             )
+            if replayed:
+                LOGGER.info(
+                    "channel backlog progress recorded without turn seq=%s",
+                    self._channel_history_seq,
+                )
+                if busy:
+                    await self._refresh_channel_transcript()
+                return
             if busy:
                 await self._refresh_channel_transcript()
             return
         from_agent = action == "agent-final" or self._channel_sender_is_agent(sender_id)
-        if not from_agent:
+        if not from_agent and not replayed:
             self._agent_initiation_remaining = max(
                 0, int(self.config.agent_initiation_limit)
             )
@@ -3855,6 +3864,15 @@ class GatewayServer:
             phase="final",
             arrived_while_busy=busy,
         )
+        if replayed:
+            LOGGER.info(
+                "channel backlog message recorded without turn seq=%s sender_id=%s",
+                entry.seq,
+                sender_id or "unknown",
+            )
+            if busy:
+                await self._refresh_channel_transcript()
+            return
         LOGGER.info(
             "channel message accepted sender_id=%s from_agent=%s seq=%s "
             "initiation_remaining=%s",

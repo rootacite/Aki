@@ -2245,6 +2245,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(progress, [])
 
+    async def test_replayed_channel_backlog_does_not_start_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._agent_initiation_remaining = 0
+        await server._on_channel_text(
+            "alice",
+            "alice-1",
+            "@Aki backlog message",
+            {"schema": "akid.v1", "kind": "message"},
+            "backlog-message-1",
+            1_700_000_000_123,
+            True,
+        )
+        self.assertEqual(server.active, None)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+        self.assertEqual(server._agent_initiation_remaining, 0)
+        entry = server._channel_history[-1]
+        self.assertEqual(entry.message_id, "backlog-message-1")
+        self.assertEqual(entry.sent_at, 1_700_000_000_123)
+        self.assertIn("@Aki backlog message", entry.text)
+
     async def test_channel_no_reply_marker_is_suppressed(self) -> None:
         server = await self.start_server()
         fake_channel = FakeChannel()
