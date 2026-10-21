@@ -37,7 +37,7 @@ from engine.tokifactor import (
 TEXT_TOPIC = "tokifactor/text"
 DEFAULT_MAGIC = "akid-default-channel"
 
-TextHandler = Callable[[str, str, str], Awaitable[None]]
+TextHandler = Callable[[str, str, str, Mapping[str, str]], Awaitable[None]]
 ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 
 
@@ -83,7 +83,9 @@ class TokifactorChannel:
         self._task: asyncio.Task[None] | None = None
         self._worker: asyncio.Task[None] | None = None
         self._client: MqttClient | None = None
-        self._inbox: asyncio.Queue[tuple[str, str, str]] = asyncio.Queue(maxsize=256)
+        self._inbox: asyncio.Queue[tuple[str, str, str, dict[str, str]]] = asyncio.Queue(
+            maxsize=256
+        )
         self._publish_lock = asyncio.Lock()
         self._image_lock = asyncio.Lock()
         self._avatar_publish_task: asyncio.Task[None] | None = None
@@ -254,8 +256,13 @@ class TokifactorChannel:
         self._messages_received += 1
         self._last_message_at = time.time()
         try:
+            metadata = {
+                str(key): str(value)
+                for key, value in envelope.metadata.items()
+                if value is not None
+            }
             self._inbox.put_nowait(
-                (envelope.sender, envelope.sender_id, envelope.text)
+                (envelope.sender, envelope.sender_id, envelope.text, metadata)
             )
         except asyncio.QueueFull:
             self.logger.warning("channel inbox full; dropping message")
@@ -298,9 +305,9 @@ class TokifactorChannel:
 
     async def _worker_loop(self) -> None:
         while True:
-            sender, sender_id, text = await self._inbox.get()
+            sender, sender_id, text, metadata = await self._inbox.get()
             try:
-                await self.on_text(sender, sender_id, text)
+                await self.on_text(sender, sender_id, text, metadata)
             except asyncio.CancelledError:
                 raise
             except Exception:

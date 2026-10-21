@@ -137,6 +137,7 @@ class AkiConfig:
     upstreams: dict[str, Upstream]
     models: tuple[ModelRoute, ...]
     channel: ChannelIdentity = field(default_factory=ChannelIdentity)
+    userdata: str = "userdata"
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:
@@ -279,6 +280,7 @@ def template_text(
     return f"""[gateway]
 agent_id = {agent_id}
 conversation = default
+userdata = userdata
 username = Master
 letta_bin = letta
 # 留空则用 $XDG_RUNTIME_DIR/aki/akid.sock（非 aki profile 使用 <profile>.sock）
@@ -659,6 +661,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             aliases=aliases,
             description=channel_description,
         ),
+        userdata=parser.get("gateway", "userdata", fallback="").strip() or "userdata",
     )
 
 

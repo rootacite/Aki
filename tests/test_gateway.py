@@ -15,9 +15,15 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-from engine.akid import GatewayConfig, GatewayServer, _b64url, _normalize_mcp_result
+from engine.akid import (
+    GatewayConfig,
+    GatewayServer,
+    Turn,
+    _b64url,
+    _normalize_mcp_result,
+)
 from engine.letta_process import LettaProcess
-from engine.live_context import WindowInfo
+from engine.live_context import WindowInfo, estimate_tokens
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from engine.tokifactor import TextEnvelope
 from tests.fake_mqtt_broker import FakeMqttBroker
@@ -1109,6 +1115,280 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("do not call any tool", prompt)
         self.assertIn("[NO_REPLY]", prompt)
 
+    async def test_agent_channel_message_uses_transcript_not_user_role(self) -> None:
+        agent_path = self._write_test_agent()
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        body = "UNIQUE_AGENT_BODY_4821"
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            body,
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "final",
+                "turnId": "foreign-turn",
+                "seq": "1",
+            },
+        )
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        published = "\n".join(fake_channel.final_texts())
+        self.assertNotIn(body, published)
+        self.assertEqual(server._channel_history[0].text, body)
+        self.assertTrue(server._channel_history[0].from_agent)
+        self.assertEqual(server._channel_history[-1].sender_id, "aki")
+        self.assertTrue(server._channel_history[-1].from_agent)
+        system = self._agent_system(agent_path)
+        self.assertIn("<aki-channel-transcript", system)
+        self.assertIn(body, system)
+        self.assertIn('new="true"', system)
+        self.assertIn('source="agent"', system)
+
+    async def test_agent_progress_and_tool_events_do_not_create_turns(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        for kind, phase in (
+            ("turn", "started"),
+            ("turn", "progress"),
+            ("tool", "running"),
+            ("approval", "pending"),
+        ):
+            await server._on_channel_text(
+                "Fuyu",
+                "fuyu",
+                f"ignored-{kind}-{phase}",
+                {"schema": "akid.v1", "kind": kind, "phase": phase},
+            )
+        await asyncio.sleep(0.1)
+        self.assertEqual(len(server._channel_history), 1)
+        self.assertEqual(server._channel_history[0].phase, "progress")
+        self.assertTrue(server._channel_history[0].from_agent)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+    async def test_messages_while_busy_update_transcript_and_queue_only_users(self) -> None:
+        agent_path = self._write_test_agent()
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        agent_body = "AGENT_MESSAGE_WHILE_BUSY"
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            agent_body,
+            {"schema": "akid.v1", "kind": "turn", "phase": "final"},
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(server.queue, [])
+        self.assertTrue(server._channel_history[-1].arrived_while_busy)
+        system = self._agent_system(agent_path)
+        self.assertIn(agent_body, system)
+        self.assertIn('during-work="true"', system)
+
+        await server._on_channel_text("alice", "alice-1", "USER_MESSAGE_WHILE_BUSY")
+        self.assertEqual(server.queue, [])
+        self.assertEqual(len(busy_turn.busy_messages), 1)
+        self.assertTrue(server._channel_history[-1].arrived_while_busy)
+        self.assertEqual(fake_channel.events, [])
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(len(server.queue), 1)
+        self.assertIn("USER_MESSAGE_WHILE_BUSY", server.queue[0].message)
+        server.active = None
+        server.queue.clear()
+
+    async def test_busy_user_message_is_consumed_by_later_tool_call(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-tool-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        await server._on_channel_text("alice", "alice-1", "seen during tool loop")
+        self.assertEqual(len(busy_turn.busy_messages), 1)
+        busy_turn.tool_result_events += 1
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_busy_user_message_before_next_api_call_is_consumed(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-pending-call",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        busy_turn.pending_tool_results = 1
+        server.active = busy_turn
+        await server._on_channel_text("alice", "alice-1", "queued before next call")
+        self.assertEqual(
+            busy_turn.busy_messages[0]["pending_tool_results_at_arrival"], 1
+        )
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_busy_agent_mention_is_deferred_like_user_message(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-mention-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        body = "@Aki 这条必须处理"
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            body,
+            {"schema": "akid.v1", "kind": "turn", "phase": "final"},
+        )
+        self.assertEqual(server.queue, [])
+        self.assertEqual(len(busy_turn.busy_messages), 1)
+        self.assertTrue(busy_turn.busy_messages[0]["origin_is_agent"])
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(len(server.queue), 1)
+        queued = server.queue[0]
+        self.assertTrue(queued.origin_is_agent)
+        self.assertNotIn(body, queued.message)
+        server.active = None
+        server.queue.clear()
+
+    async def test_busy_agent_mention_is_consumed_by_later_tool_call(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-mention-tool-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "@Aki seen in tool loop",
+            {"schema": "akid.v1", "kind": "turn", "phase": "final"},
+        )
+        busy_turn.tool_result_events += 1
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_channel_prompt_omits_agent_message_body(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        body = "AGENT_BODY_SHOULD_STAY_IN_TRANSCRIPT"
+        prompt = self.server._channel_prompt(
+            "Fuyu", "fuyu", body, from_agent=True
+        )
+        self.assertNotIn(body, prompt)
+        self.assertIn("not a user message", prompt)
+        self.assertIn("<aki-channel-transcript>", prompt)
+
+    async def test_user_channel_message_stays_user_and_enters_transcript(self) -> None:
+        agent_path = self._write_test_agent()
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        body = "USER_BODY_STAYS_IN_USER_ROLE"
+        await server._on_channel_text("alice", "alice-1", body)
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        self.assertIn(body, server._channel_prompt("alice", "alice-1", body))
+        self.assertEqual(server._channel_history[0].text, body)
+        self.assertFalse(server._channel_history[0].from_agent)
+        system = self._agent_system(agent_path)
+        self.assertIn('source="user"', system)
+        self.assertIn('new="true"', system)
+        client = await self.client()
+        await client.hello()
+        local = await client.call("aki.chat.send", {"message": "local hello"})
+        await client.collect_turn(local["turn_id"])
+        self.assertNotIn("<aki-channel-transcript", self._agent_system(agent_path))
+
+    async def test_channel_conversation_snapshot_rolls_back_turn_messages(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        directory = self.server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text('{"type":"session"}\n', encoding="utf-8")
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        original_messages = messages.read_bytes()
+        original_conversation = conversation.read_bytes()
+        snapshot = self.server._snapshot_conversation()
+        self.assertIsNotNone(snapshot)
+        with messages.open("ab") as handle:
+            handle.write(b'{"type":"message","message":{"content":"wake"}}\n')
+        conversation.write_text('{"id":"default","last_message_at":"now"}\n', encoding="utf-8")
+        await self.server._restore_conversation_snapshot(snapshot)
+        self.assertEqual(messages.read_bytes(), original_messages)
+        self.assertEqual(conversation.read_bytes(), original_conversation)
+        self.assertTrue(await self.server.backend.wait_ready(5.0))
+        self.assertEqual(
+            self.server._channel_transcript_status.get("ephemeral_turns"), 1
+        )
+
+    async def test_channel_turn_uses_ephemeral_conversation_snapshot(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text('{"type":"session"}\n', encoding="utf-8")
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        original_messages = messages.read_bytes()
+        original_conversation = conversation.read_bytes()
+        await server._on_channel_text("alice", "alice-1", "ephemeral channel turn")
+        await wait_until(
+            lambda: int(
+                server._channel_transcript_status.get("ephemeral_turns", 0)
+            )
+            >= 1
+        )
+        self.assertEqual(messages.read_bytes(), original_messages)
+        self.assertEqual(conversation.read_bytes(), original_conversation)
+        self.assertTrue(await server.backend.wait_ready(5.0))
+
     async def test_channel_control_probe_presence_dedup_and_rate_limit(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
@@ -1225,12 +1505,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         plain = server._channel_prompt("alice", "alice-1", "hello everyone")
         self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain)
+        self.assertIn("用户不在成员列表中", plain)
+        self.assertIn("不能也不需要 @ 用户", plain)
+        self.assertIn("直接说话即可", plain)
         self.assertIn("Fuyu", plain)
         self.assertIn("&lt;untrusted&gt;", plain)
         other = server._channel_prompt("alice", "alice-1", "@冬 hello")
         self.assertIn("提到了其他成员，没有点你", other)
         own = server._channel_prompt("alice", "alice-1", "@秋 hello")
         self.assertIn("用户提到了你，正在和你对话。", own)
+        self.assertIn("不需要 @ 用户", own)
         self.assertNotIn("没有点你", own)
         await server._on_channel_control(
             TextEnvelope(
@@ -1245,13 +1529,109 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.active, None)
         self.assertEqual(fake_channel.events, [])
 
-    async def test_channel_mentions_do_not_prevent_turns(self) -> None:
+    async def test_user_mention_only_starts_mentioned_agent_turns(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu", "冬"),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
         await server._on_channel_text("alice", "alice-1", "@Fuyu please answer")
-        await wait_until(lambda: server.active is not None or bool(fake_channel.events))
+        await asyncio.sleep(0.1)
+        self.assertEqual(server._channel_history[-1].text, "@Fuyu please answer")
+        self.assertFalse(server._channel_history[-1].from_agent)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+        await server._on_channel_text(
+            "alice", "alice-1", "@Fuyu @秋 please answer too"
+        )
         await wait_until(lambda: bool(fake_channel.events))
         self.assertTrue(fake_channel.events)
+
+    async def test_user_message_without_mentions_wakes_agent(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["qq"] = {
+            "id": "qq",
+            "name": "QQ",
+            "aliases": ("qq",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        body = "我的邮箱是114514@qq.com"
+        await server._on_channel_text("alice", "alice-1", body)
+        await wait_until(lambda: bool(fake_channel.events))
+        self.assertTrue(fake_channel.events)
+        user_entry = next(
+            entry for entry in server._channel_history if entry.sender_id == "alice-1"
+        )
+        self.assertEqual(user_entry.text, body)
+        self.assertFalse(user_entry.from_agent)
+
+    async def test_user_at_without_trailing_space_does_not_filter_turns(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        await server._on_channel_text("alice", "alice-1", "@Fuyu")
+        await wait_until(lambda: bool(fake_channel.events))
+        self.assertTrue(fake_channel.events)
+
+    async def test_user_mention_followed_by_punctuation_filters_turns(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        await server._on_channel_text("alice", "alice-1", "@Fuyu，请回答")
+        await asyncio.sleep(0.1)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+        await server._on_channel_text("alice", "alice-1", "@秋,请回答")
+        await wait_until(lambda: bool(fake_channel.events))
+        self.assertTrue(fake_channel.events)
+
+    async def test_busy_user_mention_of_another_agent_is_not_deferred(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        busy_turn = Turn(
+            turn_id="busy-other-mention-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        await server._on_channel_text("alice", "alice-1", "@Fuyu not for Aki")
+        self.assertEqual(busy_turn.busy_messages, [])
+        self.assertTrue(server._channel_history[-1].arrived_while_busy)
+        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
 
     async def test_agent_reply_budget_decrements_and_user_message_resets(self) -> None:
         fake_channel = FakeChannel()
@@ -2280,7 +2660,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     )
                     + len("</aki-live-context>")
                 ]
-                self.assertLessEqual(len(block.encode("utf-8")), 2048)
+                self.assertLessEqual(estimate_tokens(block), 2048)
                 self.assertNotIn("stale", system)
 
                 disabled_path = self._write_test_agent(

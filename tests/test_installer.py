@@ -118,6 +118,7 @@ class InstallerTests(unittest.TestCase):
             "KillMode=control-group",
             "RuntimeDirectory=aki",
             "RuntimeDirectoryMode=0700",
+            "RuntimeDirectoryPreserve=yes",
             "UMask=0077",
             'Environment="XDG_RUNTIME_DIR=%t"',
             'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"',

@@ -41,7 +41,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.broker = FakeMqttBroker()
         await self.broker.start()
-        self.received: list[tuple[str, str, str]] = []
+        self.received: list[tuple[str, str, str, dict[str, str]]] = []
         self.channel = TokifactorChannel(
             host="127.0.0.1",
             port=self.broker.port,
@@ -67,8 +67,14 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
             await self.peer.close()
         await self.broker.stop()
 
-    async def _on_text(self, sender: str, sender_id: str, text: str) -> None:
-        self.received.append((sender, sender_id, text))
+    async def _on_text(
+        self,
+        sender: str,
+        sender_id: str,
+        text: str,
+        metadata: dict[str, str],
+    ) -> None:
+        self.received.append((sender, sender_id, text, metadata))
 
     async def _on_control(self, envelope: TextEnvelope) -> None:
         self.control_messages.append(envelope)
@@ -113,7 +119,9 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         for payload in payloads:
             await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
         await wait_until(lambda: bool(self.received))
-        self.assertEqual(self.received[0], ("alice", "alice-1", "hello from alice"))
+        self.assertEqual(
+            self.received[0], ("alice", "alice-1", "hello from alice", {})
+        )
 
         await self.channel.publish_text("reply from akid")
         await wait_until(
@@ -123,6 +131,37 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["messages_received"], 1)
         self.assertEqual(health["replies_sent"], 1)
         self.assertTrue(health["connected"])
+
+    async def test_structured_metadata_reaches_text_handler(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-metadata-test",
+            on_message=self._peer_message,
+        )
+        await self.peer.connect()
+        await self.peer.subscribe(TOPIC, qos=1)
+        payloads = encode_text_payloads(
+            "final agent text",
+            MAGIC,
+            sender="Fuyu",
+            sender_id="fuyu",
+            metadata={
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "final",
+                "turnId": "turn-1",
+            },
+        )
+        for payload in payloads:
+            await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
+        await wait_until(lambda: bool(self.received))
+        _sender, _sender_id, _text, metadata = self.received[0]
+        self.assertEqual(metadata["kind"], "turn")
+        self.assertEqual(metadata["phase"], "final")
+        self.assertEqual(metadata["turnId"], "turn-1")
 
     async def test_own_echo_is_ignored(self) -> None:
         await self.channel.start()

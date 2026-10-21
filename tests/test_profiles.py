@@ -123,6 +123,24 @@ class ProfileConfigTests(unittest.TestCase):
         self.assertIn("Fuyu", config.channel.aliases)
         self.assertTrue(config.provider_mod_name.endswith("aki-proxy-fuyu.ts"))
 
+    def test_profile_can_select_its_own_userdata_directory(self) -> None:
+        path = self.home / ".aki" / "fuyu.conf"
+        atomic_write(path, template_text(profile="fuyu"))
+        set_key(path, "gateway", "userdata", "userdata2")
+        cwd = self.home / "repo"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "AKI_CONFIG": str(path),
+                "AKI_CWD": str(cwd),
+                "XDG_RUNTIME_DIR": str(self.home / "run"),
+            },
+            clear=False,
+        ):
+            os.environ.pop("AKI_SOCKET", None)
+            config = build_config_from_env()
+        self.assertEqual(config.userdata_dir, cwd / "userdata2")
+
     def test_username_is_read_from_profile_and_migrates_legacy_file(self) -> None:
         path = self.home / "aki.conf"
         atomic_write(path, template_text())

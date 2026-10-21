@@ -244,6 +244,7 @@ TimeoutStopSec=15
 KillMode=control-group
 RuntimeDirectory=aki
 RuntimeDirectoryMode=0700
+RuntimeDirectoryPreserve=yes
 UMask=0077
 
 [Install]

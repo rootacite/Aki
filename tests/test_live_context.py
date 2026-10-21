@@ -9,14 +9,18 @@ from unittest import mock
 
 from engine.akid import build_config_from_env
 from engine.live_context import (
+    CHANNEL_TRANSCRIPT_TAG,
     ChannelMember,
+    ChannelTranscriptEntry,
     HistoryEntry,
     LiveContextSnapshot,
     ProcessInfo,
     ScreenshotInfo,
     WindowInfo,
+    apply_channel_transcript,
     apply_live_context,
     build_kwin_probe_script,
+    clear_channel_transcript,
     clear_live_context,
     desktop_environment,
     estimate_tokens,
@@ -25,11 +29,17 @@ from engine.live_context import (
     parse_zsh_history_text,
     match_channel_mentions,
     render_channel_context,
+    render_channel_transcript,
     render_live_context,
 )
 
 
 class LiveContextParsingTests(unittest.TestCase):
+    def test_token_estimate_distinguishes_ascii_and_cjk(self) -> None:
+        self.assertEqual(estimate_tokens("abcd"), 1)
+        self.assertEqual(estimate_tokens("中文"), 2)
+        self.assertGreater(estimate_tokens("中" * 100), estimate_tokens("a" * 100))
+
     def test_zsh_extended_history_last_limit_and_multiline(self) -> None:
         lines = [f": {1792500000 + index}:0;cmd-{index}" for index in range(25)]
         lines.append(': 1792501000:0;echo "multi')
@@ -102,17 +112,42 @@ class ChannelContextTests(unittest.TestCase):
             ),
         ]
 
-    def test_mentions_are_case_insensitive_longest_and_skip_email(self) -> None:
+    def test_mentions_require_known_aliases_and_a_delimiter(self) -> None:
+        members = [*self.members(), ChannelMember(id="qq", name="QQ", aliases=("qq",))]
         self.assertEqual(
-            match_channel_mentions("hello @AKI and @小秋", self.members()),
-            {"aki"},
+            match_channel_mentions("hello @AKI and @Fuyu ", members),
+            {"aki", "fuyu"},
         )
         self.assertEqual(
-            match_channel_mentions("@Fuyu hi", self.members()),
+            match_channel_mentions("@Fuyu hi", members),
             {"fuyu"},
         )
-        self.assertEqual(match_channel_mentions("mail me at foo@aki.com", self.members()), set())
-        self.assertEqual(match_channel_mentions("@AkiChan", self.members()), set())
+        self.assertEqual(match_channel_mentions("mail me at foo@aki.com", members), set())
+        self.assertEqual(match_channel_mentions("我的邮箱是114514@qq.com", members), set())
+        self.assertEqual(match_channel_mentions("邮箱@qq.com", members), set())
+        self.assertEqual(match_channel_mentions("contact foo.bar+tag@qq.com", members), set())
+        self.assertEqual(match_channel_mentions("@@qq", members), set())
+        self.assertEqual(match_channel_mentions(r"\@qq", members), set())
+        self.assertEqual(match_channel_mentions("https://example.com/@qq", members), set())
+        self.assertEqual(match_channel_mentions("https://example.com/?u=@qq", members), set())
+        self.assertEqual(match_channel_mentions("#@qq", members), set())
+        self.assertEqual(match_channel_mentions("name@qq", members), set())
+        self.assertEqual(match_channel_mentions("@qq.com", members), set())
+        self.assertEqual(match_channel_mentions("@qq-chan", members), set())
+        self.assertEqual(match_channel_mentions("@qq/foo", members), set())
+        self.assertEqual(match_channel_mentions("@qq+tag", members), set())
+        self.assertEqual(match_channel_mentions("@qq_name", members), set())
+        self.assertEqual(match_channel_mentions("@qq你好", members), set())
+        self.assertEqual(match_channel_mentions("@qq 你好", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq\t你好", members), {"qq"})
+        self.assertEqual(match_channel_mentions("（@qq）", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq，请回答", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq, hello", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq. 请回答", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq。请回答", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq! 请回答", members), {"qq"})
+        self.assertEqual(match_channel_mentions("@qq", members), set())
+        self.assertEqual(match_channel_mentions("@AkiChan", members), set())
 
     def test_guidance_covers_self_other_and_no_mentions(self) -> None:
         self_member = self.members()[0]
@@ -120,6 +155,7 @@ class ChannelContextTests(unittest.TestCase):
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
         self.assertIn("用户提到了你，正在和你对话。", self_text)
+        self.assertIn("不需要 @ 用户", self_text)
         other_text = render_channel_context(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
@@ -130,6 +166,9 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain_text)
         self.assertNotIn("没有提到你", plain_text)
         self.assertIn("@名字", plain_text)
+        self.assertIn("用户不在成员列表中", plain_text)
+        self.assertIn("不能也不需要 @ 用户", plain_text)
+        self.assertIn("直接说话即可", plain_text)
         self.assertIn('remaining="4"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
 
@@ -163,6 +202,69 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn("&lt;script&gt;", text)
         self.assertNotIn("<script>", text)
         self.assertLessEqual(text.count("z"), 300)
+
+
+class ChannelTranscriptTests(unittest.TestCase):
+    def entries(self) -> list[ChannelTranscriptEntry]:
+        return [
+            ChannelTranscriptEntry(
+                seq=1,
+                sender="Master",
+                sender_id="user-1",
+                text="先看方案。",
+                timestamp="2026-10-21T13:00:00+08:00",
+            ),
+            ChannelTranscriptEntry(
+                seq=2,
+                sender="Fuyu",
+                sender_id="fuyu",
+                text="这个方案缺少回滚点。",
+                from_agent=True,
+                timestamp="2026-10-21T13:01:00+08:00",
+                phase="progress",
+                arrived_while_busy=True,
+            ),
+        ]
+
+    def test_renders_final_text_and_marks_new_message(self) -> None:
+        block = render_channel_transcript(self.entries(), new_seq=2)
+        self.assertTrue(block.startswith(f"<{CHANNEL_TRANSCRIPT_TAG}"))
+        self.assertIn('source="user"', block)
+        self.assertIn('source="agent"', block)
+        self.assertIn('phase="progress"', block)
+        self.assertIn('during-work="true"', block)
+        self.assertIn('seq="2"', block)
+        self.assertIn('new="true"', block)
+        self.assertIn("缺少回滚点", block)
+        self.assertIn("chain-of-thought, tool calls", block)
+        self.assertNotIn('role="user"', block)
+
+    def test_budget_keeps_newest_and_drops_oldest(self) -> None:
+        entries = [
+            ChannelTranscriptEntry(
+                seq=index,
+                sender="Fuyu",
+                sender_id="fuyu",
+                text=f"message-{index}-" + "x" * 600,
+                from_agent=True,
+            )
+            for index in range(20)
+        ]
+        block = render_channel_transcript(entries, new_seq=19, budget_tokens=2048)
+        self.assertLessEqual(estimate_tokens(block), 2048)
+        self.assertIn('new="true"', block)
+        self.assertIn("dropped=", block)
+        self.assertIn("message-19", block)
+        self.assertNotIn("message-0-", block)
+
+    def test_apply_is_idempotent_and_clear_removes_block(self) -> None:
+        block = render_channel_transcript(self.entries(), new_seq=2)
+        once = apply_channel_transcript("BASE PROMPT\n", block)
+        twice = apply_channel_transcript(once, block)
+        self.assertEqual(twice.count(f"<{CHANNEL_TRANSCRIPT_TAG}"), 1)
+        cleared = clear_channel_transcript(twice)
+        self.assertNotIn(f"<{CHANNEL_TRANSCRIPT_TAG}", cleared)
+        self.assertIn("BASE PROMPT", cleared)
 
 
 class LiveContextRenderTests(unittest.TestCase):

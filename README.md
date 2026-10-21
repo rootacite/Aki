@@ -107,6 +107,9 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 显式 `--profile` 优先。`up` 会先校验配置、agent、conversation、socket 和 proxy 端口冲突，
 然后启动 `akid-proxy@<profile>.service`，再启动 `akid@<profile>.service`。
 
+多个 profile 共用 `$XDG_RUNTIME_DIR/aki/`，systemd 模板使用
+`RuntimeDirectoryPreserve=yes`，因此重启或停止一个 profile 不会删除其他 profile 的 socket。
+
 ### Loopback proxy
 
 每个 profile 的 Letta 只连接自己的 `[proxy] listen` 地址。`akid-proxy@<profile>.service`
@@ -146,6 +149,10 @@ refresh token 续期，并在 `auth.json.lock` 保护下把轮换后的 refresh 
 akictl model set grok-4.6
 akictl reasoning set low
 ```
+
+Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider、7722 proxy 端口和
+Grok 4.6 500k 上下文。它的基础提示词是 `prompts/fuyu-system.md`，与 Aki 一样属于本项目
+定制的基座，不使用 Letta 上游默认的 “You are a Letta Code agent” 提示词。
 
 ### 上下文压缩阈值
 
@@ -328,6 +335,16 @@ akictl recompile                            # 手动同步后重编译当前会�
 
 `human.md`、`profile/**`、根 `MEMORY.md`、聊天记录和凭据不会同步到 `userdata`。
 
+每个 profile 可以在 `[gateway] userdata` 指向自己的人格模板目录，默认是 `userdata`。
+例如 Fuyu 使用仓库内的 `userdata2/`：
+
+```ini
+[gateway]
+userdata = userdata2
+```
+
+这样 `akictl fuyu set-username` 只同步 Fuyu 的模板，不会覆盖 Aki 的 `userdata/`。
+
 ---
 
 ## 可写目录沙盒
@@ -375,9 +392,33 @@ akid 连接当前 profile 的 `[mqtt]` 配置，不假设固定 broker IP：
   用于成员栏和 `@` 提及。`id` 默认回退到 Letta agent id，名称/描述默认回退到 agent 记录。
 
 所有 profile 的 akid 都通过 control 主题互相 probe/status 发现，成员按 `agentId` 去重；
-30 秒无心跳视为离线。频道文本仍会启动每个智能体的 turn，`@` 只影响模型判断是否回复。
+30 秒无心跳视为离线。有效提及语法为 `@别名` 后紧跟空白或一个标点/特殊符号：`@` 后必须
+是已知成员别名，例如 `@Aki 你好`、`@Aki，你好`、`@Aki, please`、`@Aki。`。用户消息没有
+有效提及时会启动每个在线智能体的 turn；如果有有效提及，则只启动被点名成员的 turn。
+未被点名的智能体仍会把消息写入群聊记录，但不会立刻收到 turn 或忙碌补 turn，只会在后续
+API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114514@qq.com`）、
+`@@名字`、转义 `\@名字`、URL/路径中的 `@名字`、标识符粘连，以及 `@名字` 后直接跟文字
+或文本结束的形式都不会被当成提及。
+其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
+记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
 每条频道消息的上下文都带 `<channel-context>`、成员列表和三类提示：点名自己、点名他人、
-没有 `@`。本地 turn 不包含频道段。
+没有 `@`。用户不在成员列表中，回复用户或与用户对话无需也不能 `@` 用户，直接说话即可。
+本地 turn 不包含频道段。
+
+最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
+**token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
+回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
+消息发送；其他智能体的消息正文不会进入 `role: user`，只会出现在该 transcript 中，触发
+turn 的 user 消息只包含“有新群聊消息”的简短指令。频道 turn 结束后会回滚本次新增的
+conversation 消息，因此这些触发消息和频道回复不会进入下个 turn 的对话历史；本地直接对话
+turn 也不携带群聊 transcript，两类上下文保持独立。
+
+当一个智能体正在工作时，新消息先只更新 transcript 并标记 `during-work="true"`，供下一次
+API call 使用。若当前 turn 后续仍有 tool call/API call，用户消息视为已在该 turn 中消费；
+如果当前 turn 已进入最终响应、之后不再有 API call，则用户消息在 turn 结束时补成一个独立
+turn。其他智能体的消息无论是否跨过这个边界都不会补 turn，从而避免中间消息抢占发言。
+例外是被其他智能体明确 `@` 的最终消息：它按用户消息的消费规则处理，若没有后续 API call
+也会在 turn 结束时补成一个独立 turn；预算仍按 agent-to-agent 规则计算。
 
 每个智能体实例还有一个“主动启动次数”状态，默认 4：用户新消息会重置为 4；由其他
 智能体消息触发的 turn 在第一次产生频道动作时扣 1，同一 turn 最多扣 1；为 0 时该 turn
@@ -542,7 +583,7 @@ akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写
   自行 `Read`/`ViewImage` 该路径。
 
 截图走静默采集路径，不触发审批。任一来源失败只省略对应部分，不影响 turn。总块大小有
-64K token 的保守上限（按 UTF-8 字节估算），默认启用；MQTT 来源的 turn 同样会获得该
+64K token 的保守估算上限（ASCII 约 4 字符/token，CJK 按 1 字符/token），默认启用；MQTT 来源的 turn 同样会获得该
 上下文，因此不要在公共频道里逐字复述桌面信息。
 
 相关环境变量和参数：`AKI_LIVE_CONTEXT_ENABLED`、`AKI_LIVE_CONTEXT_BUDGET_TOKENS`、
