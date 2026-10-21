@@ -1,11 +1,10 @@
-"""Static tool capability classification and execution-lock prompt blocks."""
+"""Static tool capability classification for the execution lock."""
 
 from __future__ import annotations
 
 import json
 import re
-from typing import Any, Mapping
-from xml.sax.saxutils import quoteattr
+from typing import Any
 
 EXECUTION_LOCK_TAG = "aki-execution-lock"
 
@@ -64,16 +63,6 @@ _EXECUTION_LOCK_RE = re.compile(
     re.S,
 )
 
-_READ_ONLY_EXAMPLES = (
-    "`Read`, `ReadLSP`, `Grep`, `Glob`, `LS`, `ListDir`, `ViewImage`, "
-    "截图、摄像头、Tavily MCP 查询"
-)
-_NON_READ_ONLY_EXAMPLES = (
-    "`Bash`、`Memory`、`Agent`、Edit/Write/ApplyPatch、任务状态写入、"
-    "发图、未知 MCP"
-)
-
-
 def is_read_only_tool(tool_name: str) -> bool:
     return tool_name in READ_ONLY_TOOLS or tool_name in READ_ONLY_MCP_TOOLS
 
@@ -103,49 +92,6 @@ def execution_policy_json() -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
-
-
-def render_execution_lock_policy(
-    *,
-    authorized: bool,
-    reason: str,
-    holder: Mapping[str, Any] | None = None,
-) -> str:
-    auth = "true" if authorized else "false"
-    holder_profile = str((holder or {}).get("profile") or "")
-    lines = [
-        f"<{EXECUTION_LOCK_TAG} authorized={quoteattr(auth)} "
-        f"reason={quoteattr(reason)} holder={quoteattr(holder_profile)}>",
-        "<tool-classification>只读工具不需要锁："
-        f"{_READ_ONLY_EXAMPLES}。非只读及未知工具一律需要锁："
-        f"{_NON_READ_ONLY_EXAMPLES}。</tool-classification>",
-        "<lock-rule>调用任何非只读工具前必须先调用 "
-        f"`{LOCK_ACQUIRE_TOOL}`。锁是整机共享排他锁；成功后才能在后续工具调用中"
-        "执行非只读操作。完成后调用 "
-        f"`{LOCK_RELEASE_TOOL}`，turn 结束时网关也会自动释放。"
-        "如果工具返回缺少锁、抢锁失败或未获授权，禁止重试同一操作；立即结束本轮"
-        "并说明需要用户指定执行者。除非用户主动询问，否则无需刻意向用户强调锁的"
-        "获取、持有或释放状态；正常完成工作即可。</lock-rule>",
-    ]
-    if authorized:
-        lines.append(
-            "<authorization>当前请求已获得非只读执行授权；先获取锁，再执行需要的"
-            "非只读工具。不要因为其他成员在线就跳过加锁。</authorization>"
-        )
-    else:
-        lines.append(
-            "<authorization>当前请求没有授权你执行非只读操作。纯聊天和只读工具"
-            "仍可正常使用；如果完成任务需要非只读工具，不要尝试抢锁，也不要执行。"
-            "在群聊中应由约定的确认者请用户用有效 `@成员名` 指定执行者；其他成员"
-            "保持沉默或只提供只读分析。</authorization>"
-        )
-    lines.append(f"</{EXECUTION_LOCK_TAG}>")
-    return "\n".join(lines)
-
-
-def apply_execution_lock_policy(system: str, block: str) -> str:
-    cleaned = _EXECUTION_LOCK_RE.sub("\n", system).rstrip()
-    return f"{cleaned}\n\n{block.strip()}\n"
 
 
 def clear_execution_lock_policy(system: str) -> str:

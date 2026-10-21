@@ -300,6 +300,48 @@ class FakeLetta:
                     }
                 )
             return
+        if content == "release-tool":
+            tool_call_id = f"release-{number}"
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": "checking release\n"}],
+                }
+            )
+            response = self.request_tool(
+                "release_execution_lock", {}, tool_call_id
+            )
+            body = (response or {}).get("response") or {}
+            allowed = body.get("behavior") == "allow"
+            result_text = (
+                "release allowed"
+                if allowed
+                else str(body.get("message") or "release denied")
+            )
+            emit(
+                {
+                    "type": "message",
+                    "message_type": "tool_return_message",
+                    "tool_call_id": tool_call_id,
+                    "status": "success" if allowed else "error",
+                    "tool_return": result_text,
+                }
+            )
+            emit_chunk(
+                {
+                    "message_type": "assistant_message",
+                    "content": [{"type": "text", "text": result_text}],
+                }
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": result_text,
+                }
+            )
+            return
         if "EXTERNAL_IMAGE:" in content:
             marker = "EXTERNAL_IMAGE:"
             path_value = content.split(marker, 1)[1].splitlines()[0].strip()

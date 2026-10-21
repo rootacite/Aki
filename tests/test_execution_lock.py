@@ -8,10 +8,8 @@ from pathlib import Path
 from engine.execution_lock import ExecutionLock
 from engine.execution_policy import (
     EXECUTION_LOCK_TAG,
-    apply_execution_lock_policy,
     clear_execution_lock_policy,
     is_read_only_tool,
-    render_execution_lock_policy,
     requires_execution_lock,
 )
 
@@ -57,31 +55,26 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.assertFalse(requires_execution_lock("acquire_execution_lock"))
         self.assertFalse(requires_execution_lock("release_execution_lock"))
 
-    def test_policy_block_is_idempotent_and_explains_read_only_exemption(self) -> None:
-        block = render_execution_lock_policy(
-            authorized=False,
-            reason="user-must-name-executor",
-        )
-        self.assertIn(EXECUTION_LOCK_TAG, block)
-        self.assertIn("只读工具不需要锁", block)
-        self.assertIn("acquire_execution_lock", block)
-        self.assertIn("没有授权", block)
-        self.assertIn("除非用户主动询问", block)
-        self.assertIn("无需刻意向用户强调锁", block)
-        once = apply_execution_lock_policy("BASE\n", block)
-        twice = apply_execution_lock_policy(once, block)
-        self.assertEqual(twice.count(f"<{EXECUTION_LOCK_TAG}"), 1)
-        cleared = clear_execution_lock_policy(twice)
+    def test_base_prompts_define_lock_rules_in_english(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        for name in ("aki-system.md", "fuyu-system.md"):
+            prompt = (root / "prompts" / name).read_text(encoding="utf-8")
+            self.assertIn("## Execution lock", prompt)
+            self.assertIn("Some tools are read-only", prompt)
+            self.assertIn("requires the device-wide execution lock", prompt)
+            self.assertIn(
+                "Manual lock release is intentionally unavailable", prompt
+            )
+            self.assertNotIn("`release_execution_lock`", prompt)
+            self.assertIn("Do not mention lock status unless the user explicitly asks", prompt)
+            self.assertIn("one assistant response", prompt)
+            self.assertNotIn(f"<{EXECUTION_LOCK_TAG}", prompt)
+
+    def test_legacy_dynamic_lock_block_is_removed(self) -> None:
+        legacy = f"BASE\n\n<{EXECUTION_LOCK_TAG}>old</{EXECUTION_LOCK_TAG}>\n"
+        cleared = clear_execution_lock_policy(legacy)
         self.assertNotIn(f"<{EXECUTION_LOCK_TAG}", cleared)
         self.assertIn("BASE", cleared)
-
-    def test_authorized_policy_allows_lock_acquisition(self) -> None:
-        block = render_execution_lock_policy(
-            authorized=True,
-            reason="user-mentioned",
-        )
-        self.assertIn('authorized="true"', block)
-        self.assertIn("已获得非只读执行授权", block)
 
 
 class ExecutionLockTests(unittest.TestCase):

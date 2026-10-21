@@ -75,10 +75,8 @@ from engine.execution_policy import (
     LOCK_NOT_AUTHORIZED_ERROR,
     LOCK_RELEASE_TOOL,
     LOCK_REQUIRED_ERROR,
-    apply_execution_lock_policy,
     clear_execution_lock_policy,
     is_lock_control_tool,
-    render_execution_lock_policy,
     requires_execution_lock,
 )
 from engine.live_context import (
@@ -151,7 +149,6 @@ EXTERNAL_TOOL_NAMES = {
     CAMERA_TOOL_NAME,
     SCREENSHOT_TOOL_NAME,
     LOCK_ACQUIRE_TOOL,
-    LOCK_RELEASE_TOOL,
 }
 MCP_TOOL_PREFIX = "mcp__"
 MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
@@ -304,21 +301,6 @@ ACQUIRE_EXECUTION_LOCK_TOOL = {
     "timeout_ms": 10000,
 }
 
-RELEASE_EXECUTION_LOCK_TOOL = {
-    "name": LOCK_RELEASE_TOOL,
-    "label": "Release execution lock",
-    "description": (
-        "Release the device-wide execution lock held by this turn. The gateway also "
-        "releases it automatically when the turn ends."
-    ),
-    "parameters": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": False,
-    },
-    "auto_background": False,
-    "timeout_ms": 10000,
-}
 CAPABILITIES = {
     "streaming": True,
     "approvals": True,
@@ -2258,30 +2240,6 @@ class GatewayServer:
             except (OSError, ValueError) as exc:
                 LOGGER.warning("failed to refresh channel transcript: %s", exc)
 
-    async def _refresh_execution_lock_policy(self, turn: Turn) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        holder = self.execution_lock.status().get("holder")
-        block = render_execution_lock_policy(
-            authorized=turn.lock_authorized,
-            reason=turn.lock_authorization,
-            holder=holder if isinstance(holder, dict) else None,
-        )
-        async with self._channel_transcript_lock:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                updated = apply_execution_lock_policy(system, block)
-                if updated != system:
-                    self._write_agent_record(path, record, updated)
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to refresh execution lock policy: %s", exc)
-
     def _clear_execution_lock_policy(self) -> None:
         path = self._agent_record_path()
         if path is None:
@@ -2566,7 +2524,7 @@ class GatewayServer:
                 )
                 await self._finish_turn(turn, "backend_unavailable")
                 return
-            await self._refresh_execution_lock_policy(turn)
+            self._clear_execution_lock_policy()
             if turn.origin == "mqtt":
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
@@ -4216,7 +4174,6 @@ class GatewayServer:
     def _external_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             ACQUIRE_EXECUTION_LOCK_TOOL,
-            RELEASE_EXECUTION_LOCK_TOOL,
         ]
         if self.config.camera_enabled and shutil.which(self.config.ffmpeg_bin):
             tools.append(CAMERA_TOOL)
@@ -4627,9 +4584,23 @@ class GatewayServer:
                 await self._safe_deny(request_id, "internal backend turn")
             return
 
+        if tool_name == LOCK_RELEASE_TOOL:
+            await self._safe_deny(
+                request_id,
+                "EXECUTION_LOCK_RELEASE_UNAVAILABLE: manual lock release is not "
+                "available. The gateway releases the lock automatically when the "
+                "turn ends; do not retry.",
+            )
+            return
+
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
 
-        if requires_execution_lock(tool_name) and not turn.lock_held:
+        if (
+            requires_execution_lock(tool_name)
+            and not turn.lock_held
+            and tool_name not in EXTERNAL_TOOL_NAMES
+            and not tool_name.startswith(MCP_TOOL_PREFIX)
+        ):
             await self._safe_deny(request_id, LOCK_REQUIRED_ERROR)
             return
 

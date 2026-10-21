@@ -194,6 +194,8 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertNotIn("mcp__local__", mod)
         self.assertIn("desktop_take_screenshot", mod)
         self.assertIn("camera_take_photo", mod)
+        self.assertIn("phase === \"approval\" && isExternalTool(toolName)", mod)
+        self.assertIn("denies(event.toolName, event.phase)", mod)
         self.assertNotIn("if (LOCK_TOOLS.has(toolName)) return null", mod)
         self.assertNotIn("pidAlive(holder.pid)) return null", mod)
 

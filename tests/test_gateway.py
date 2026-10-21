@@ -1432,18 +1432,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("not a user message", prompt)
         self.assertIn("<aki-channel-transcript>", prompt)
 
-    async def test_execution_lock_policy_is_injected_into_system_prompt(self) -> None:
-        agent_path = self._write_test_agent()
+    async def test_legacy_dynamic_execution_lock_block_is_removed(self) -> None:
+        agent_path = self._write_test_agent(
+            "BASE PROMPT\n\n<aki-execution-lock authorized=\"true\">old</aki-execution-lock>\n"
+        )
         server = await self.start_server()
         client = await self.client()
         await client.hello()
         turn = await client.call("aki.chat.send", {"message": "hello"})
         await client.collect_turn(turn["turn_id"])
         system = self._agent_system(agent_path)
-        self.assertIn("<aki-execution-lock", system)
-        self.assertIn('authorized="true"', system)
-        self.assertIn("acquire_execution_lock", system)
-        self.assertIn("只读工具不需要锁", system)
+        self.assertIn("BASE PROMPT", system)
+        self.assertNotIn("<aki-execution-lock", system)
 
     async def test_channel_execution_lock_authorization_matrix(self) -> None:
         agent_path = self._write_test_agent()
@@ -1475,9 +1475,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await server._on_channel_text("alice", "alice-1", "do this")
         await wait_until(lambda: bool(fake_channel.final_texts()))
         system = self._agent_system(agent_path)
-        self.assertIn("<aki-execution-lock", system)
-        self.assertIn('authorized="false"', system)
-        self.assertIn('reason="user-must-name-executor"', system)
+        self.assertNotIn("<aki-execution-lock", system)
         prompt = server._channel_prompt("alice", "alice-1", "do this")
         self.assertIn('<execution-ownership responder="aki" self="true">', prompt)
         self.assertIn("唯一负责确认", prompt)
@@ -1559,6 +1557,22 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         tool_result = next(event for event in events if event["type"] == "tool_result")
         self.assertEqual(tool_result["data"]["status"], "error")
         self.assertIn("EXECUTION_LOCK_REQUIRED", str(tool_result["data"]["tool_return"]))
+
+    async def test_release_tool_is_auto_denied_without_approval(self) -> None:
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        turn = await client.call("aki.chat.send", {"message": "release-tool"})
+        events = await client.collect_turn(turn["turn_id"])
+        self.assertNotIn(
+            "approval_request", [event["type"] for event in events]
+        )
+        tool_result = next(event for event in events if event["type"] == "tool_result")
+        self.assertEqual(tool_result["data"]["status"], "error")
+        self.assertIn(
+            "manual lock release is not available",
+            str(tool_result["data"]["tool_return"]),
+        )
 
     async def test_user_channel_message_stays_user_and_enters_transcript(self) -> None:
         agent_path = self._write_test_agent()
@@ -2714,6 +2728,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         await wait_until(lambda: server._external_tools_registered)
         names = [tool["name"] for tool in server._external_tools()]
+        self.assertIn("acquire_execution_lock", names)
+        self.assertNotIn("release_execution_lock", names)
         self.assertIn("camera_take_photo", names)
         self.assertIn("desktop_take_screenshot", names)
         self.assertNotIn("tokifactor_send_image", names)

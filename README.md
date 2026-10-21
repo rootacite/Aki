@@ -423,11 +423,16 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 
 非只读工具受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn。模型必须
 先调用 `acquire_execution_lock`；锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是
-重试。完成后可调用 `release_execution_lock`，turn 正常结束、取消、异常或进程退出时也会
-自动释放。
+重试。锁由网关在 turn 正常结束、取消、异常或进程退出时自动释放。
 
 Letta permission overlay 会拦截未持锁的非只读工具调用，外部工具处理器也会复查。锁状态
 通过 `aki.health` / `aki.status` 的 `execution_lock` 字段公开。
+
+手动解锁工具已从模型工具列表中移除，不需要也不能主动调用。同一 assistant 回复可以按
+执行顺序输出多个 tool call；外部工具
+（截图/拍照、加锁、发图、MCP）属于非并行安全工具，Letta 会按调用顺序串行执行，因此可以
+组成一个流水线而不必为每一步单独等待一次 API call。权限 mod 对这类外部工具把锁检查延后
+到执行阶段，使同一批内的“加锁 → 外部工具”能够按顺序生效。
 
 用户消息没有有效 `@` 且存在多个在线成员时，纯聊天和只读工具仍可直接回复；如果完成任务
 需要非只读操作，所有成员都不能自行执行。固定确认者优先选择 `aki`，否则选择 channel id

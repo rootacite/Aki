@@ -163,11 +163,21 @@ def render_execution_lock_mod() -> str:
     readonly = json.dumps(sorted(READ_ONLY_TOOLS))
     readonly_mcp = json.dumps(sorted(READ_ONLY_MCP_TOOLS))
     lock_tools = json.dumps(sorted((LOCK_ACQUIRE_TOOL, LOCK_RELEASE_TOOL)))
+    external_tools = json.dumps(
+        sorted(
+            {
+                "tokifactor_send_image",
+                "camera_take_photo",
+                "desktop_take_screenshot",
+            }
+        )
+    )
     return f"""import {{ readFileSync }} from "node:fs";
 
 const READ_ONLY = new Set({readonly});
 const READ_ONLY_MCP = new Set({readonly_mcp});
 const LOCK_TOOLS = new Set({lock_tools});
+const EXTERNAL_TOOLS = new Set({external_tools});
 
 function pidAlive(pid) {{
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -190,9 +200,14 @@ function readHolder() {{
   }}
 }}
 
-function denies(toolName) {{
+function isExternalTool(toolName) {{
+  return EXTERNAL_TOOLS.has(toolName) || toolName.startsWith("mcp__");
+}}
+
+function denies(toolName, phase) {{
   if (LOCK_TOOLS.has(toolName)) return;
   if (READ_ONLY.has(toolName) || READ_ONLY_MCP.has(toolName)) return;
+  if (phase === "approval" && isExternalTool(toolName)) return;
   const profile = process.env.AKI_PROFILE || "";
   const holder = readHolder();
   if (holder && holder.profile === profile && pidAlive(holder.pid)) return;
@@ -208,7 +223,7 @@ export default function activate(letta) {{
     id: "aki-execution-lock",
     description: "Require the device-wide execution lock for non-read-only tools",
     isEnabled: () => Boolean(process.env.AKI_PROFILE),
-    check: (event) => denies(event.toolName),
+    check: (event) => denies(event.toolName, event.phase),
   }});
 }}
 """
