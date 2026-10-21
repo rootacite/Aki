@@ -38,7 +38,42 @@ COMMANDS = {
     "recompile",
     "reasoning",
     "model",
+    "help",
 }
+
+
+HELP_TEXT = (
+    "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile|help] [options]\n"
+    "\n"
+    "  akictl                     streaming chat REPL\n"
+    "  akictl -p '...'            one-shot chat\n"
+    "  akictl help [command]      show this help or help for one command\n"
+    "  akictl allow <dir>         register a writable directory\n"
+    "  akictl disallow <dir>      revoke a writable directory\n"
+    "  akictl disallow --all      revoke all registered directories\n"
+    "  akictl allowlist           show the effective writable policy\n"
+    "  akictl status | health     gateway status\n"
+    "  akictl history [n]         conversation history\n"
+    "  akictl memory ...          read-only memory commands\n"
+    "  akictl mqtt [status]       show the active MQTT broker\n"
+    "  akictl mqtt set <server>   persist and reconnect to host:port\n"
+    "  akictl mcp                 show native MCP tool status\n"
+    "  akictl mcp local on|off    enable/disable local recon tools as native tools\n"
+    "  akictl model               list the active model and configured models\n"
+    "  akictl model set ID        switch model and restart the backend\n"
+    "  akictl reasoning           show reasoning_effort (default low)\n"
+    "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
+    "  akictl avatar              show Aki's avatar asset status\n"
+    "  akictl reset               reset the default conversation (backs up first)\n"
+    "  akictl username            show how Aki addresses the user\n"
+    "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
+    "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
+    "\nUse 'akictl <command> --help' for command-specific options."
+)
+
+
+def _print_help() -> None:
+    print(HELP_TEXT)
 
 
 def _socket_from(args: argparse.Namespace) -> Path:
@@ -463,39 +498,16 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     )
     _add_common(parser)
     parsers["recompile"] = parser
+    parser = argparse.ArgumentParser(prog="akictl help")
+    parser.add_argument("help_command", nargs="?")
+    parsers["help"] = parser
     return parsers
 
 
 def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in ("-h", "--help"):
-        print(
-            "usage: akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile] [options]\n"
-            "\n"
-            "  akictl                     streaming chat REPL\n"
-            "  akictl -p '...'            one-shot chat\n"
-            "  akictl allow <dir>         register a writable directory\n"
-            "  akictl disallow <dir>      revoke a writable directory\n"
-            "  akictl disallow --all      revoke all registered directories\n"
-            "  akictl allowlist           show the effective writable policy\n"
-            "  akictl status | health     gateway status\n"
-            "  akictl history [n]         conversation history\n"
-            "  akictl memory ...          read-only memory commands\n"
-            "  akictl mqtt [status]       show the active MQTT broker\n"
-            "  akictl mqtt set <server>   persist and reconnect to host:port\n"
-            "  akictl mcp                 show native MCP tool status\n"
-            "  akictl mcp local on|off    enable/disable local recon tools as native tools\n"
-            "  akictl model               list the active model and configured models\n"
-            "  akictl model set ID        switch model and restart the backend\n"
-            "  akictl reasoning           show reasoning_effort (default low)\n"
-            "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
-            "  akictl avatar              show Aki's avatar asset status\n"
-            "  akictl reset               reset the default conversation (backs up first)\n"
-            "  akictl username            show how Aki addresses the user\n"
-            "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
-            "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
-            "\nUse 'akictl <command> --help' for command-specific options."
-        )
+        _print_help()
         return 0
     command = default_command
     if argv and argv[0] in COMMANDS:
@@ -541,6 +553,16 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return _management(args, "aki.username.set", {"username": args.name})
     if command == "recompile":
         return _management(args, "aki.conversation.recompile")
+    if command == "help":
+        if not args.help_command:
+            _print_help()
+            return 0
+        parser = parsers.get(args.help_command)
+        if parser is None:
+            print(f"unknown command: {args.help_command}", file=sys.stderr)
+            return 2
+        parser.print_help()
+        return 0
     print(f"unknown command: {command}", file=sys.stderr)
     return 2
 

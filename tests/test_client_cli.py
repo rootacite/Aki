@@ -130,6 +130,20 @@ class ClientCliTests(unittest.TestCase):
         self.assertEqual(alias.returncode, 0, alias.stderr)
         self.assertIn("echo: hello", alias.stdout)
 
+    def test_akictl_help_and_command_help(self) -> None:
+        help_result = self.run_akictl("help")
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("usage: akictl", help_result.stdout)
+        self.assertIn("akictl help [command]", help_result.stdout)
+
+        model_help = self.run_akictl("help", "model")
+        self.assertEqual(model_help.returncode, 0, model_help.stderr)
+        self.assertIn("usage: akictl model", model_help.stdout)
+
+        unknown = self.run_akictl("help", "missing")
+        self.assertEqual(unknown.returncode, 2)
+        self.assertIn("unknown command: missing", unknown.stderr)
+
     def test_akictl_status_and_writable_management(self) -> None:
         allowed = Path(tempfile.mkdtemp(prefix="akid-cli-allow-", dir=str(Path.home() / ".local" / "share")))
         try:

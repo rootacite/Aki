@@ -232,6 +232,7 @@ REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
 `/set-username <name>`、`/recompile`、`/reset`、`/quit`。
 危险工具会显示工具名与参数并询问 `y/N`；非交互 stdin 默认拒绝。`Ctrl-C` 取消当前 turn。
+使用 `akictl help` 查看总帮助，或 `akictl help model` 查看单个命令帮助。
 
 重置 `default` 会话：
 
