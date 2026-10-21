@@ -67,6 +67,9 @@ from engine.channel import (
 from engine.live_context import (
     DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
     DEFAULT_BUDGET_TOKENS as DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS,
+    CHANNEL_WAKE_ALL,
+    CHANNEL_WAKE_MENTIONS,
+    CHANNEL_WAKE_USER,
     ChannelMember,
     ChannelTranscriptEntry,
     LiveContextOptions,
@@ -81,6 +84,7 @@ from engine.live_context import (
     render_channel_context,
     render_channel_transcript,
     render_live_context,
+    route_channel_reply,
 )
 from engine.mqtt_settings import (
     DEFAULT_MQTT_HOST,
@@ -718,18 +722,25 @@ class ChannelConnection:
         text: str,
         *,
         segment: int = 0,
+        wake: str = "",
+        wake_ids: str = "",
     ) -> None:
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "turn",
+            "turnId": turn_id,
+            "segment": segment,
+            "seq": seq,
+            "phase": phase,
+            "format": "markdown",
+        }
+        if phase == "final":
+            metadata["wake"] = wake or CHANNEL_WAKE_ALL
+            if wake_ids:
+                metadata["wakeIds"] = wake_ids
         self._enqueue_text(
             text,
-            {
-                "schema": "akid.v1",
-                "kind": "turn",
-                "turnId": turn_id,
-                "segment": segment,
-                "seq": seq,
-                "phase": phase,
-                "format": "markdown",
-            },
+            metadata,
             key=(turn_id, segment) if phase == "progress" else None,
         )
 
@@ -745,9 +756,32 @@ class ChannelConnection:
         text = state.text.strip()
         if not text:
             return
+        wake = ""
+        wake_ids = ""
+        if phase == "final":
+            route = route_channel_reply(
+                text,
+                self.server._channel_member_views(),
+                user_name=self.server.config.username,
+            )
+            text = route.text.strip()
+            if not text:
+                return
+            wake = route.wake
+            wake_ids = ",".join(route.target_ids)
+            state.wake = wake
+            state.wake_ids = wake_ids
         if not force and text == state.last_text:
             return
-        self._enqueue_turn(turn_id, seq, phase, state.text.rstrip(), segment=state.segment)
+        self._enqueue_turn(
+            turn_id,
+            seq,
+            phase,
+            text,
+            segment=state.segment,
+            wake=wake,
+            wake_ids=wake_ids,
+        )
         state.last_text = text
 
     async def _publish_loop(self) -> None:
@@ -959,6 +993,8 @@ class ChannelTurnState:
     initiation_charged: bool = False
     suppressed: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
+    wake: str = ""
+    wake_ids: str = ""
 
 
 @dataclass
@@ -3572,9 +3608,6 @@ class GatewayServer:
     def _channel_sender_is_agent(self, sender_id: str) -> bool:
         return bool(sender_id) and sender_id in self._channel_members
 
-    def _channel_message_mentions_self(self, text: str) -> bool:
-        return self.config.channel_id in self._channel_message_mentions(text)
-
     def _channel_message_mentions(self, text: str) -> set[str]:
         return match_channel_mentions(text, self._channel_member_views())
 
@@ -3651,6 +3684,24 @@ class GatewayServer:
             self._agent_initiation_remaining,
         )
         mentions = self._channel_message_mentions(text)
+        wake = str(event_metadata.get("wake") or CHANNEL_WAKE_ALL).strip().lower()
+        if wake not in (CHANNEL_WAKE_USER, CHANNEL_WAKE_MENTIONS, CHANNEL_WAKE_ALL):
+            wake = CHANNEL_WAKE_ALL
+        wake_ids = {
+            item.strip()
+            for item in str(event_metadata.get("wakeIds") or "").split(",")
+            if item.strip()
+        }
+        directly_targeted = (
+            self.config.channel_id in wake_ids
+            or self.config.channel_id in mentions
+        )
+        should_wake = True
+        if from_agent:
+            if wake == CHANNEL_WAKE_USER:
+                should_wake = False
+            elif wake == CHANNEL_WAKE_MENTIONS:
+                should_wake = directly_targeted
         if (
             not from_agent
             and mentions
@@ -3665,9 +3716,19 @@ class GatewayServer:
             if busy:
                 await self._refresh_channel_transcript()
             return
+        if from_agent and not should_wake:
+            LOGGER.info(
+                "channel agent reply recorded without wake seq=%s wake=%s targets=%s",
+                entry.seq,
+                wake,
+                ",".join(sorted(wake_ids)),
+            )
+            if busy:
+                await self._refresh_channel_transcript()
+            return
         active = self.active
         if from_agent and (active is not None or self.queue):
-            if active is not None and self._channel_message_mentions_self(text):
+            if active is not None and directly_targeted:
                 active.busy_messages.append(
                     {
                         "sender": sender,
@@ -3782,6 +3843,7 @@ class GatewayServer:
             initiation_remaining=self._agent_initiation_remaining,
             initiation_limit=self.config.agent_initiation_limit,
             from_agent=from_agent,
+            user_name=self.config.username,
         )
         if from_agent:
             message_block = (

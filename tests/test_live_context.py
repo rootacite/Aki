@@ -10,6 +10,9 @@ from unittest import mock
 from engine.akid import build_config_from_env
 from engine.live_context import (
     CHANNEL_TRANSCRIPT_TAG,
+    CHANNEL_WAKE_ALL,
+    CHANNEL_WAKE_MENTIONS,
+    CHANNEL_WAKE_USER,
     ChannelMember,
     ChannelTranscriptEntry,
     HistoryEntry,
@@ -31,6 +34,7 @@ from engine.live_context import (
     render_channel_context,
     render_channel_transcript,
     render_live_context,
+    route_channel_reply,
 )
 
 
@@ -155,7 +159,7 @@ class ChannelContextTests(unittest.TestCase):
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
         self.assertIn("用户提到了你，正在和你对话。", self_text)
-        self.assertIn("不需要 @ 用户", self_text)
+        self.assertIn("路由标记", self_text)
         other_text = render_channel_context(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
@@ -167,10 +171,36 @@ class ChannelContextTests(unittest.TestCase):
         self.assertNotIn("没有提到你", plain_text)
         self.assertIn("@名字", plain_text)
         self.assertIn("用户不在成员列表中", plain_text)
-        self.assertIn("不能也不需要 @ 用户", plain_text)
+        self.assertIn("<wake-routing>", plain_text)
+        self.assertIn("@Master", plain_text)
         self.assertIn("直接说话即可", plain_text)
         self.assertIn('remaining="4"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
+
+    def test_reply_wake_routing_uses_profile_user_name(self) -> None:
+        members = self.members()
+        user_only = route_channel_reply(
+            "@Master\n只对你说。", members, user_name="Master"
+        )
+        self.assertEqual(user_only.text, "只对你说。")
+        self.assertEqual(user_only.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(user_only.target_ids, ())
+
+        targeted = route_channel_reply(
+            "@Fuyu 这个方案有问题。", members, user_name="Master"
+        )
+        self.assertEqual(targeted.wake, CHANNEL_WAKE_MENTIONS)
+        self.assertEqual(targeted.target_ids, ("fuyu",))
+
+        everyone = route_channel_reply("大家都看一下。", members, user_name="Master")
+        self.assertEqual(everyone.wake, CHANNEL_WAKE_ALL)
+        self.assertEqual(everyone.target_ids, ())
+
+        not_the_user = route_channel_reply(
+            "@用户\n这不是配置的称呼。", members, user_name="Master"
+        )
+        self.assertEqual(not_the_user.wake, CHANNEL_WAKE_ALL)
+        self.assertIn("@用户", not_the_user.text)
 
     def test_agent_initiation_budget_is_exposed_and_zero_blocks_replies(self) -> None:
         members = self.members()

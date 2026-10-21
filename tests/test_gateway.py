@@ -16,6 +16,7 @@ from typing import Any
 from unittest import mock
 
 from engine.akid import (
+    ChannelTurnState,
     GatewayConfig,
     GatewayServer,
     Turn,
@@ -1182,6 +1183,108 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.queue, [])
         self.assertEqual(fake_channel.events, [])
 
+    async def test_final_reply_metadata_declares_wake_scope(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+
+        state = ChannelTurnState(text="@Master\n只提醒用户。")
+        server.channel_conn._flush_progress(
+            "turn-user-only", 1, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 1)
+        user_event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(user_event["text"], "只提醒用户。")
+        self.assertEqual(user_event["wake"], "user")
+        self.assertNotIn("wakeIds", user_event)
+
+        state = ChannelTurnState(text="@Fuyu 只提醒 Fuyu。")
+        server.channel_conn._flush_progress(
+            "turn-mentions", 2, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 2)
+        mention_event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(mention_event["wake"], "mentions")
+        self.assertEqual(mention_event["wakeIds"], "fuyu")
+
+        state = ChannelTurnState(text="提醒所有人。")
+        server.channel_conn._flush_progress(
+            "turn-all", 3, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 3)
+        self.assertEqual(fake_channel.events_of("turn")[-1]["wake"], "all")
+
+    async def test_agent_reply_wake_scope_controls_turns(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "last_seen": time.monotonic(),
+        }
+        base = {"schema": "akid.v1", "kind": "turn", "phase": "final"}
+
+        await server._on_channel_text(
+            "Fuyu", "fuyu", "只提醒用户", {**base, "wake": "user"}
+        )
+        await asyncio.sleep(0.05)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(server._channel_history[-1].text, "只提醒用户")
+
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "只提醒别人",
+            {**base, "wake": "mentions", "wakeIds": "other"},
+        )
+        await asyncio.sleep(0.05)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(server._channel_history[-1].text, "只提醒别人")
+
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "@Aki 这条提醒你",
+            {**base, "wake": "mentions", "wakeIds": "aki"},
+        )
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        self.assertEqual(
+            [entry.text for entry in server._channel_history[:3]],
+            ["只提醒用户", "只提醒别人", "@Aki 这条提醒你"],
+        )
+
+    async def test_busy_user_only_reply_is_recorded_without_deferral(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        busy_turn = Turn(
+            turn_id="busy-user-only",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            state="running",
+        )
+        server.active = busy_turn
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "只提醒用户",
+            {"schema": "akid.v1", "kind": "turn", "phase": "final", "wake": "user"},
+        )
+        self.assertEqual(busy_turn.busy_messages, [])
+        self.assertEqual(server._channel_history[-1].text, "只提醒用户")
+        server.active = None
+
     async def test_messages_while_busy_update_transcript_and_queue_only_users(self) -> None:
         agent_path = self._write_test_agent()
         fake_channel = FakeChannel()
@@ -1623,7 +1726,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         plain = server._channel_prompt("alice", "alice-1", "hello everyone")
         self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain)
         self.assertIn("用户不在成员列表中", plain)
-        self.assertIn("不能也不需要 @ 用户", plain)
+        self.assertIn("<wake-routing>", plain)
+        self.assertIn("@Master", plain)
         self.assertIn("直接说话即可", plain)
         self.assertIn("Fuyu", plain)
         self.assertIn("&lt;untrusted&gt;", plain)
@@ -1631,7 +1735,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("提到了其他成员，没有点你", other)
         own = server._channel_prompt("alice", "alice-1", "@秋 hello")
         self.assertIn("用户提到了你，正在和你对话。", own)
-        self.assertIn("不需要 @ 用户", own)
+        self.assertIn("路由标记", own)
         self.assertNotIn("没有点你", own)
         await server._on_channel_control(
             TextEnvelope(

@@ -164,6 +164,53 @@ class ChannelTranscriptEntry:
     arrived_while_busy: bool = False
 
 
+CHANNEL_WAKE_USER = "user"
+CHANNEL_WAKE_MENTIONS = "mentions"
+CHANNEL_WAKE_ALL = "all"
+
+
+@dataclass(frozen=True)
+class ChannelReplyRoute:
+    text: str
+    wake: str
+    target_ids: tuple[str, ...] = ()
+
+
+def strip_user_wake_target(text: str, user_name: str) -> tuple[str, bool]:
+    """Remove a leading ``@<user_name>`` wake-only marker from a reply."""
+    name = user_name.strip()
+    if not name:
+        return text, False
+    pattern = re.compile(
+        r"^\s*@" + re.escape(name) + r"(?=\s|$)",
+        re.IGNORECASE,
+    )
+    match = pattern.match(text)
+    if match is None:
+        return text, False
+    return text[match.end() :].lstrip(), True
+
+
+def route_channel_reply(
+    text: str,
+    members: list[ChannelMember] | tuple[ChannelMember, ...],
+    *,
+    user_name: str,
+) -> ChannelReplyRoute:
+    """Resolve which agents a final channel reply should wake."""
+    cleaned, user_only = strip_user_wake_target(text, user_name)
+    mentions = match_channel_mentions(cleaned, members)
+    if mentions:
+        return ChannelReplyRoute(
+            text=cleaned,
+            wake=CHANNEL_WAKE_MENTIONS,
+            target_ids=tuple(sorted(mentions)),
+        )
+    if user_only:
+        return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_USER)
+    return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_ALL)
+
+
 def match_channel_mentions(
     text: str, members: list[ChannelMember] | tuple[ChannelMember, ...]
 ) -> set[str]:
@@ -228,6 +275,7 @@ def render_channel_context(
     initiation_remaining: int = 4,
     initiation_limit: int = 4,
     from_agent: bool = False,
+    user_name: str = "Master",
 ) -> str:
     roster: dict[str, ChannelMember] = {self_member.id: self_member}
     for member in members:
@@ -239,7 +287,10 @@ def render_channel_context(
     )
     mentions = match_channel_mentions(message, ordered)
     if self_member.id in mentions:
-        guidance = "用户提到了你，正在和你对话。直接回复用户即可，不需要 @ 用户。"
+        guidance = (
+            "用户提到了你，正在和你对话。直接回复用户即可；除第一行单独的 "
+            f"`@{_text(user_name, single_line=True)}` 路由标记外，不要用 @ 称呼用户。"
+        )
     elif mentions:
         guidance = "这是一条群聊消息，提到了其他成员，没有点你；你可以自行决定是否回复。"
     else:
@@ -269,10 +320,14 @@ def render_channel_context(
         f"limit={_attr(str(limit))} resets={_attr('user-message')} "
         f"decrements={_attr('agent-to-agent-reply')}/>",
         f"<initiation-guidance>{budget_guidance}</initiation-guidance>",
+        f"<wake-routing>每条最终回复都要选择唤醒范围：只在第一行写 `@{_text(user_name, single_line=True)}` "
+        "表示只提醒用户，不唤醒其他智能体；正文中使用一个或多个 `@成员名 ` 表示只唤醒"
+        "被点名的成员；两者都不使用则唤醒所有其他在线成员。用户路由标记会在发布"
+        "前移除。无论选择哪一种，回复都会进入群聊消息记录。</wake-routing>",
         "<mention-instructions>提到频道成员时必须使用 `@名字 ` 语法：名字后紧跟一个空白，"
         "或一个标点/特殊符号（如 `，`、`,`、`。`、`!`）；直接跟文字、结束或标识符粘连"
-        "不会被视为提及。用户不在成员列表中，不能也不需要 @ 用户；回复用户或与用户对话时"
-        "直接说话即可。</mention-instructions>",
+        "不会被视为提及。用户不在成员列表中；普通回复直接说话即可，例外是回复第一行"
+        f"单独的 `@{_text(user_name, single_line=True)}` 路由标记。</mention-instructions>",
         f"<members online={_attr(str(len(ordered)))}>",
     ]
     for member in ordered:

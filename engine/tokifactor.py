@@ -68,6 +68,8 @@ STRUCTURED_FIELDS = (
     "seq",
     "phase",
     "format",
+    "wake",
+    "wakeIds",
     "toolCallId",
     "toolName",
     "toolStatus",
