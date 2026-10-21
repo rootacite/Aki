@@ -10,6 +10,7 @@ import argparse
 import asyncio
 import base64
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -567,6 +568,7 @@ class GatewayConfig:
     channel_transcript_budget_tokens: int = DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS
     agent_initiation_limit: int = DEFAULT_AGENT_INITIATION_LIMIT
     mqtt_state: Path | None = None
+    channel_history_dir: Path | None = None
     sandbox_enabled: bool = False
     bwrap_bin: str = "bwrap"
     writable_state: Path | None = None
@@ -1037,6 +1039,13 @@ class GatewayServer:
             "ephemeral_turns": 0,
         }
         self._channel_transcript_lock = asyncio.Lock()
+        self.channel_history_dir = config.channel_history_dir or (
+            (config.profile_config_path.parent / "channel-history")
+            if config.profile_config_path is not None
+            else (config.backend_dir / "channel-history")
+        )
+        self.channel_history_path = self._channel_history_path()
+        self._load_channel_history()
         self._agent_initiation_remaining = max(
             0, int(config.agent_initiation_limit)
         )
@@ -1923,6 +1932,7 @@ class GatewayServer:
         self._channel_history.append(entry)
         if len(self._channel_history) > CHANNEL_TRANSCRIPT_MAX_RECORDS:
             del self._channel_history[:-CHANNEL_TRANSCRIPT_MAX_RECORDS]
+        self._persist_channel_history()
         self._channel_transcript_status.update(
             {
                 "entries": len(self._channel_history),
@@ -1930,6 +1940,124 @@ class GatewayServer:
             }
         )
         return entry
+
+    def _channel_history_key(self) -> str:
+        material = json.dumps(
+            {
+                "host": self.config.mqtt_host.strip().casefold(),
+                "port": int(self.config.mqtt_port),
+                "topic": self.config.mqtt_topic.strip(),
+                "magic": self.config.mqtt_magic,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+    def _channel_history_path(self) -> Path:
+        return (
+            self.channel_history_dir
+            / self._channel_history_key()
+            / f"{self.config.profile or 'aki'}.jsonl"
+        )
+
+    @staticmethod
+    def _channel_history_payload(entry: ChannelTranscriptEntry) -> dict[str, Any]:
+        return {
+            "seq": entry.seq,
+            "sender": entry.sender,
+            "sender_id": entry.sender_id,
+            "text": entry.text,
+            "from_agent": entry.from_agent,
+            "timestamp": entry.timestamp,
+            "phase": entry.phase,
+            "arrived_while_busy": entry.arrived_while_busy,
+        }
+
+    def _load_channel_history(self) -> None:
+        path = self._channel_history_path()
+        self.channel_history_path = path
+        by_seq: dict[int, ChannelTranscriptEntry] = {}
+        load_error: str | None = None
+        if path.is_file():
+            try:
+                for line in path.read_text(
+                    encoding="utf-8", errors="replace"
+                ).splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        payload = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if not isinstance(payload, dict):
+                        continue
+                    try:
+                        seq = int(payload.get("seq") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                    if seq <= 0:
+                        continue
+                    by_seq[seq] = ChannelTranscriptEntry(
+                        seq=seq,
+                        sender=str(payload.get("sender") or ""),
+                        sender_id=str(payload.get("sender_id") or ""),
+                        text=str(payload.get("text") or "")[:MAX_CHANNEL_TEXT_CHARS],
+                        from_agent=bool(payload.get("from_agent")),
+                        timestamp=str(payload.get("timestamp") or ""),
+                        phase=str(payload.get("phase") or "final"),
+                        arrived_while_busy=bool(payload.get("arrived_while_busy")),
+                    )
+            except OSError as exc:
+                load_error = str(exc)
+                LOGGER.warning("failed to load channel history: %s", exc)
+        ordered = [by_seq[seq] for seq in sorted(by_seq)]
+        self._channel_history = ordered[-CHANNEL_TRANSCRIPT_MAX_RECORDS:]
+        self._channel_history_seq = max(by_seq, default=0)
+        self._channel_transcript_status.update(
+            {
+                "entries": len(self._channel_history),
+                "last_seq": self._channel_history_seq,
+                "channel_key": self._channel_history_key(),
+                "history_path": str(path),
+                "persisted": path.is_file(),
+            }
+        )
+        if load_error is None:
+            self._channel_transcript_status.pop("last_history_error", None)
+        else:
+            self._channel_transcript_status["last_history_error"] = load_error
+        if len(ordered) > CHANNEL_TRANSCRIPT_MAX_RECORDS:
+            self._persist_channel_history()
+
+    def _persist_channel_history(self) -> None:
+        body = "".join(
+            json.dumps(
+                self._channel_history_payload(entry),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for entry in self._channel_history
+        )
+        try:
+            atomic_write(self.channel_history_path, body)
+        except (OSError, TypeError, ValueError) as exc:
+            self._channel_transcript_status["last_history_error"] = str(exc)
+            LOGGER.warning("failed to persist channel history: %s", exc)
+            return
+        self._channel_transcript_status.update(
+            {
+                "entries": len(self._channel_history),
+                "last_seq": self._channel_history_seq,
+                "channel_key": self._channel_history_key(),
+                "history_path": str(self.channel_history_path),
+                "persisted": True,
+            }
+        )
+        self._channel_transcript_status.pop("last_history_error", None)
 
     def _clear_channel_transcript_block(self) -> None:
         path = self._agent_record_path()
@@ -2267,7 +2395,8 @@ class GatewayServer:
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
                 )
-                turn.conversation_snapshot = self._snapshot_conversation()
+                if turn.origin_is_agent:
+                    turn.conversation_snapshot = self._snapshot_conversation()
             else:
                 self._clear_channel_transcript_block()
                 self._channel_transcript_status.update(
@@ -2996,6 +3125,7 @@ class GatewayServer:
             self.channel = new_channel
             self.config.mqtt_host = host
             self.config.mqtt_port = port
+            self._load_channel_history()
             await new_channel.start()
             deadline = time.monotonic() + 10.0
             while not new_channel.connected and time.monotonic() < deadline:
@@ -5954,6 +6084,11 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         channel_description=channel_description,
         channel_aliases=channel_aliases,
         mqtt_state=config_path,
+        channel_history_dir=(
+            Path(os.environ["AKI_CHANNEL_HISTORY_DIR"]).expanduser()
+            if os.environ.get("AKI_CHANNEL_HISTORY_DIR")
+            else None
+        ),
         sandbox_enabled=aki.sandbox,
         bwrap_bin=os.environ.get("AKI_BWRAP_BIN", "bwrap"),
         writable_state=config_path,

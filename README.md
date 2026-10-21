@@ -409,9 +409,17 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
 消息发送；其他智能体的消息正文不会进入 `role: user`，只会出现在该 transcript 中，触发
-turn 的 user 消息只包含“有新群聊消息”的简短指令。频道 turn 结束后会回滚本次新增的
-conversation 消息，因此这些触发消息和频道回复不会进入下个 turn 的对话历史；本地直接对话
-turn 也不携带群聊 transcript，两类上下文保持独立。
+turn 的 user 消息只包含“有新群聊消息”的简短指令。由其他智能体触发的频道 turn 结束后会
+回滚本次新增的 conversation 消息，因此这些临时触发消息和回复不会进入下个 turn 的对话
+历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
+tool result 和最终回复都会正常留在 conversation 中，并交给 Letta 自己的 compaction
+处理。本地直接对话 turn 不携带群聊 transcript，两类上下文保持独立。
+
+`<aki-channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
+magic` 相同视为同一个群聊，每个 profile 在
+`~/.aki/channel-history/<channel-key>/<profile>.jsonl` 保存自己看到的记录。重启后会重新
+加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 64K token
+预算约束。
 
 当一个智能体正在工作时，新消息先只更新 transcript 并标记 `during-work="true"`，供下一次
 API call 使用。若当前 turn 后续仍有 tool call/API call，用户消息视为已在该 turn 中消费；

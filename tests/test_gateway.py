@@ -1343,6 +1343,71 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await client.collect_turn(local["turn_id"])
         self.assertNotIn("<aki-channel-transcript", self._agent_system(agent_path))
 
+    async def test_channel_transcript_persists_across_server_restart(self) -> None:
+        server = await self.start_server()
+        first = server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="first persisted message",
+            from_agent=False,
+        )
+        second = server._record_channel_message(
+            sender="Fuyu",
+            sender_id="fuyu",
+            text="second persisted message",
+            from_agent=True,
+        )
+        path = server.channel_history_path
+        self.assertTrue(path.is_file())
+        self.assertEqual((first.seq, second.seq), (1, 2))
+
+        await server.stop()
+        if self.server is server:
+            self.server = None
+
+        restarted = await self.start_server()
+        self.assertEqual(
+            [entry.text for entry in restarted._channel_history],
+            ["first persisted message", "second persisted message"],
+        )
+        self.assertEqual(restarted._channel_history_seq, 2)
+        third = restarted._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="third persisted message",
+            from_agent=False,
+        )
+        self.assertEqual(third.seq, 3)
+
+    async def test_channel_transcript_is_isolated_by_mqtt_channel(self) -> None:
+        server = await self.start_server()
+        original_topic = server.config.mqtt_topic
+        first_path = server.channel_history_path
+        server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="topic one message",
+            from_agent=False,
+        )
+
+        server.config.mqtt_topic = f"{original_topic}-other"
+        server._load_channel_history()
+        self.assertNotEqual(server.channel_history_path, first_path)
+        self.assertEqual(server._channel_history, [])
+        server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="topic two message",
+            from_agent=False,
+        )
+
+        server.config.mqtt_topic = original_topic
+        server._load_channel_history()
+        self.assertEqual(
+            [entry.text for entry in server._channel_history],
+            ["topic one message"],
+        )
+
     async def test_channel_conversation_snapshot_rolls_back_turn_messages(self) -> None:
         await self.start_server()
         assert self.server is not None
@@ -1367,7 +1432,39 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.server._channel_transcript_status.get("ephemeral_turns"), 1
         )
 
-    async def test_channel_turn_uses_ephemeral_conversation_snapshot(self) -> None:
+    async def test_user_channel_turn_persists_conversation_messages(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text('{"type":"session"}\n', encoding="utf-8")
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        marker = b'{"type":"message","message":{"role":"user","content":"persisted"}}\n'
+        original_send_user = server.backend.send_user
+
+        async def append_and_send(content: str) -> None:
+            with messages.open("ab") as handle:
+                handle.write(marker)
+            await original_send_user(content)
+
+        with mock.patch.object(
+            server.backend,
+            "send_user",
+            side_effect=append_and_send,
+        ):
+            await server._on_channel_text("alice", "alice-1", "persistent channel turn")
+            await wait_until(lambda: bool(fake_channel.final_texts()))
+            await wait_until(lambda: server.active is None and not server.queue)
+
+        self.assertIn(marker, messages.read_bytes())
+        self.assertEqual(
+            server._channel_transcript_status.get("ephemeral_turns", 0), 0
+        )
+        self.assertTrue(await server.backend.wait_ready(5.0))
+
+    async def test_agent_channel_turn_uses_ephemeral_conversation_snapshot(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         directory = server._conversation_dir()
@@ -1378,13 +1475,33 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         conversation.write_text('{"id":"default"}\n', encoding="utf-8")
         original_messages = messages.read_bytes()
         original_conversation = conversation.read_bytes()
-        await server._on_channel_text("alice", "alice-1", "ephemeral channel turn")
-        await wait_until(
-            lambda: int(
-                server._channel_transcript_status.get("ephemeral_turns", 0)
+        original_send_user = server.backend.send_user
+
+        async def append_and_send(content: str) -> None:
+            with messages.open("ab") as handle:
+                handle.write(
+                    b'{"type":"message","message":{"role":"user","content":"ephemeral"}}\n'
+                )
+            await original_send_user(content)
+
+        with mock.patch.object(
+            server.backend,
+            "send_user",
+            side_effect=append_and_send,
+        ):
+            await server._on_channel_text(
+                "Fuyu",
+                "fuyu",
+                "ephemeral channel turn",
+                {"schema": "akid.v1", "kind": "turn", "phase": "final"},
             )
-            >= 1
-        )
+            await wait_until(
+                lambda: int(
+                    server._channel_transcript_status.get("ephemeral_turns", 0)
+                )
+                >= 1
+            )
+            await wait_until(lambda: server.active is None and not server.queue)
         self.assertEqual(messages.read_bytes(), original_messages)
         self.assertEqual(conversation.read_bytes(), original_conversation)
         self.assertTrue(await server.backend.wait_ready(5.0))
