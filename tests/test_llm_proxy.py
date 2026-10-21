@@ -7,10 +7,11 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from engine.aki_config import ModelRoute
 from engine.grok_oauth import GrokCredentials
-from engine.llm_proxy import LlmProxy, ProxyBindError
+from engine.llm_proxy import LlmProxy, ProxyBindError, _open_upstream
 
 
 def _route(model: str, upstream: str, url_path: str) -> ModelRoute:
@@ -129,6 +130,53 @@ class LlmProxyTests(unittest.IsolatedAsyncioTestCase):
     def test_refuses_non_loopback_bind(self) -> None:
         with self.assertRaises(ProxyBindError):
             LlmProxy("0.0.0.0", 7721, "token", ())
+
+    async def test_retries_transient_upstream_proxy_tls_eof(self) -> None:
+        calls = 0
+        expected = (mock.sentinel.reader, mock.sentinel.writer, "/v1/responses")
+
+        async def open_once(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls < 3:
+                raise ConnectionResetError()
+            return expected
+
+        with mock.patch(
+            "engine.llm_proxy._open_upstream_once", side_effect=open_once
+        ), mock.patch("engine.llm_proxy.asyncio.sleep", new=mock.AsyncMock()):
+            result = await _open_upstream(
+                "cli-chat-proxy.grok.com",
+                443,
+                "https",
+                "/v1/responses",
+                upstream_proxy="http://192.168.4.1:7890",
+                ssl_context=None,
+            )
+        self.assertEqual(calls, 3)
+        self.assertIs(result, expected)
+
+    async def test_does_not_retry_permanent_proxy_rejection(self) -> None:
+        calls = 0
+
+        async def open_once(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            raise OSError("upstream proxy refused CONNECT (407)")
+
+        with mock.patch(
+            "engine.llm_proxy._open_upstream_once", side_effect=open_once
+        ), mock.patch("engine.llm_proxy.asyncio.sleep", new=mock.AsyncMock()):
+            with self.assertRaises(OSError):
+                await _open_upstream(
+                    "cli-chat-proxy.grok.com",
+                    443,
+                    "https",
+                    "/v1/responses",
+                    upstream_proxy="http://192.168.4.1:7890",
+                    ssl_context=None,
+                )
+        self.assertEqual(calls, 1)
 
 
 class LocalBypassProxyTests(unittest.IsolatedAsyncioTestCase):

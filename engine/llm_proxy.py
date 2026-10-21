@@ -19,6 +19,8 @@ LOGGER = logging.getLogger("akid.llm_proxy")
 
 MAX_BODY_BYTES = 32 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
+UPSTREAM_CONNECT_ATTEMPTS = 5
+UPSTREAM_RETRY_DELAYS = (0.2, 0.4, 0.8, 1.2)
 _HOP_BY_HOP = {
     "host",
     "authorization",
@@ -236,7 +238,12 @@ class LlmProxy:
                 extra_headers=extra_headers,
             )
         except OSError as exc:
-            LOGGER.warning("upstream connect failed host=%s error=%s", upstream_host, exc)
+            LOGGER.warning(
+                "upstream connect failed host=%s type=%s error=%s",
+                upstream_host,
+                type(exc).__name__,
+                exc,
+            )
             writer.write(_status_json(502, "upstream unavailable"))
             return 502, model_id, upstream_host
         return status, model_id, upstream_host
@@ -348,7 +355,57 @@ async def _forward(
             await upstream_writer.wait_closed()
 
 
+def _retryable_upstream_connect(exc: OSError) -> bool:
+    message = str(exc)
+    if any(
+        marker in message
+        for marker in (
+            "missing upstream host",
+            "upstream proxy refused CONNECT",
+            "upstream proxy returned a bad CONNECT status",
+        )
+    ):
+        return False
+    return isinstance(exc, (ssl.SSLError, ConnectionError, TimeoutError)) or not message
+
+
 async def _open_upstream(
+    host: str,
+    port: int,
+    scheme: str,
+    path: str,
+    *,
+    upstream_proxy: str,
+    ssl_context: ssl.SSLContext | None,
+) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str]:
+    attempts = UPSTREAM_CONNECT_ATTEMPTS if upstream_proxy else 1
+    for attempt in range(1, attempts + 1):
+        try:
+            return await _open_upstream_once(
+                host,
+                port,
+                scheme,
+                path,
+                upstream_proxy=upstream_proxy,
+                ssl_context=ssl_context,
+            )
+        except OSError as exc:
+            if attempt >= attempts or not _retryable_upstream_connect(exc):
+                raise
+            delay = UPSTREAM_RETRY_DELAYS[min(attempt - 1, len(UPSTREAM_RETRY_DELAYS) - 1)]
+            LOGGER.warning(
+                "upstream connect retry host=%s attempt=%s/%s type=%s error=%s",
+                host,
+                attempt,
+                attempts,
+                type(exc).__name__,
+                exc,
+            )
+            await asyncio.sleep(delay)
+    raise OSError("upstream connection failed")
+
+
+async def _open_upstream_once(
     host: str,
     port: int,
     scheme: str,
