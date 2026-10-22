@@ -142,6 +142,11 @@ class ClientCliTests(unittest.TestCase):
         self.assertEqual(model_help.returncode, 0, model_help.stderr)
         self.assertIn("usage: akictl model", model_help.stdout)
 
+        compact_help = self.run_akictl("help", "compact")
+        self.assertEqual(compact_help.returncode, 0, compact_help.stderr)
+        self.assertIn("usage: akictl compact", compact_help.stdout)
+        self.assertIn("compaction-event", compact_help.stdout)
+
         unknown = self.run_akictl("help", "missing")
         self.assertEqual(unknown.returncode, 2)
         self.assertIn("unknown command: missing", unknown.stderr)

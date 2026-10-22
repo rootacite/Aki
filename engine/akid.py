@@ -56,6 +56,7 @@ from engine.letta_llm import (
     write_provider_mod,
 )
 from engine.letta_process import BackendProtocolError, BackendUnavailable, LettaProcess
+from engine.letta_compact import run_letta_compact
 from engine.avatar import AvatarAsset, AvatarError, default_avatar_path, load_avatar
 from engine.channel import (
     CONTROL_TOPIC,
@@ -1160,6 +1161,7 @@ class GatewayServer:
         self._reset_lock = asyncio.Lock()
         self._username_lock = asyncio.Lock()
         self._recompile_lock = asyncio.Lock()
+        self._compact_lock = asyncio.Lock()
         self._live_context_lock = asyncio.Lock()
         self._kde_detected_at = 0.0
         self._kde_detected = False
@@ -1177,6 +1179,7 @@ class GatewayServer:
             "updated": False,
         }
         self._recompiling = False
+        self._compacting = False
         self._resetting = False
         self._policy_restarting = False
         self._shutting_down = False
@@ -1578,6 +1581,8 @@ class GatewayServer:
             return await self._username_set(request.params), None
         if method == "aki.conversation.recompile":
             return await self._recompile_conversation(), None
+        if method == "aki.conversation.compact":
+            return await self._compact_conversation(request.params), None
         if method == "aki.approval.respond":
             return self._approval_respond(conn, request.params), None
         if method == "aki.memory.status":
@@ -2405,6 +2410,7 @@ class GatewayServer:
             "context_limit": context_limit,
             "last_usage": self.last_usage,
             "active_turn": active,
+            "compacting": self._compacting,
             "queue_depth": len(self.queue),
             "connections": len(self.connection_set),
             "memory_tokens": tokens,
@@ -2453,6 +2459,10 @@ class GatewayServer:
         if self._recompiling:
             raise RpcError(
                 ErrorCode.RECOMPILE_FAILED, "conversation recompile in progress"
+            )
+        if self._compacting:
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED, "conversation compact in progress"
             )
         if not bool(getattr(self.backend, "ready", False)):
             raise RpcError(ErrorCode.BACKEND_UNAVAILABLE, "Letta backend is not ready")
@@ -2566,6 +2576,7 @@ class GatewayServer:
             self._policy_restarting
             or self._resetting
             or self._recompiling
+            or self._compacting
             or self._external_tools_pending
             or self.active is not None
             or not self.queue
@@ -3530,6 +3541,10 @@ class GatewayServer:
         finish_reason: str = "mcp_restart",
         finish_message: str = "backend restarted for MCP native tool policy change",
     ) -> dict[str, Any]:
+        if self._compacting:
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED, "conversation compact in progress"
+            )
         if not bool(getattr(self.backend, "ready", False)):
             return {
                 "backend_restarted": False,
@@ -3607,6 +3622,10 @@ class GatewayServer:
         }
 
     async def _restart_for_policy_change(self) -> dict[str, Any]:
+        if self._compacting:
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED, "conversation compact in progress"
+            )
         if not self.config.sandbox_enabled:
             return {
                 "backend_restarted": False,
@@ -4067,6 +4086,7 @@ class GatewayServer:
         if (
             self.active is None
             and not self.queue
+            and not self._compacting
             and not self._external_tools_pending
             and bool(getattr(self.backend, "ready", False))
         ):
@@ -5519,6 +5539,7 @@ class GatewayServer:
         async with self._username_lock:
             if (
                 self._recompiling
+                or self._compacting
                 or self._resetting
                 or self._policy_restarting
                 or self.active is not None
@@ -5698,7 +5719,7 @@ class GatewayServer:
     async def _recompile_conversation_locked(self) -> dict[str, Any]:
         if self._shutting_down:
             raise RpcError(ErrorCode.RECOMPILE_FAILED, "gateway is shutting down")
-        if self._resetting or self._policy_restarting:
+        if self._resetting or self._compacting or self._policy_restarting:
             raise RpcError(
                 ErrorCode.RECOMPILE_FAILED,
                 "another maintenance operation is in progress",
@@ -5836,6 +5857,116 @@ class GatewayServer:
             "backend_ready": True,
         }
 
+    async def _compact_conversation(
+        self, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        mode = optional_string(params, "mode")
+        if mode is not None and mode not in {
+            "all",
+            "sliding_window",
+            "self_compact_all",
+            "self_compact_sliding_window",
+        }:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                "mode must be all, sliding_window, self_compact_all, "
+                "or self_compact_sliding_window",
+            )
+        timeout = require_int(
+            params, "timeout", default=900, minimum=30, maximum=3600
+        )
+        async with self._compact_lock:
+            self._compacting = True
+            try:
+                if self._shutting_down:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED, "gateway is shutting down"
+                    )
+                if self._resetting or self._recompiling or self._policy_restarting:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED,
+                        "another maintenance operation is in progress",
+                    )
+                if self.active is not None or self.queue:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED,
+                        "cannot compact while a turn is active or queued",
+                    )
+
+                with contextlib.suppress(Exception):
+                    await self.backend.stop()
+                failure: Exception | None = None
+                result: dict[str, Any] | None = None
+                try:
+                    result = await asyncio.to_thread(
+                        run_letta_compact,
+                        letta_bin=self.config.letta_bin,
+                        agent_id=self.config.agent_id,
+                        conversation_id=self.config.conversation_id,
+                        cwd=self.config.cwd,
+                        mode=mode,
+                        timeout=float(timeout),
+                        backend_dir=self.config.backend_dir,
+                        letta_home=(
+                            self.config.letta_home or self.writable.letta_home
+                        ),
+                        env=os.environ,
+                    )
+                except Exception as exc:
+                    failure = exc
+                finally:
+                    try:
+                        self.backend.start()
+                        ready = await self._wait_backend_ready(60.0)
+                    except Exception as exc:
+                        LOGGER.exception("backend restart failed after compaction")
+                        ready = False
+                        if failure is None:
+                            failure = exc
+
+                if failure is not None:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED,
+                        str(failure),
+                        {
+                            "conversation_id": self.config.conversation_id,
+                            "backend_ready": ready,
+                            "backend_error": getattr(self.backend, "last_error", None),
+                        },
+                    )
+                if result is None:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED,
+                        "compaction returned no result",
+                        {"backend_ready": ready},
+                    )
+                if not ready:
+                    raise RpcError(
+                        ErrorCode.COMPACT_FAILED,
+                        "conversation compacted but backend did not become ready",
+                        {
+                            **result,
+                            "backend_ready": False,
+                            "backend_error": getattr(self.backend, "last_error", None),
+                        },
+                    )
+                LOGGER.info(
+                    "conversation compacted mode=%s reflection=%s before=%s after=%s",
+                    result.get("mode"),
+                    result.get("reflection"),
+                    result.get("num_messages_before"),
+                    result.get("num_messages_after"),
+                )
+                return {
+                    **result,
+                    "conversation_id": self.config.conversation_id,
+                    "backend_ready": True,
+                }
+            finally:
+                self._compacting = False
+                if not self._shutting_down:
+                    await self._maybe_start_next()
+
     # ------------------------------------------------------------- conversation
     def _conversation_dir(self) -> Path:
         key = _b64url(f"{self.config.conversation_id}:{self.config.agent_id}")
@@ -5892,6 +6023,11 @@ class GatewayServer:
 
     async def _reset_conversation(self) -> dict[str, Any]:
         async with self._reset_lock:
+            if self._compacting or self._recompiling:
+                raise RpcError(
+                    ErrorCode.RESET_FAILED,
+                    "another maintenance operation is in progress",
+                )
             self._resetting = True
             interrupted_turn_id: str | None = None
             dropped_turn_ids: list[str] = []

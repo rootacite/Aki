@@ -30,6 +30,7 @@ from engine.client import (
     default_socket_path,
     run_turn,
 )
+from engine.letta_compact import COMPACT_MODES
 from engine.protocol import RpcError
 
 COMMANDS = {
@@ -48,6 +49,7 @@ COMMANDS = {
     "username",
     "set-username",
     "recompile",
+    "compact",
     "reasoning",
     "model",
     "help",
@@ -59,7 +61,7 @@ ALL_COMMANDS = COMMANDS | SERVICE_COMMANDS
 
 HELP_TEXT = (
     "usage: akictl [--profile NAME] [profile] <command> [options]\n"
-    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile|help] [options]\n"
+    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile|compact|help] [options]\n"
     "\n"
     "  akictl <profile> up|down|restart|status|logs   manage one profile service\n"
     "  akictl profiles            list ~/.aki profiles and service state\n"
@@ -89,6 +91,7 @@ HELP_TEXT = (
     "  akictl username            show how Aki addresses the user\n"
     "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
     "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
+    "  akictl compact [mode]      compact context and trigger memory reflection\n"
     "  akictl up | down | restart manage the default profile service\n"
     "  akictl logs                show profile service logs\n"
     "\nUse 'akictl <command> --help' for command-specific options."
@@ -119,8 +122,14 @@ def _socket_from(args: argparse.Namespace, profile: str = "aki") -> Path:
     return default_socket_path(profile)
 
 
-def _rpc_call(client: GatewayClient, method: str, params: dict[str, Any] | None = None) -> Any:
-    return client.call(method, params or {})
+def _rpc_call(
+    client: GatewayClient,
+    method: str,
+    params: dict[str, Any] | None = None,
+    *,
+    timeout: float = 30.0,
+) -> Any:
+    return client.call(method, params or {}, timeout=timeout)
 
 
 def _print_error(exc: BaseException) -> None:
@@ -508,7 +517,7 @@ def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int
         "/disallow <dir> /allowlist /memory ... /mqtt ... /mcp ... /model [set <id>] "
         "/reasoning [set <level>] "
         "/avatar /username "
-        "/set-username <name> /recompile /reset /quit",
+        "/set-username <name> /recompile /compact [mode] /reset /quit",
         file=sys.stderr,
     )
     while True:
@@ -580,6 +589,19 @@ def repl(client: GatewayClient, *, json_mode: bool, show_reasoning: bool) -> int
                 )
             elif prompt == "/recompile":
                 _print_json(_rpc_call(client, "aki.conversation.recompile"))
+            elif prompt == "/compact" or prompt.startswith("/compact "):
+                rest = prompt.split()[1:]
+                params: dict[str, Any] = {}
+                if rest:
+                    params["mode"] = rest[0]
+                _print_json(
+                    _rpc_call(
+                        client,
+                        "aki.conversation.compact",
+                        params,
+                        timeout=930.0,
+                    )
+                )
             else:
                 run_turn(
                     client,
@@ -633,7 +655,14 @@ def _chat(args: argparse.Namespace, profile: str = "aki") -> int:
         client.close()
 
 
-def _management(args: argparse.Namespace, method: str, params: dict[str, Any] | None = None, profile: str = "aki") -> int:
+def _management(
+    args: argparse.Namespace,
+    method: str,
+    params: dict[str, Any] | None = None,
+    profile: str = "aki",
+    *,
+    timeout: float = 30.0,
+) -> int:
     socket_path = _socket_from(args, profile)
     try:
         client = _connect(socket_path, json_mode=False)
@@ -641,7 +670,7 @@ def _management(args: argparse.Namespace, method: str, params: dict[str, Any] | 
         print(f"cannot connect to akid at {socket_path}: {exc}", file=sys.stderr)
         return 1
     try:
-        result = _rpc_call(client, method, params)
+        result = _rpc_call(client, method, params, timeout=timeout)
         _print_json(result)
         return 0
     except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
@@ -682,6 +711,25 @@ def _memory(args: argparse.Namespace, profile: str = "aki") -> int:
         return 0
     finally:
         client.close()
+
+
+def _compact(args: argparse.Namespace, profile: str = "aki") -> int:
+    mode = args.mode_option or args.mode
+    params: dict[str, Any] = {"timeout": args.timeout}
+    if mode:
+        params["mode"] = mode
+    print(
+        "compacting context and waiting for memory reflection...",
+        file=sys.stderr,
+        flush=True,
+    )
+    return _management(
+        args,
+        "aki.conversation.compact",
+        params,
+        profile=profile,
+        timeout=float(args.timeout) + 30.0,
+    )
 
 
 def _mqtt_call(client: GatewayClient, rest: list[str]) -> Any:
@@ -920,6 +968,25 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     )
     _add_common(parser)
     parsers["recompile"] = parser
+    parser = argparse.ArgumentParser(
+        prog="akictl compact",
+        description=(
+            "Compact the conversation context and trigger compaction-event "
+            "memory reflection"
+        ),
+    )
+    _add_common(parser)
+    parser.add_argument("mode", nargs="?", choices=COMPACT_MODES)
+    parser.add_argument(
+        "--mode", dest="mode_option", choices=COMPACT_MODES
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=900,
+        help="seconds to wait for compaction and reflection (default: 900)",
+    )
+    parsers["compact"] = parser
     parser = argparse.ArgumentParser(prog="akictl help")
     parser.add_argument("help_command", nargs="?")
     parsers["help"] = parser
@@ -1054,6 +1121,8 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         )
     if command == "recompile":
         return _management(args, "aki.conversation.recompile", profile=profile)
+    if command == "compact":
+        return _compact(args, profile)
     if command == "help":
         if not args.help_command:
             _print_help()

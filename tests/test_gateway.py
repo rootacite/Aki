@@ -681,6 +681,55 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         text, is_error = _normalize_mcp_result("plain text")
         self.assertEqual((text, is_error), ("plain text", False))
 
+    async def test_conversation_compact_uses_official_runner(self) -> None:
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        fake_result = {
+            "compacted": True,
+            "mode": "all",
+            "num_messages_before": 12,
+            "num_messages_after": 3,
+            "summary": "condensed",
+            "output": "Compaction completed (mode: all).",
+            "reflection": "completed",
+            "reflection_launched": True,
+            "reflection_state_changed": True,
+        }
+        with mock.patch(
+            "engine.akid.run_letta_compact", return_value=fake_result
+        ) as runner:
+            result = await client.call(
+                "aki.conversation.compact", {"mode": "all", "timeout": 120}
+            )
+        self.assertTrue(result["compacted"])
+        self.assertTrue(result["backend_ready"])
+        self.assertEqual(result["conversation_id"], "default")
+        self.assertEqual(result["reflection"], "completed")
+        self.assertEqual(result["mode"], "all")
+        runner.assert_called_once()
+        kwargs = runner.call_args.kwargs
+        self.assertEqual(kwargs["agent_id"], "test-agent")
+        self.assertEqual(kwargs["conversation_id"], "default")
+        self.assertEqual(kwargs["mode"], "all")
+        self.assertEqual(kwargs["timeout"], 120.0)
+
+    async def test_conversation_compact_rejects_invalid_mode_and_busy_turn(self) -> None:
+        await self.start_server()
+        client = await self.client()
+        await client.hello()
+        with self.assertRaises(RpcError) as invalid:
+            await client.call("aki.conversation.compact", {"mode": "bad"})
+        self.assertEqual(invalid.exception.code, ErrorCode.INVALID_PARAMS)
+
+        active = await client.call("aki.chat.send", {"message": "slow"})
+        await client.wait_event(active["turn_id"], "turn_started")
+        with self.assertRaises(RpcError) as busy:
+            await client.call("aki.conversation.compact", {})
+        self.assertEqual(busy.exception.code, ErrorCode.COMPACT_FAILED)
+        self.assertIn("active or queued", busy.exception.message)
+        await client.call("aki.chat.cancel", {"turn_id": active["turn_id"]})
+
     async def test_username_get_and_set(self) -> None:
         repo = self.root / "repo"
         shutil.copytree(ROOT / "userdata", repo / "userdata")

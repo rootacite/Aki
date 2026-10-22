@@ -33,6 +33,7 @@ class ErrorCode:
     RESET_FAILED = 1012
     USERNAME_FAILED = 1013
     RECOMPILE_FAILED = 1014
+    COMPACT_FAILED = 1015
 
 
 class RpcError(Exception):

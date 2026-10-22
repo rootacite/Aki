@@ -169,6 +169,21 @@ sudo python3 scripts/patch-letta-compaction.py --restore   # 恢复 Letta 原始
 运行一次。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction；压缩完成后，
 `reflectionTrigger = compaction-event` 会继续触发 MemFS 记忆整理。
 
+也可以随时手动触发同一套流程：
+
+```bash
+akictl compact                    # 默认 compaction 模式
+akictl compact sliding_window     # 指定模式
+akictl fuyu compact all           # 对 fuyu profile 执行
+akictl compact --timeout 1800     # 等待压缩与记忆整理的最长秒数
+```
+
+该命令会先确认当前没有活动或排队中的 turn，然后短暂停止 akid 的 stream-json 后端，
+通过临时 Letta app server 执行官方 `/compact`，随后显式发起一次 manual `/reflect`
+记忆整理（即使项目设置关闭了自动 reflection），等待整理结束后再恢复后端。结果以 JSON
+输出，`reflection` 为 `completed`、`finished`、`up_to_date`、`unavailable`、
+`failed` 或 `timeout`；没有新的对话内容可整理时会是 `up_to_date`。
+
 ### 基础 system prompt
 
 Aki 的基础 prompt 是仓库内自有文件 `prompts/aki-system.md`，不再跟随 Letta 上游自动更新。
@@ -373,6 +388,8 @@ akictl mqtt set broker.example:1883  # 持久化并立即重连
 akictl username                   # 查看当前称呼
 akictl set-username Master        # 修改称呼并重编译当前会话
 akictl recompile                  # 从 MemFS 重编译当前会话 prompt
+akictl compact                    # 压缩上下文并触发一次记忆整理
+akictl compact all                # 指定 Letta compaction 模式
 akictl reset                      # 重置 default 会话（先备份）
 ```
 

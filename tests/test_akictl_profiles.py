@@ -100,6 +100,21 @@ class AkictlProfileTests(unittest.TestCase):
             with self.assertRaisesRegex(Exception, "conversation"):
                 akictl._preflight_profile("fuyu")
 
+    def test_compact_dispatches_with_long_rpc_timeout(self) -> None:
+        args = mock.Mock(mode=None, mode_option="all", timeout=120)
+        with mock.patch(
+            "engine.akictl._management", return_value=0
+        ) as management, mock.patch("engine.akictl.print"):
+            result = akictl._compact(args, "fuyu")
+        self.assertEqual(result, 0)
+        management.assert_called_once_with(
+            args,
+            "aki.conversation.compact",
+            {"timeout": 120, "mode": "all"},
+            profile="fuyu",
+            timeout=150.0,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
