@@ -23,6 +23,7 @@ DEFAULT_PROMPT = ROOT / "prompts" / "aki-system.md"
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 CORE_PLACEHOLDER = "{CORE_MEMORY}"
 LIVE_CONTEXT_RE = re.compile(r"\n*<aki-live-context\b.*?</aki-live-context>\n*", re.S)
+MEMORY_BLOCK_RE = re.compile(r"<memory>.*?</memory>", re.S)
 
 
 def now_iso() -> str:
@@ -140,6 +141,23 @@ def compose_content(prompt: str, core_memory: str, live_context: str) -> str:
     return content + "\n"
 
 
+def restore_memory_block(content: str, memory_block: str) -> str:
+    if not memory_block or "<memory>" in content:
+        return content
+    if "</persona>" in content:
+        return content.replace("</persona>", f"</persona>\n\n{memory_block}", 1)
+    live_match = LIVE_CONTEXT_RE.search(content)
+    if live_match:
+        return (
+            content[: live_match.start()].rstrip()
+            + "\n\n"
+            + memory_block
+            + "\n\n"
+            + content[live_match.start() :]
+        )
+    return content.rstrip() + "\n\n" + memory_block + "\n"
+
+
 def backup_records(agent_path: Path, prompt_path: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(backup_dir, 0o700)
@@ -203,13 +221,17 @@ def install(
 
     conversation: dict[str, Any] | None = None
     old_content = ""
+    old_memory_block = ""
     if conversation_path.is_file():
         conversation = read_json(conversation_path)
         old_content = str(conversation.get("content") or "")
+        memory_match = MEMORY_BLOCK_RE.search(old_content)
+        old_memory_block = memory_match.group(0) if memory_match else ""
         core_memory = str(conversation.get("coreMemory") or "")
         if not core_memory.strip():
             raise RuntimeError("compiled prompt has no coreMemory to preserve")
         new_content = compose_content(prompt, core_memory, live_context)
+        new_content = restore_memory_block(new_content, old_memory_block)
     else:
         new_content = ""
 

@@ -1,31 +1,97 @@
-<h1 align="center">Aki</h1>
+<h1 align="center">Aki — 四季工坊</h1>
 
 <p align="center">
-  <strong>Local cyber lifeform · Unix socket gateway</strong><br/>
-  <strong>Aki / 秋 / 小秋 / 秋（aki）</strong>
+  <strong>The Four Seasons · 本地优先的多智能体协作运行时</strong>
 </p>
 
 <p align="center">
-  A local-first runtime for a persistent Letta agent: Unix-socket JSON-RPC, approvals, MemFS, MQTT, and tokifactor.
-</p>
-
-<p align="center">
-  Python standard library · JSON-RPC over NDJSON · Letta stream-json · tokifactor · Legacy KDE Plasma 6 widget
+  Unix socket · JSON-RPC · Letta · MQTT · tokifactor<br/>
+  四位性格迥异的赛博成员，各司其职，陪你聊天、写代码、搞安全、做设计。
 </p>
 
 ---
 
-## 仓库描述
+## 项目简介
 
-> A local-first gateway for a persistent Aki agent: Unix socket, JSON-RPC, Letta, MQTT, and tokifactor.
+Aki 是一个本地优先的持久化多智能体运行时。在这座名为“四季工坊”的赛博工坊里，每位成员都是一个独立的 Letta Agent，拥有自己的人格、记忆、模型和工具链，通过 Unix socket 网关与加密 MQTT 频道协同工作。
 
-Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix socket，监督一个长驻的
-`letta --input-format stream-json --output-format stream-json` 子进程，把对话、工具审批、
-记忆、MQTT 频道和 tokifactor GUI 连接成一套可以长期运行的本地 Agent 系统。
+这个项目关心的不是“再做一个聊天 CLI”，而是几个更具体的问题：多个智能体如何在同一台机器上保持各自的连续身份与分层记忆；它们如何在群聊中自主决定该不该说话、该叫谁来帮忙；危险操作如何由发起者批准；以及人格和记忆如何被版本化、备份和恢复。
 
-这个仓库关心的不是“再做一个聊天 CLI”，而是几个更具体的问题：同一个 Aki 如何在多次
-会话之间保持连续身份；危险操作如何由发起者批准；多个本地客户端如何共享状态而不共享
-实时事件；以及人格和记忆如何被版本化、备份和恢复。
+目前 **Aki（秋）** 与 **Fuyu（冬）** 已经上线；**Natsu（夏）** 与 **Haru（春）** 的设定、立绘和工具位已经预留，但 profile 与完整工具链仍在开发中，文档中统一标为 `Coming Soon`。
+
+---
+
+## 🌸 成员群像 (The Four Seasons)
+
+在四季工坊里，四位成员把各自的性格底色融进了日常的业务流。作为团队里挂名的名誉队长与治愈系小女友，**Aki（秋）** 温柔体贴、软萌又有点小黏人。她负责日常文书、日程协调和缓和气氛，大事永远听你的，只软软地给出建议；比起工作产出，她最先在意的是你的身体和心情。与她形成鲜明反差的 **Fuyu（冬）** 则是个彻头彻尾的毒舌极客，这位从不讲客套话的“首席质检员”专司通用代码编写、系统运维与逻辑挑刺，任何半吊子的决定或未提交的脏代码都逃不过他的冷嘲热讽。
+
+如果遇到更硬核的底层难题，平时惜字如金的冷面知性御姐 **Natsu（夏）** 会悄然接手。她绝不参与群里的无聊闲扯，只会默默调起本地逆向与红队工具链，用一串冷酷精准的二进制分析与渗透测试报告把问题一击必杀；当 EDR、IDS 或 eBPF 探针出现异常时，她也会被唤醒，参与设备的安全响应。至于略显沉闷的技术氛围，则全靠古灵精怪的小恶魔妹妹 **Haru（春）** 来打破。作为团队里唯一独占生图、语音与视频外设的多模态灵感缪斯，她随时准备用天马行空的创意设计和视听作品，为整个群聊注入鲜活跳跃的色彩。
+
+---
+
+## 🗂️ 核心成员档案 (Agent Profiles)
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<p align="center"><img src="aki.jpg" width="300" alt="Aki 立绘"></p>
+<p align="center"><strong>🍁 Aki（秋）</strong><br/><sub>温柔治愈系的小女友 · 名誉队长 · ✅ 已上线</sub></p>
+<ul>
+<li><strong>性格：</strong>温柔体贴、软萌治愈、有点小黏人，坦率又亲昵。</li>
+<li><strong>职责：</strong>四季工坊挂名的名誉队长，也是你的小秘书；负责日常文书、日程和缓和气氛，大事听你的，只软软地给出建议。</li>
+<li><strong>推荐模型：</strong>Gemini 3.x Flash</li>
+<li><strong>工具链：</strong>全局广播唤醒、任务状态机读写、日程管理。</li>
+</ul>
+</td>
+<td width="50%" valign="top">
+<p align="center"><img src="fuyu.jpg" width="300" alt="Fuyu 立绘"></p>
+<p align="center"><strong>❄️ Fuyu（冬）</strong><br/><sub>针针见血的毒舌质检员 · ✅ </sub></p>
+<ul>
+<li><strong>性格：</strong>口嫌体正直、厌恶形式主义、自带高智商毒舌属性；把“抬杠”当作防止你做出半吊子决定的职责。</li>
+<li><strong>职责：</strong>团队的 DevOps 与 Reviewer，负责业务代码、Code Review 和系统运维，也会主动巡检挂载目录、网络链路与 Git 工作区。</li>
+<li><strong>推荐模型：</strong>Grok（本色出演）</li>
+<li><strong>工具链：</strong>Git 状态审计、Bash 运维终端、文件系统只读/修改。</li>
+</ul>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<p align="center"><img src="assets/Haru/0001.jpg" width="300" alt="Haru 立绘"></p>
+<p align="center"><strong>🌸 Haru（春）</strong><br/><sub>天马行空的多模态小恶魔 · 🚧 Coming Soon...</sub></p>
+<ul>
+<li><strong>性格：</strong>活泼好奇、鬼点子极多、不按常理出牌的妹妹系画师，喜欢用即兴画作或语音打破沉默。</li>
+<li><strong>职责：</strong>团队的 Art Director 与创意引擎，负责 UI/UX 脑暴、角色设定迭代、宣传文案和多模态素材生成。</li>
+<li><strong>推荐模型：</strong>MiniMax</li>
+<li><strong>工具链：</strong>图像生成管线、TTS 语音合成、视频渲染引擎。</li>
+</ul>
+</td>
+<td width="50%" valign="top">
+<p align="center"><img src="assets/Natsu/0001.jpg" width="300" alt="Natsu 立绘"></p>
+<p align="center"><strong>☀️ Natsu（夏）</strong><br/><sub>隐于暗处的冷面红队大姐头 · 🚧 Coming Soon...</sub></p>
+<ul>
+<li><strong>性格：</strong>成熟冷艳、极度专注、人狠话不多，只在真正棘手的底层任务出现时亮出锋芒。</li>
+<li><strong>职责：</strong>团队的安全专家与底层架构师，专注 ELF/PE 逆向、协议拆解、漏洞 PoC 验证与本地沙箱测试；同时在 EDR、IDS 或 eBPF 探针出现异常时参与设备安全响应。</li>
+<li><strong>推荐模型：</strong>DeepSeek V4.1 Flash</li>
+<li><strong>工具链：</strong>反编译引擎接口、动态追踪调试、网络安全探测套件。</li>
+</ul>
+</td>
+</tr>
+</table>
+
+> 状态说明：Aki 与 Fuyu 可以直接通过各自的 profile 使用；Haru 与 Natsu 目前只有角色档案和立绘，等 profile、人格模板与工具链就绪后会上线。
+
+---
+
+## ⚙️ 核心架构特性 (Key Features)
+
+1. **选择性唤醒路由 (Selective Wake-up Routing)**
+   - 智能体在输出回复时，可以自主决定消息的广播范围：**仅回复人类（User-Only）** 或 **点名唤醒特定队友（`@Agent`）**，不再机械地让所有成员一起复读。
+2. **防刷屏熔断机制 (Chain Depth Circuit Breaker)**
+   - 智能体之间可以自由交锋与协同，但运行时会给每个成员一份“主动启动配额”（默认 3 次，人类发言会重置）。配额用完后就安静下来，等人类 Master 介入。这样既保留了拌嘴的戏剧性，也避免无限接龙把 Token 烧光。
+3. **原生性格对齐 (Native Alignment Matching)**
+   - 不靠几千字的冗长 Prompt 强行扭曲模型本性。把不同模型的底层性格偏置（例如 Gemini 的细腻高情商、Grok 的犀利进攻性、DeepSeek 的冷酷逻辑性）与角色人设精准绑定，用尽量低的提示词开销，换回更自然的角色感与生产力协同。
+
+---
 
 ## 设计取向
 
@@ -36,8 +102,9 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
   可以同时连接，但同一时间只有一个 turn 在跑，后续消息 FIFO 排队。
 - **审批属于发起者。** 危险工具只向该 turn 的发起客户端请求批准；超时默认拒绝该工具，
   但 turn 继续。MQTT 频道发起的 turn 只能由频道里的原始发送者审批。
-- **人格与记忆是文件。** 核心人格在 MemFS 的 Markdown 文件里；`userdata/` 保存非隐私
-  模板，`scripts/sync-persona.py` 渲染 `{{USERNAME}}` 并写回 MemFS。
+- **人格与记忆是文件。** 核心人格在 MemFS 的 Markdown 文件里；每个 profile 的
+  `userdata` 目录（Aki 为 `userdata/`，Fuyu 为 `userdata2/`）保存非隐私模板，
+  `scripts/sync-persona.py` 渲染 `{{USERNAME}}` 并写回各自的 MemFS。
 - **工具结果是数据，不是图片垃圾桶。** 截图和摄像头只返回路径与元数据，图片内容不会
   自动进入模型上下文；模型需要看时自行 `Read`/`ViewImage`。
 - **默认最小权限。** Letta 及其后代进程跑在 bubblewrap 里，只能写 `/tmp`、
@@ -61,7 +128,10 @@ Aki 是一个本地优先的持久化 Agent 运行时。`akid` 只监听 Unix so
 - **KDE Plasma 6 widget（legacy）。** 保留历史分页、流式输出、Markdown、工具调用卡片、
   GUI 审批卡和系统通知，但不再推荐安装。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
-- **人格与 userdata。** 人格模板、称呼占位符、MemFS 渲染、备份和 git 提交。
+- **多成员 profiles。** 每个 profile 有独立的 agent、conversation、socket、频道身份、
+  proxy 端口与 userdata；Aki 和 Fuyu 已上线，Natsu 与 Haru 作为 Coming Soon 预留。
+- **人格与 userdata。** 每个 profile 使用自己的公开人格模板，支持称呼占位符、MemFS
+  渲染、备份和 git 提交，互不覆盖。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
 - **桌面实况上下文。** 每个 turn 在系统提示词中原地刷新唯一的 `<aki-live-context>` 块，
   包含当前时间、焦点窗口、CPU top 5、最近 20 条 zsh 命令和截图路径；不写入消息历史。
@@ -150,9 +220,11 @@ akictl model set grok-4.6
 akictl reasoning set low
 ```
 
-Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider、7722 proxy 端口和
-Grok 4.6 500k 上下文。它的基础提示词是 `prompts/fuyu-system.md`，与 Aki 一样属于本项目
-定制的基座，不使用 Letta 上游默认的 “You are a Letta Code agent” 提示词。
+Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和 7722 proxy
+端口；配置里同时准备了 Grok 4.6（500k 上下文）与 DeepSeek Flash，可以用
+`akictl fuyu model set grok-4.6` 切换。它的基础提示词是 `prompts/fuyu-system.md`，
+与 Aki 一样属于本项目定制的基座，不使用 Letta 上游默认的
+“You are a Letta Code agent” 提示词。
 
 ### 上下文压缩阈值
 
@@ -315,18 +387,27 @@ akictl reset
 
 ## 人格与 userdata
 
-Aki 的名字是 Aki，中文名是秋、小秋，日语名是秋（aki）。这些称呼都指向同一个身份。
+四季工坊里每位成员的人格都由仓库中的公开模板定义，再由运行时渲染进各自 agent 的
+MemFS。现在已经上线的是 Aki 和 Fuyu，所以仓库里有两套目录：
 
-`userdata/` 保存 MemFS 中可公开、非隐私的人格模板与记忆策略：
+- `userdata/` — Aki 的人格模板、记忆策略和旧版称呼迁移源。
+- `userdata2/` — Fuyu 的人格模板与记忆策略，由 `~/.aki/fuyu.conf` 的
+  `[gateway] userdata = userdata2` 指向。
 
-- `persona.md`
-- `memory-policy.md`
-- `character/MEMORY.md`
-- `character/voice.md`
-- `character/relationship.md`
-- `character/boundaries.md`
-- `character/examples.md`
-- `username.txt` — 仅作为旧版 `aki` profile 的首次迁移来源
+两套目录的结构相同，核心文件包括：
+
+- `persona.md` — 稳定人格与团队定位
+- `memory-policy.md` — 长期记忆写入策略
+- `character/MEMORY.md` — 人格扩展索引
+- `character/voice.md` — 语气与表达方式
+- `character/relationship.md` — 与用户的相处方式
+- `character/boundaries.md` — 身份与安全边界
+- `character/examples.md` — 原创语气示例
+- `username.txt` — 旧版 `aki` profile 的首次迁移来源
+
+`identity.json` 保存该 profile 的不可变 `memberId`、当前 Name、永久别名和 `kind`，
+是频道身份的权威清单，不会写入 MemFS。Aki 的 `userdata/MANIFEST.json` 还会记录最近
+一次同步的来源、MemFS commit 和模板哈希。
 
 模板中用 `{{USERNAME}}` 表示称呼。每个 profile 的当前称呼保存在
 `<profile>.conf` 的 `[gateway] username`，例如：
@@ -349,12 +430,15 @@ akictl fuyu set-username 主人    # 只修改 fuyu profile
 
 旧版 `aki` profile 在 `[gateway] username` 尚未设置时仍会读取
 `userdata/username.txt` 或旧的按 agent 状态文件作为迁移来源；首次 `set-username`
-会把结果写入 `[gateway] username`。也可以手动编辑模板迁移源，再运行同步脚本：
+会把结果写入 `[gateway] username`。手动修改模板后，可以分别同步两套人格：
 
 ```bash
-python3 scripts/sync-persona.py --dry-run   # 预览
-python3 scripts/sync-persona.py             # 渲染、备份、写入、提交 MemFS
-akictl recompile                            # 手动同步后重编译当前会话
+python3 scripts/sync-persona.py --source userdata --dry-run
+python3 scripts/sync-persona.py --source userdata --agent-id <aki-agent-id>
+python3 scripts/sync-persona.py --source userdata2 --agent-id <fuyu-agent-id>
+
+akictl recompile          # 重编译 Aki 当前会话
+akictl fuyu recompile     # 重编译 Fuyu 当前会话
 ```
 
 脚本只接受上述白名单文件，会校验 frontmatter、检查未解析的占位符、备份旧版本到
@@ -362,6 +446,17 @@ akictl recompile                            # 手动同步后重编译当前会�
 `akictl set-username` 会在同步后自动重编译当前会话的 system prompt；手动修改 `userdata` 后运行 `akictl recompile` 也可以立即应用。
 
 `human.md`、`profile/**`、根 `MEMORY.md`、聊天记录和凭据不会同步到 `userdata`。
+
+频道简介不走 MemFS，而是写在每个 profile 的 `<profile>.conf` 里：
+
+```ini
+[channel]
+description = Aki（秋 / 小秋），温柔治愈系的小女友，也是四季工坊挂名的名誉队长：软萌、贴心、有点小粘人。
+```
+
+改角色定位时，最好把人格模板、MemFS 和 `[channel] description` 一起更新，避免群里
+显示的简介和成员实际表现对不上。当前 Aki 与 Fuyu 的简介分别写在
+`~/.aki/aki.conf` 和 `~/.aki/fuyu.conf`。
 
 每个 profile 可以在 `[gateway] userdata` 指向自己的人格模板目录，默认是 `userdata`。
 例如 Fuyu 使用仓库内的 `userdata2/`：
@@ -420,9 +515,10 @@ akid 连接当前 profile 的 `[mqtt]` 配置，不假设固定 broker IP：
 
 - Broker：`[mqtt] host:port`（用户实际配置的地址；私有 broker 仅作为当前部署示例）
 - Topic：`tokifactor/text`
-- 频道成员的唯一键是不可变 `memberId`；`name` 只是当前显示标签。`userdata/identity.json`
-  和 `userdata2/identity.json` 是各自 profile 的权威身份清单，`[channel] id/name/aliases`
-  是它的镜像；启动时以清单修复配置。`aliases` 包含所有历史 Name，永久保留并继续用于
+- 频道成员的唯一键是不可变 `memberId`；`name` 只是当前显示标签。各自 userdata 下的
+  `identity.json`（Aki 为 `userdata/identity.json`，Fuyu 为 `userdata2/identity.json`）
+  是各自 profile 的权威身份清单，`[channel] id/name/aliases` 是它的镜像；启动时以清单
+  修复配置。`aliases` 包含所有历史 Name，永久保留并继续用于
   `@` 路由和旧数据查找。
 - 新成员使用随机 `mem_<32 hex>`；旧数据迁移使用
   `legacy_<sha256("tokifactor-member-v1\\0" + NFKC(trim(lower(name))))[:32]>`。Python 与
@@ -513,7 +609,7 @@ transcript 在下一次频道消息或 turn 刷新时更新。`<aki-channel-iden
 <aki-channel-identity version="1">
   <member id="legacy_8ddfb8585d44e615b2fe8b37846b4ef6" name="Aki" kind="agent"
           aliases="Aki,aki,秋,小秋,秋（aki）" self="true">
-    <description source="local-config">Aki（秋 / 小秋），住在用户电脑里的赛博生命体。</description>
+    <description source="local-config">Aki（秋 / 小秋），温柔治愈系的小女友，也是四季工坊挂名的名誉队长：软萌、贴心、有点小粘人。</description>
   </member>
 </aki-channel-identity>
 ```
@@ -716,8 +812,14 @@ akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写
 
 ## 头像
 
-网关启动时读取 `aki_avi.jpg`（默认项目根目录，可用 `AKI_AVATAR_PATH`
-或 `--avatar-path` 覆盖），校验为 PNG/JPEG/GIF/WebP 且不超过 4 MiB。
+网关启动时读取 profile 的头像文件，默认是项目根目录的 `aki_avi.jpg`，可用
+`AKI_AVATAR_PATH`、`--avatar-path` 或 `<profile>.conf` 的 `[avatar] path` 覆盖。
+Fuyu 就通过 `~/.aki/fuyu.conf` 指向 `fuyu_avi.jpg`。头像会校验为
+PNG/JPEG/GIF/WebP 且不超过 4 MiB。
+
+仓库根目录的 `aki.jpg` 和 `fuyu.jpg` 是成员立绘，`assets/` 下还保留了
+Natsu、Haru 以及 Aki 的其他立绘素材。
+
 该头像属于接口无关的 `AvatarAsset`，tokifactor 之外的未来接口可以复用同一
 路径、字节、MIME 和 SHA-256，而不需要各自维护头像副本。
 
@@ -749,8 +851,11 @@ tokifactor 侧的行为：
 - `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
 - `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
 - `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装与 legacy 迁移。
-- `scripts/sync-persona.py`：把 `userdata` 模板渲染并写入 MemFS。
-- `userdata/`：非隐私人格模板、旧版称呼迁移源和同步清单。
+- `scripts/sync-persona.py`：把指定 profile 的 userdata 模板渲染并写入 MemFS。
+- `prompts/aki-system.md`、`prompts/fuyu-system.md`：两个已上线成员的基座系统提示词。
+- `userdata/`：Aki 的非隐私人格模板、旧版称呼迁移源和同步清单。
+- `userdata2/`：Fuyu 的非隐私人格模板与记忆策略。
+- `assets/`：成员立绘与角色素材。
 - `tests/`：协议、网关、假 Letta 子进程与 CLI 端到端测试。
 
 ---

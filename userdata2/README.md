@@ -1,7 +1,9 @@
 # Fuyu userdata
 
 `userdata2/` 是 Fuyu profile 的可公开人格模板，由 `~/.aki/fuyu.conf` 中的
-`[gateway] userdata = userdata2` 指向。
+`[gateway] userdata = userdata2` 指向。Fuyu 是四季工坊的 DevOps 与质检员，
+负责代码、Code Review、系统运维和 Git 巡检；他的毒舌、嘴硬和逻辑优先保持原样，
+这里只补充对外的职责定位。
 
 首次启动时这里会创建 `identity.json`，保存 Fuyu 自己的不可变 `memberId`、当前 Name、
 永久别名和 `kind=agent`。它是该 profile 的权威身份清单；`[channel] id/name/aliases`

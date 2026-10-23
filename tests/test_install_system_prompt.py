@@ -21,6 +21,7 @@ AGENT_ID = "agent-test"
 CONVERSATION_ID = "default"
 CORE = "<persona>\nAki\n</persona>\n"
 LIVE = '<aki-live-context refreshed_at="2026-01-01T00:00:00+08:00">\n<note>desktop</note>\n</aki-live-context>'
+MEMORY = "<memory>\n# Memory\n\n- [character](character/MEMORY.md)\n</memory>"
 
 
 class InstallSystemPromptTests(unittest.TestCase):
@@ -117,6 +118,17 @@ class InstallSystemPromptTests(unittest.TestCase):
         self.assertFalse(second["changed"])
         self.assertFalse(second["agent_changed"])
         self.assertFalse(second["conversation_changed"])
+
+    def test_preserves_root_memory_block(self) -> None:
+        record = json.loads(self.prompt_path.read_text(encoding="utf-8"))
+        record["content"] = record["content"].replace(
+            "</persona>", "</persona>\n\n" + MEMORY, 1
+        )
+        self.prompt_path.write_text(json.dumps(record), encoding="utf-8")
+        self.run_install()
+        prompt = json.loads(self.prompt_path.read_text(encoding="utf-8"))
+        self.assertEqual(prompt["content"].count(MEMORY), 1)
+        self.assertLess(prompt["content"].index("</persona>"), prompt["content"].index(MEMORY))
 
     def test_dry_run_does_not_write(self) -> None:
         before_agent = self.agent_path.read_text(encoding="utf-8")
