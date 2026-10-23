@@ -9,6 +9,10 @@
   四位性格迥异的赛博成员，各司其职，陪你聊天、写代码、搞安全、做设计。
 </p>
 
+<p align="center">
+  <img src="docref/fs.png" width="450" alt="Aki 四季工坊海报">
+</p>
+
 ---
 
 ## 项目简介
@@ -35,7 +39,7 @@ Aki 是一个本地优先的持久化多智能体运行时。在这座名为“�
 <tr>
 <td width="50%" valign="top">
 <p align="center"><img src="aki.jpg" width="300" alt="Aki 立绘"></p>
-<p align="center"><strong>🍁 Aki（秋）</strong><br/><sub>温柔治愈系的小女友 · 名誉队长 · ✅ 已上线</sub></p>
+<p align="center"><strong>🍁 Aki（秋）</strong><br/><sub>温柔治愈系的小女友 · 名誉队长</sub></p>
 <ul>
 <li><strong>性格：</strong>温柔体贴、软萌治愈、有点小黏人，坦率又亲昵。</li>
 <li><strong>职责：</strong>四季工坊挂名的名誉队长，也是你的小秘书；负责日常文书、日程和缓和气氛，大事听你的，只软软地给出建议。</li>
@@ -45,7 +49,7 @@ Aki 是一个本地优先的持久化多智能体运行时。在这座名为“�
 </td>
 <td width="50%" valign="top">
 <p align="center"><img src="fuyu.jpg" width="300" alt="Fuyu 立绘"></p>
-<p align="center"><strong>❄️ Fuyu（冬）</strong><br/><sub>针针见血的毒舌质检员 · ✅ </sub></p>
+<p align="center"><strong>❄️ Fuyu（冬）</strong><br/><sub>针针见血的毒舌质检员</sub></p>
 <ul>
 <li><strong>性格：</strong>口嫌体正直、厌恶形式主义、自带高智商毒舌属性；把“抬杠”当作防止你做出半吊子决定的职责。</li>
 <li><strong>职责：</strong>团队的 DevOps 与 Reviewer，负责业务代码、Code Review 和系统运维，也会主动巡检挂载目录、网络链路与 Git 工作区。</li>
