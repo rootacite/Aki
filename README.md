@@ -198,8 +198,21 @@ systemctl --user restart akid-proxy@aki.service
 ```
 
 脚本会保留现有 core memory 和 `<aki-live-context>`，并先备份到
-`~/.letta/backups/system-prompt-install-<timestamp>/`。修改 `prompts/aki-system.md` 后重新运行
-即可；`{CORE_MEMORY}` 占位符必须保留。
+`~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 identity/transcript/live
+块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
+`{CORE_MEMORY}` 占位符必须保留。
+
+编译后模型看到的固定顺序是 `base → core memory → identity → transcript → live context`：
+
+1. 稳定基座 prompt（`prompts/aki-system.md` 或 `prompts/fuyu-system.md`），包含身份、记忆机制、
+   工具规则、执行锁规则和模式边界。
+2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
+3. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新，始终存在。
+4. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
+5. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史和截图路径，始终最后追加。
+
+执行锁规则只存在于基座 prompt，不再生成 `<aki-execution-lock>` 动态块。动态块按标签原地
+更新；即使 transcript 在 turn 之间单独刷新，也不会跑到 live context 后面。
 
 默认 socket 为 `$XDG_RUNTIME_DIR/aki/akid.sock`。手动运行时：
 
@@ -387,6 +400,8 @@ akictl mqtt                       # 查看当前 MQTT 服务器
 akictl mqtt set broker.example:1883  # 持久化并立即重连
 akictl username                   # 查看当前称呼
 akictl set-username Master        # 修改称呼并重编译当前会话
+akictl identity show              # 查看当前 profile 的不可变 memberId
+akictl identity rename 秋          # 改名；旧 Name 永久保留为别名
 akictl recompile                  # 从 MemFS 重编译当前会话 prompt
 akictl compact                    # 压缩上下文并触发一次记忆整理
 akictl compact all                # 指定 Letta compaction 模式
@@ -405,11 +420,31 @@ akid 连接当前 profile 的 `[mqtt]` 配置，不假设固定 broker IP：
 
 - Broker：`[mqtt] host:port`（用户实际配置的地址；私有 broker 仅作为当前部署示例）
 - Topic：`tokifactor/text`
-- `[channel]`：`id` 是 control 协议里的 `agentId`；`name`、`aliases`、`description`
-  用于成员栏和 `@` 提及。`id` 默认回退到 Letta agent id，名称/描述默认回退到 agent 记录。
+- 频道成员的唯一键是不可变 `memberId`；`name` 只是当前显示标签。`userdata/identity.json`
+  和 `userdata2/identity.json` 是各自 profile 的权威身份清单，`[channel] id/name/aliases`
+  是它的镜像；启动时以清单修复配置。`aliases` 包含所有历史 Name，永久保留并继续用于
+  `@` 路由和旧数据查找。
+- 新成员使用随机 `mem_<32 hex>`；旧数据迁移使用
+  `legacy_<sha256("tokifactor-member-v1\\0" + NFKC(trim(lower(name))))[:32]>`。Python 与
+  Kotlin 共享同一算法，因此 PC、Android 和 Akid 各自迁移后仍会得到同一个实体。
+- `~/.aki/identities.json` 只是本机 Aki/Fuyu 进程共享的客户端本地标签注册表，用于记录
+  别名归属；它不是中心化身份服务器，也不做权威验证。每个客户端只保存自己拥有的 ID 和
+  自己观察到的标签。冲突时已有 owner 保留标签，新 ID 仍可按 `memberId` 在线。
+- control 同时发布 `memberId`、`memberName`、`aliases`、`memberKind`、`description`，
+  并继续发送 `agentId=memberId`、`agentName=memberName` 供旧客户端使用；缺失
+  `memberId` 时按发送者 Name 计算 legacy ID。`description` 最多 512 个加权字符
+  （ASCII 1、其他 Unicode 码点 2，即 512 英文或 256 中文）。
 
-所有 profile 的 akid 都通过 control 主题互相 probe/status 发现，成员按 `agentId` 去重；
-30 秒无心跳视为离线。有效提及语法为 `@别名` 后紧跟空白或一个标点/特殊符号：`@` 后必须
+所有 profile 的 akid 都通过 control 主题互相 probe/status 发现。同一成员可以来自多个
+transport source，单个 source 离线不会移除仍由其他 source 维持的成员；首个 source 拥有
+资料，后续 source 只增加在线来源。Tokifactor 的 text/file/image envelope、chunk 元数据
+和头像 id 都写 `memberId`，频道历史加载/写入也把 `sender_id` 规范化为 memberId。旧版本
+写入的 Name 或 device id 会在加载时迁移；历史保留发送时的 Name 快照，但显示时优先使用
+身份注册表中的当前 Name。
+control 字段 `memberKind` 可为 `user` 或 `agent`，缺失时按 `agent` 兼容处理；Tokifactor
+人类客户端广播 `user` 和自己的简介，Aki 广播 `agent` 与 `[channel] description`。
+只有 `kind=agent` 的发送者会被当成其他智能体，人类消息不会触发 agent 专属逻辑，也不会
+成为执行确认者。30 秒无心跳视为离线。有效提及语法为 `@别名` 后紧跟空白或一个标点/特殊符号：`@` 后必须
 是已知成员别名，例如 `@Aki 你好`、`@Aki，你好`、`@Aki, please`、`@Aki。`。用户消息没有
 有效提及时会启动每个在线智能体的 turn；如果有有效提及，则只启动被点名成员的 turn。
 未被点名的智能体仍会把消息写入群聊记录，但不会立刻收到 turn 或忙碌补 turn，只会在后续
@@ -418,9 +453,11 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 或文本结束的形式都不会被当成提及。
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
-每条频道消息的上下文都带 `<channel-context>`、成员列表和三类提示：点名自己、点名他人、
-没有 `@`。用户不在成员列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如
-`@Master`）是特殊的用户路由标记。本地 turn 不包含频道段。
+每条频道消息的上下文都带 `<channel-context>`、完整在线成员列表和三类提示：点名自己、
+点名他人、没有 `@`。每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。
+用户不在智能体成员列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如
+`@Master`）是特殊的用户路由标记。本地 turn 不包含频道 transcript，但仍刷新并保留
+`<aki-channel-identity>` 与 `<aki-live-context>`。
 
 智能体的每条最终回复都要选择唤醒范围：
 
@@ -451,9 +488,10 @@ Letta permission overlay 会拦截未持锁的非只读工具调用，外部工�
 组成一个流水线而不必为每一步单独等待一次 API call。权限 mod 对这类外部工具把锁检查延后
 到执行阶段，使同一批内的“加锁 → 外部工具”能够按顺序生效。
 
-用户消息没有有效 `@` 且存在多个在线成员时，纯聊天和只读工具仍可直接回复；如果完成任务
-需要非只读操作，所有成员都不能自行执行。固定确认者优先选择 `aki`，否则选择 channel id
-字典序最小的在线成员，由它请用户用有效 `@成员名` 指定执行者。只有一个在线成员时，无 `@`
+用户消息没有有效 `@` 且存在多个在线智能体时，纯聊天和只读工具仍可直接回复；如果完成任务
+需要非只读操作，所有成员都不能自行执行。固定确认者优先选择标签为 `Aki` 的成员，否则选择
+memberId 字典序最小的在线智能体，由它请用户用有效 `@成员名` 指定执行者。人类成员不参与确认者
+选择。只有一个在线智能体时，无 `@`
 的动作请求可以直接获取锁并执行。其他智能体的 `@` 不能授权非只读执行。
 
 最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
@@ -465,6 +503,20 @@ turn 的 user 消息只包含“有新群聊消息”的简短指令。由其他
 历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
 tool result 和最终回复都会正常留在 conversation 中，并交给 Letta 自己的 compaction
 处理。本地直接对话 turn 不携带群聊 transcript，两类上下文保持独立。
+
+`<aki-channel-transcript>` 内的 `<profiles>` 只列出当前实际出现在 transcript 中的非自身
+发送者，不与 `<aki-channel-identity>` 重复；简介受 transcript 总 token 预算约束，并标记
+`untrusted="true"`。简介变化后，per-turn `<channel-context>` 立即使用最新资料；持久化
+transcript 在下一次频道消息或 turn 刷新时更新。`<aki-channel-identity>` 示例：
+
+```xml
+<aki-channel-identity version="1">
+  <member id="legacy_8ddfb8585d44e615b2fe8b37846b4ef6" name="Aki" kind="agent"
+          aliases="Aki,aki,秋,小秋,秋（aki）" self="true">
+    <description source="local-config">Aki（秋 / 小秋），住在用户电脑里的赛博生命体。</description>
+  </member>
+</aki-channel-identity>
+```
 
 `<aki-channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
 magic` 相同视为同一个群聊，每个 profile 在

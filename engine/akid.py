@@ -26,7 +26,7 @@ import sys
 import time
 import uuid
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Awaitable, Callable, Mapping
@@ -47,6 +47,8 @@ from engine.aki_config import (
     read_mcp_excluded,
     resolve_config_path,
     set_key,
+    state_dir,
+    sync_channel_identity,
     write_mcp_excluded,
 )
 from engine.letta_llm import (
@@ -89,18 +91,41 @@ from engine.live_context import (
     ChannelMember,
     ChannelTranscriptEntry,
     LiveContextOptions,
+    apply_channel_identity,
     apply_channel_transcript,
     apply_live_context,
     clamp_budget_tokens,
+    clear_channel_identity,
     clear_channel_transcript,
     clear_live_context,
     collect_live_context,
     desktop_environment,
     match_channel_mentions,
+    render_channel_identity,
     render_channel_context,
     render_channel_transcript,
     render_live_context,
     route_channel_reply,
+)
+from engine.member_profile import (
+    MEMBER_KIND_AGENT,
+    MEMBER_KIND_USER,
+    member_name_key,
+    normalize_member_kind,
+    truncate_member_description,
+)
+from engine.member_identity import (
+    IdentityConflict,
+    IdentityError,
+    IdentityRegistry,
+    MemberIdentity,
+    backup_migration_state,
+    canonical_name,
+    ensure_manifest,
+    is_member_id,
+    legacy_member_id,
+    read_manifest,
+    write_manifest,
 )
 from engine.mqtt_settings import (
     DEFAULT_MQTT_HOST,
@@ -611,6 +636,7 @@ class GatewayConfig:
     mqtt_sender_name: str = "akid"
     mqtt_sender_id: str = "akid"
     channel_id: str = ""
+    channel_member_id: str = ""
     channel_name: str = ""
     channel_description: str = ""
     channel_aliases: tuple[str, ...] = ()
@@ -618,6 +644,8 @@ class GatewayConfig:
     agent_initiation_limit: int = DEFAULT_AGENT_INITIATION_LIMIT
     mqtt_state: Path | None = None
     channel_history_dir: Path | None = None
+    identity_manifest_path: Path | None = None
+    identity_registry_path: Path | None = None
     sandbox_enabled: bool = False
     bwrap_bin: str = "bwrap"
     writable_state: Path | None = None
@@ -847,7 +875,7 @@ class ChannelConnection:
                 if item.get("kind") == "turn" and phase in ("progress", "final"):
                     self.server._record_channel_message(
                         sender=self.server.config.channel_name,
-                        sender_id=self.server.config.channel_id,
+                        sender_id=self.server._channel_self_key(),
                         text=str(item["text"]),
                         from_agent=True,
                         phase=phase,
@@ -1097,16 +1125,17 @@ class GatewayServer:
         | None = None,
     ) -> None:
         self.config = config
-        if not config.channel_id:
-            config.channel_id = (
-                config.mqtt_sender_id
-                if config.mqtt_sender_id not in ("", "akid")
-                else ("aki" if config.profile == "aki" else config.profile)
-            )
-        if config.mqtt_sender_id in ("", "akid"):
-            config.mqtt_sender_id = config.channel_id
         if not config.channel_name:
             config.channel_name = "Aki" if config.profile == "aki" else config.profile
+        if not config.channel_member_id:
+            config.channel_member_id = (
+                config.channel_id if is_member_id(config.channel_id) else ""
+            ) or legacy_member_id(config.channel_name)
+        if not config.channel_id:
+            config.channel_id = config.channel_member_id
+        elif not is_member_id(config.channel_id):
+            config.channel_id = config.channel_member_id
+        config.mqtt_sender_id = config.channel_member_id
         if config.mqtt_sender_name == "akid":
             config.mqtt_sender_name = config.channel_name
         if not config.channel_aliases:
@@ -1115,6 +1144,33 @@ class GatewayServer:
                 if config.profile == "aki"
                 else (config.channel_name,)
             )
+        self._identity_registry = (
+            IdentityRegistry(config.identity_registry_path)
+            if config.identity_registry_path is not None
+            else None
+        )
+        self._identity_manifest_path = config.identity_manifest_path
+        if self._identity_registry is not None:
+            existing = self._identity_registry.get(config.channel_member_id)
+            created_at = existing.created_at if existing is not None else ""
+            identity = MemberIdentity(
+                id=config.channel_member_id,
+                name=config.channel_name,
+                aliases=config.channel_aliases,
+                kind=MEMBER_KIND_AGENT,
+                created_at=created_at or "",
+            )
+            claimed, conflicts = self._identity_registry.observe(
+                identity, source=f"profile:{config.profile}"
+            )
+            if not claimed:
+                for conflict in conflicts:
+                    LOGGER.warning(
+                        "local identity label conflict label=%s owner=%s member=%s",
+                        conflict.get("label"),
+                        conflict.get("owner"),
+                        conflict.get("member_id"),
+                    )
         self._channel_members: dict[str, dict[str, Any]] = {}
         self._channel_history: list[ChannelTranscriptEntry] = []
         self._channel_history_seq = 0
@@ -1351,6 +1407,7 @@ class GatewayServer:
         os.chmod(path, 0o600)
         self._clear_live_context_block()
         self._clear_channel_transcript_block()
+        self._clear_channel_identity_block()
         if self.config.aki is not None:
             try:
                 self._prepare_letta_provider()
@@ -1427,6 +1484,7 @@ class GatewayServer:
         self.execution_lock.close()
         self._clear_live_context_block()
         self._clear_channel_transcript_block()
+        self._clear_channel_identity_block()
         self._clear_execution_lock_policy()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
@@ -1579,6 +1637,10 @@ class GatewayServer:
             return self._username_get(), None
         if method == "aki.username.set":
             return await self._username_set(request.params), None
+        if method == "aki.identity.get":
+            return self._identity_get(), None
+        if method == "aki.identity.rename":
+            return await self._identity_rename(request.params), None
         if method == "aki.conversation.recompile":
             return await self._recompile_conversation(), None
         if method == "aki.conversation.compact":
@@ -1927,7 +1989,8 @@ class GatewayServer:
             "profile": self.config.profile,
             "conversation_id": self.config.conversation_id,
             "channel_identity": {
-                "id": self.config.channel_id,
+                "id": self._channel_self_key(),
+                "channel_id": self.config.channel_id,
                 "name": self.config.channel_name,
                 "aliases": list(self.config.channel_aliases),
                 "description": self.config.channel_description,
@@ -2033,10 +2096,11 @@ class GatewayServer:
         arrived_while_busy: bool = False,
     ) -> ChannelTranscriptEntry:
         self._channel_history_seq += 1
+        resolved_id = self._history_member_id(sender, sender_id)
         entry = ChannelTranscriptEntry(
             seq=self._channel_history_seq,
             sender=sender or sender_id or "unknown",
-            sender_id=sender_id,
+            sender_id=resolved_id or sender_id.strip(),
             text=text,
             from_agent=from_agent,
             timestamp=now_iso(),
@@ -2098,6 +2162,7 @@ class GatewayServer:
         self.channel_history_path = path
         by_seq: dict[int, ChannelTranscriptEntry] = {}
         load_error: str | None = None
+        history_changed = False
         if path.is_file():
             try:
                 for line in path.read_text(
@@ -2118,10 +2183,15 @@ class GatewayServer:
                         continue
                     if seq <= 0:
                         continue
+                    raw_sender = str(payload.get("sender") or "")
+                    raw_sender_id = str(payload.get("sender_id") or "")
+                    normalized_id = self._history_member_id(raw_sender, raw_sender_id)
+                    if normalized_id and normalized_id != raw_sender_id:
+                        history_changed = True
                     by_seq[seq] = ChannelTranscriptEntry(
                         seq=seq,
-                        sender=str(payload.get("sender") or ""),
-                        sender_id=str(payload.get("sender_id") or ""),
+                        sender=raw_sender,
+                        sender_id=normalized_id or raw_sender_id,
                         text=str(payload.get("text") or "")[:MAX_CHANNEL_TEXT_CHARS],
                         from_agent=bool(payload.get("from_agent")),
                         timestamp=str(payload.get("timestamp") or ""),
@@ -2151,6 +2221,11 @@ class GatewayServer:
             self._channel_transcript_status["last_history_error"] = load_error
         if len(ordered) > CHANNEL_TRANSCRIPT_MAX_RECORDS:
             self._persist_channel_history()
+        elif history_changed:
+            self._persist_channel_history()
+        for member_id, member in self._channel_members.items():
+            if normalize_member_kind(member.get("kind")) == MEMBER_KIND_USER:
+                self._normalize_channel_history_kind(member_id, MEMBER_KIND_USER)
 
     def _persist_channel_history(self) -> None:
         body = "".join(
@@ -2197,6 +2272,43 @@ class GatewayServer:
         except (OSError, ValueError) as exc:
             LOGGER.warning("failed to clear channel transcript block: %s", exc)
 
+    def _clear_channel_identity_block(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                return
+            system = record.get("system")
+            if not isinstance(system, str) or not system:
+                return
+            cleared = clear_channel_identity(system)
+            if cleared == system:
+                return
+            self._write_agent_record(path, record, cleared)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("failed to clear channel identity block: %s", exc)
+
+    async def _refresh_channel_identity(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        block = render_channel_identity(self._channel_self_member())
+        async with self._channel_transcript_lock:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict):
+                    raise ValueError("agent record is not a JSON object")
+                system = record.get("system")
+                if not isinstance(system, str) or not system:
+                    raise ValueError("agent system prompt is not a string")
+                updated = apply_channel_identity(system, block)
+                if updated != system:
+                    self._write_agent_record(path, record, updated)
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("failed to refresh channel identity: %s", exc)
+
     async def _refresh_channel_transcript(
         self,
         *,
@@ -2215,6 +2327,8 @@ class GatewayServer:
             entries,
             new_seq=new_seq,
             budget_tokens=self.config.channel_transcript_budget_tokens,
+            members=self._channel_member_views(),
+            self_id=self._channel_self_key(),
         )
         async with self._channel_transcript_lock:
             try:
@@ -2389,7 +2503,8 @@ class GatewayServer:
             "profile": self.config.profile,
             "conversation_id": self.config.conversation_id,
             "channel_identity": {
-                "id": self.config.channel_id,
+                "id": self._channel_self_key(),
+                "channel_id": self.config.channel_id,
                 "name": self.config.channel_name,
                 "aliases": list(self.config.channel_aliases),
                 "description": self.config.channel_description,
@@ -2536,6 +2651,7 @@ class GatewayServer:
                 return
             self._clear_execution_lock_policy()
             if turn.origin == "mqtt":
+                await self._refresh_channel_identity()
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
                 )
@@ -2543,6 +2659,7 @@ class GatewayServer:
                     turn.conversation_snapshot = self._snapshot_conversation()
             else:
                 self._clear_channel_transcript_block()
+                await self._refresh_channel_identity()
                 self._channel_transcript_status.update(
                     {
                         "rendered_seq": None,
@@ -3041,12 +3158,18 @@ class GatewayServer:
 
     def _channel_identity_metadata(self) -> dict[str, str]:
         config = self.config
+        member_id = self._channel_self_key()
         return {
             "schema": "akid.v1",
-            "agentId": config.channel_id,
-            "agent": config.channel_id,
+            "memberId": member_id,
+            "memberName": config.channel_name,
+            "sourceId": member_id,
+            # Old clients keep using agentId as their stable key.
+            "agentId": member_id,
+            "agent": member_id,
             "agentName": config.channel_name,
-            "description": config.channel_description[:300],
+            "description": truncate_member_description(config.channel_description),
+            "memberKind": MEMBER_KIND_AGENT,
             "aliases": ",".join(config.channel_aliases[:16]),
             "protocolVersion": str(CHANNEL_PROTOCOL_VERSION),
         }
@@ -3136,56 +3259,230 @@ class GatewayServer:
             f"{self.config.channel_name} is offline", metadata
         )
 
-    def _member_id(self, metadata: Mapping[str, Any], sender_id: str) -> str:
-        for key in ("agentId", "agent"):
-            value = str(metadata.get(key) or "").strip()
-            if value:
-                return value
-        return sender_id.strip()
+    def _member_key(
+        self,
+        metadata: Mapping[str, Any],
+        sender_name: str = "",
+        sender_id: str = "",
+    ) -> str:
+        explicit = str(metadata.get("memberId") or "").strip()
+        if is_member_id(explicit):
+            return explicit
+        if is_member_id(sender_id):
+            return sender_id.strip()
+        name = (
+            str(metadata.get("agentName") or "").strip()
+            or sender_name.strip()
+            or str(metadata.get("agentId") or metadata.get("agent") or "").strip()
+            or sender_id.strip()
+        )
+        known = self._resolve_label_member_id(name)
+        if known:
+            return known
+        return legacy_member_id(name) if name else ""
+
+    def _resolve_label_member_id(self, label: object) -> str:
+        if self._identity_registry is not None:
+            owner = self._identity_registry.resolve(label)
+            if owner:
+                return owner
+        key = member_name_key(label)
+        if not key:
+            return ""
+        for member_id, member in self._channel_members.items():
+            aliases = {
+                member_name_key(member.get("name")),
+                *(member_name_key(alias) for alias in member.get("aliases") or ()),
+            }
+            if key in aliases:
+                return member_id
+        return ""
 
     def _update_channel_member(
         self,
         envelope: TextEnvelope,
         metadata: Mapping[str, Any],
     ) -> str:
-        member_id = self._member_id(metadata, envelope.sender_id)
-        if not member_id or member_id == self.config.channel_id:
+        member_id = self._member_key(metadata, envelope.sender, envelope.sender_id)
+        if not member_id or member_id == self._channel_self_key():
             return member_id
-        name = str(metadata.get("agentName") or envelope.sender or member_id).strip()
-        aliases = tuple(
-            item.strip()
-            for item in str(metadata.get("aliases") or "").split(",")
-            if item.strip()
+        now = time.monotonic()
+        source_id = (
+            str(metadata.get("sourceId") or "").strip()
+            or envelope.sender_id.strip()
+            or member_id
         )
-        description = str(metadata.get("description") or "")[:300]
+        previous = self._channel_members.get(member_id)
+        sources = dict((previous or {}).get("sources") or {})
+        if previous and not sources:
+            previous_source = str(previous.get("source_id") or member_id)
+            sources[previous_source] = float(previous.get("last_seen", 0.0))
+        sources[source_id] = now
+        owner = str((previous or {}).get("source_id") or source_id)
+        update_profile = source_id == owner
+        name = str(
+            (metadata.get("agentName") if update_profile else "")
+            or (envelope.sender if update_profile else "")
+            or (previous or {}).get("name")
+            or member_id
+        ).strip()
+        if update_profile and "aliases" in metadata:
+            aliases = tuple(
+                item.strip()
+                for item in str(metadata.get("aliases") or "").split(",")
+                if item.strip()
+            )
+        else:
+            aliases = tuple((previous or {}).get("aliases") or ())
+        description = (
+            truncate_member_description(metadata.get("description"))
+            if update_profile and "description" in metadata
+            else str((previous or {}).get("description") or "")
+        )
+        member_kind = (
+            normalize_member_kind(metadata.get("memberKind"))
+            if update_profile and "memberKind" in metadata
+            else normalize_member_kind((previous or {}).get("kind"))
+        )
+        claimed = True
+        if self._identity_registry is not None:
+            identity = MemberIdentity(
+                id=member_id,
+                name=name,
+                aliases=aliases,
+                kind=member_kind,
+            )
+            claimed, conflicts = self._identity_registry.observe(
+                identity, source=source_id
+            )
+            for conflict in conflicts:
+                LOGGER.warning(
+                    "remote identity label conflict label=%s owner=%s member=%s source=%s",
+                    conflict.get("label"),
+                    conflict.get("owner"),
+                    conflict.get("member_id"),
+                    source_id,
+                )
+            if not claimed:
+                # The existing owner keeps its labels.  Keep the conflicting id
+                # online, but do not let it capture mention routing.
+                aliases = tuple((previous or {}).get("aliases") or ())
+                if previous:
+                    name = str(previous.get("name") or member_id)
+                else:
+                    name = member_id
         self._channel_members[member_id] = {
             "id": member_id,
             "name": name[:80] or member_id,
             "aliases": aliases[:16],
             "description": description,
-            "last_seen": time.monotonic(),
+            "kind": member_kind,
+            "labelsClaimed": claimed,
+            "source_id": owner,
+            "sources": sources,
+            "last_seen": now,
         }
+        if member_kind == MEMBER_KIND_USER:
+            self._normalize_channel_history_kind(member_id, member_kind)
         return member_id
+
+    def _normalize_channel_history_kind(self, member_id: str, member_kind: str) -> None:
+        if member_kind != MEMBER_KIND_USER:
+            return
+        changed = False
+        normalized: list[ChannelTranscriptEntry] = []
+        for entry in self._channel_history:
+            resolved = self._history_member_id(entry.sender, entry.sender_id)
+            if resolved == member_id and (entry.from_agent or entry.sender_id != member_id):
+                entry = replace(
+                    entry,
+                    sender_id=member_id,
+                    from_agent=False if entry.from_agent else entry.from_agent,
+                )
+                changed = True
+            normalized.append(entry)
+        if not changed:
+            return
+        self._channel_history = normalized
+        self._persist_channel_history()
+
+    def _drop_channel_member_source(self, member_id: str, source_id: str) -> None:
+        member = self._channel_members.get(member_id)
+        if member is None:
+            return
+        sources = dict(member.get("sources") or {})
+        sources.pop(source_id, None)
+        if not sources:
+            self._channel_members.pop(member_id, None)
+            return
+        updated = dict(member)
+        updated["sources"] = sources
+        updated["last_seen"] = max(sources.values())
+        self._channel_members[member_id] = updated
 
     def _prune_channel_members(self) -> None:
         cutoff = time.monotonic() - CHANNEL_MEMBER_TIMEOUT
-        self._channel_members = {
-            key: member
-            for key, member in self._channel_members.items()
-            if float(member.get("last_seen", 0.0)) >= cutoff
-        }
+        kept: dict[str, dict[str, Any]] = {}
+        for key, member in self._channel_members.items():
+            sources = dict(member.get("sources") or {})
+            if not sources:
+                if float(member.get("last_seen", 0.0)) >= cutoff:
+                    kept[key] = member
+                continue
+            active = {
+                source_id: seen_at
+                for source_id, seen_at in sources.items()
+                if float(seen_at) >= cutoff
+            }
+            if not active:
+                continue
+            updated = dict(member)
+            updated["sources"] = active
+            updated["last_seen"] = max(active.values())
+            kept[key] = updated
+        self._channel_members = kept
+
+    def _channel_self_key(self) -> str:
+        return self.config.channel_member_id or legacy_member_id(
+            self.config.channel_name
+        )
+
+    def _channel_self_member(self) -> ChannelMember:
+        return ChannelMember(
+            id=self._channel_self_key(),
+            name=self.config.channel_name,
+            aliases=self.config.channel_aliases,
+            description=truncate_member_description(self.config.channel_description),
+            is_self=True,
+            kind=MEMBER_KIND_AGENT,
+        )
+
+    def _history_member_id(self, sender: str, sender_id: str = "") -> str:
+        candidate = str(sender_id or "").strip()
+        if is_member_id(candidate):
+            return candidate
+        for label in (sender, candidate):
+            owner = self._resolve_label_member_id(label)
+            if owner:
+                return owner
+        name = str(sender or candidate).strip()
+        return legacy_member_id(name) if name else ""
+
+    def _member_display_name(self, member_id: str, fallback: str = "") -> str:
+        if member_id and member_id == self._channel_self_key():
+            return self.config.channel_name
+        member = self._channel_members.get(member_id) if member_id else None
+        if member is not None:
+            return str(member.get("name") or fallback)
+        if self._identity_registry is not None and member_id:
+            identity = self._identity_registry.get(member_id)
+            if identity is not None:
+                return identity.name
+        return str(fallback or "")
 
     def _channel_member_views(self) -> list[ChannelMember]:
         self._prune_channel_members()
-        views = [
-            ChannelMember(
-                id=self.config.channel_id,
-                name=self.config.channel_name,
-                aliases=self.config.channel_aliases,
-                description=self.config.channel_description,
-                is_self=True,
-            )
-        ]
+        views = [self._channel_self_member()]
         for member in self._channel_members.values():
             views.append(
                 ChannelMember(
@@ -3193,6 +3490,7 @@ class GatewayServer:
                     name=str(member["name"]),
                     aliases=tuple(member.get("aliases") or ()),
                     description=str(member.get("description") or ""),
+                    kind=normalize_member_kind(member.get("kind")),
                 )
             )
         return views
@@ -3206,15 +3504,8 @@ class GatewayServer:
             return
         if metadata.get("protocolVersion") != str(CHANNEL_PROTOCOL_VERSION):
             return
-        member_id = ""
-        for key in ("agentId", "agent"):
-            value = str(metadata.get(key) or "").strip()
-            if value:
-                member_id = value
-                break
-        if member_id == self.config.channel_id or (
-            envelope.sender_id and envelope.sender_id == self.config.channel_id
-        ):
+        member_id = self._member_key(metadata, envelope.sender, envelope.sender_id)
+        if not member_id or member_id == self._channel_self_key():
             return
         if kind == "probe":
             probe_id = str(metadata.get("probeId") or "").strip()
@@ -3246,7 +3537,12 @@ class GatewayServer:
         if not member_id:
             return
         if kind == "offline":
-            self._channel_members.pop(member_id, None)
+            self._drop_channel_member_source(
+                member_id,
+                str(metadata.get("sourceId") or "").strip()
+                or envelope.sender_id.strip()
+                or member_id,
+            )
             return
         self._update_channel_member(envelope, metadata)
 
@@ -3742,8 +4038,25 @@ class GatewayServer:
         )
         return True
 
-    def _channel_sender_is_agent(self, sender_id: str) -> bool:
-        return bool(sender_id) and sender_id in self._channel_members
+    def _channel_sender_is_agent(
+        self,
+        sender: str,
+        sender_id: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> bool:
+        key = self._member_key(metadata or {}, sender, sender_id)
+        member = self._channel_members.get(key) if key else None
+        return (
+            member is not None
+            and normalize_member_kind(member.get("kind")) == MEMBER_KIND_AGENT
+        )
+
+    def _channel_agent_views(self) -> list[ChannelMember]:
+        return [
+            member
+            for member in self._channel_member_views()
+            if normalize_member_kind(member.kind) == MEMBER_KIND_AGENT
+        ]
 
     def _channel_message_mentions(self, text: str) -> set[str]:
         return match_channel_mentions(text, self._channel_member_views())
@@ -3754,11 +4067,11 @@ class GatewayServer:
         if from_agent:
             return False, "agent-message"
         mentions = self._channel_message_mentions(text)
-        if self.config.channel_id in mentions:
+        if self._channel_self_key() in mentions:
             return True, "user-mentioned"
         if mentions:
             return False, "mentioned-other-members"
-        if len(self._channel_member_views()) <= 1:
+        if len(self._channel_agent_views()) <= 1:
             return True, "single-online-member"
         return False, "user-must-name-executor"
 
@@ -3798,14 +4111,16 @@ class GatewayServer:
         if len(text) > MAX_CHANNEL_TEXT_CHARS:
             text = text[:MAX_CHANNEL_TEXT_CHARS] + "\n...[truncated by akid]"
         event_metadata = dict(metadata or {})
+        member_id = self._member_key(event_metadata, sender, sender_id)
+        display_sender = self._member_display_name(member_id, sender) or sender
         action = self._channel_text_action(event_metadata)
         if not action:
             return
         busy = self._channel_busy()
         if action == "agent-progress":
             self._record_channel_message(
-                sender=sender,
-                sender_id=sender_id,
+                sender=display_sender,
+                sender_id=member_id or sender_id,
                 text=text,
                 from_agent=True,
                 message_id=message_id,
@@ -3824,16 +4139,18 @@ class GatewayServer:
             if busy:
                 await self._refresh_channel_transcript()
             return
-        from_agent = action == "agent-final" or self._channel_sender_is_agent(sender_id)
+        from_agent = action == "agent-final" or self._channel_sender_is_agent(
+            sender, sender_id, event_metadata
+        )
         if not from_agent and not replayed:
             self._agent_initiation_remaining = max(
                 0, int(self.config.agent_initiation_limit)
             )
-        if await self._handle_channel_command(text, sender_id):
+        if await self._handle_channel_command(text, member_id or sender_id):
             return
         entry = self._record_channel_message(
-            sender=sender,
-            sender_id=sender_id,
+            sender=display_sender,
+            sender_id=member_id or sender_id,
             text=text,
             from_agent=from_agent,
             message_id=message_id,
@@ -3845,7 +4162,7 @@ class GatewayServer:
             LOGGER.info(
                 "channel backlog message recorded without turn seq=%s sender_id=%s",
                 entry.seq,
-                sender_id or "unknown",
+                member_id or sender_id or "unknown",
             )
             if busy:
                 await self._refresh_channel_transcript()
@@ -3853,7 +4170,7 @@ class GatewayServer:
         LOGGER.info(
             "channel message accepted sender_id=%s from_agent=%s seq=%s "
             "initiation_remaining=%s",
-            sender_id or "unknown",
+            member_id or sender_id or "unknown",
             from_agent,
             entry.seq,
             self._agent_initiation_remaining,
@@ -3863,14 +4180,12 @@ class GatewayServer:
         if wake not in (CHANNEL_WAKE_USER, CHANNEL_WAKE_MENTIONS, CHANNEL_WAKE_ALL):
             wake = CHANNEL_WAKE_ALL
         wake_ids = {
-            item.strip()
+            self._history_member_id(item.strip(), item.strip()) or item.strip()
             for item in str(event_metadata.get("wakeIds") or "").split(",")
             if item.strip()
         }
-        directly_targeted = (
-            self.config.channel_id in wake_ids
-            or self.config.channel_id in mentions
-        )
+        self_key = self._channel_self_key()
+        directly_targeted = self_key in wake_ids or self_key in mentions
         should_wake = True
         if from_agent:
             if wake == CHANNEL_WAKE_USER:
@@ -3880,7 +4195,7 @@ class GatewayServer:
         if (
             not from_agent
             and mentions
-            and self.config.channel_id not in mentions
+            and self_key not in mentions
         ):
             LOGGER.info(
                 "channel user message addressed to other agents; "
@@ -3907,7 +4222,7 @@ class GatewayServer:
                 active.busy_messages.append(
                     {
                         "sender": sender,
-                        "sender_id": sender_id,
+                        "sender_id": member_id or sender_id,
                         "text": text,
                         "seq": entry.seq,
                         "origin_is_agent": True,
@@ -3921,7 +4236,7 @@ class GatewayServer:
             active.busy_messages.append(
                 {
                     "sender": sender,
-                    "sender_id": sender_id,
+                    "sender_id": member_id or sender_id,
                     "text": text,
                     "seq": entry.seq,
                     "origin_is_agent": False,
@@ -3938,9 +4253,9 @@ class GatewayServer:
         )
         self._enqueue_channel_turn(
             self._channel_prompt(
-                sender, sender_id, text, from_agent=from_agent
+                display_sender, member_id or sender_id, text, from_agent=from_agent
             ),
-            sender_id,
+            member_id or sender_id,
             origin_is_agent=from_agent,
             channel_message_seq=entry.seq,
             lock_authorized=lock_authorized,
@@ -4011,14 +4326,12 @@ class GatewayServer:
     def _channel_prompt(
         self, sender: str, sender_id: str, text: str, *, from_agent: bool = False
     ) -> str:
-        identity = f"{sender} ({sender_id})" if sender_id else sender
-        self_member = ChannelMember(
-            id=self.config.channel_id,
-            name=self.config.channel_name,
-            aliases=self.config.channel_aliases,
-            description=self.config.channel_description,
-            is_self=True,
+        member_id = self._history_member_id(sender, sender_id) or sender_id
+        display_sender = self._member_display_name(member_id, sender) or sender
+        identity = (
+            f"{display_sender} ({member_id})" if member_id else display_sender
         )
+        self_member = self._channel_self_member()
         channel_context = render_channel_context(
             self_member=self_member,
             members=self._channel_member_views(),
@@ -5490,6 +5803,129 @@ class GatewayServer:
         approval.future.set_result((decision == "allow", message))
         return {"approval_id": approval_id, "decision": decision, "ok": True}
 
+    # ---------------------------------------------------------------- identity
+    def _identity_get(self) -> dict[str, Any]:
+        registry_identity = (
+            self._identity_registry.get(self._channel_self_key())
+            if self._identity_registry is not None
+            else None
+        )
+        identity = MemberIdentity(
+            id=self._channel_self_key(),
+            name=self.config.channel_name,
+            aliases=self.config.channel_aliases,
+            kind=MEMBER_KIND_AGENT,
+        )
+        return {
+            "id": identity.id,
+            "name": identity.name,
+            "aliases": list(identity.aliases),
+            "kind": identity.kind,
+            "created_at": registry_identity.created_at if registry_identity else "",
+            "description": truncate_member_description(
+                self.config.channel_description
+            ),
+            "profile": self.config.profile,
+            "agent_id": self.config.agent_id,
+            "userdata": str(self._userdata_dir()),
+            "manifest": (
+                str(self._identity_manifest_path)
+                if self._identity_manifest_path is not None
+                else str(self._userdata_dir() / "identity.json")
+            ),
+            "registry": (
+                str(self._identity_registry.path)
+                if self._identity_registry is not None
+                else None
+            ),
+            "authority": "client-local",
+        }
+
+    async def _identity_rename(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        name = require_string(params, "name").strip()
+        if not name:
+            raise RpcError(ErrorCode.INVALID_PARAMS, "name must not be empty")
+        if len(name) > 80:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS, "name must be at most 80 characters"
+            )
+        if any(ord(char) < 32 or ord(char) == 127 for char in name):
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS, "name contains control characters"
+            )
+        current_id = self._channel_self_key()
+        current = MemberIdentity(
+            id=current_id,
+            name=self.config.channel_name,
+            aliases=self.config.channel_aliases,
+            kind=MEMBER_KIND_AGENT,
+        )
+        renamed = current.renamed(name)
+        target_key = canonical_name(renamed.name)
+        for member_id, member in self._channel_members.items():
+            if member_id == current_id:
+                continue
+            labels = {
+                canonical_name(member.get("name")),
+                *(canonical_name(alias) for alias in member.get("aliases") or ()),
+            }
+            if target_key in labels:
+                raise RpcError(
+                    ErrorCode.INVALID_PARAMS,
+                    f"name {name!r} already belongs to another member",
+                    {"owner": member_id},
+                )
+        if self._identity_registry is not None:
+            try:
+                renamed = self._identity_registry.rename(current_id, renamed.name)
+            except IdentityConflict as exc:
+                raise RpcError(
+                    ErrorCode.INVALID_PARAMS, str(exc)
+                ) from exc
+            except (IdentityError, OSError) as exc:
+                raise RpcError(ErrorCode.INTERNAL_ERROR, str(exc)) from exc
+        if self._identity_manifest_path is not None:
+            try:
+                write_manifest(
+                    self._identity_manifest_path,
+                    renamed,
+                    profile=self.config.profile,
+                    agent_id=self.config.agent_id,
+                    userdata=self.config.aki.userdata
+                    if self.config.aki is not None
+                    else str(self._userdata_dir()),
+                )
+            except (IdentityError, OSError) as exc:
+                raise RpcError(
+                    ErrorCode.INTERNAL_ERROR, f"cannot write identity manifest: {exc}"
+                ) from exc
+        config_path = self._profile_config_path()
+        try:
+            sync_channel_identity(
+                config_path,
+                member_id=renamed.id,
+                name=renamed.name,
+                aliases=renamed.aliases,
+            )
+        except OSError as exc:
+            raise RpcError(
+                ErrorCode.INTERNAL_ERROR, f"cannot mirror identity into config: {exc}"
+            ) from exc
+        self.config.channel_name = renamed.name
+        self.config.channel_aliases = renamed.aliases
+        self.config.channel_member_id = renamed.id
+        self.config.channel_id = renamed.id
+        self.config.mqtt_sender_name = renamed.name
+        self.config.mqtt_sender_id = renamed.id
+        if self.channel is not None:
+            self.channel.sender_name = renamed.name
+            self.channel.sender_id = renamed.id
+        await self._refresh_channel_identity()
+        if self.channel is not None and self.channel.connected:
+            with contextlib.suppress(Exception):
+                await self._publish_channel_status()
+        return self._identity_get()
+
     # ---------------------------------------------------------------- username
     def _userdata_dir(self) -> Path:
         return self.config.userdata_dir or (self.config.cwd / "userdata")
@@ -6468,6 +6904,53 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         profile=profile_name,
     )
     channel_id, channel_name, channel_aliases, channel_description = _channel_identity(aki)
+    userdata_label = aki.userdata
+    userdata_dir = Path(userdata_label).expanduser()
+    if not userdata_dir.is_absolute():
+        userdata_dir = Path(os.environ.get("AKI_CWD", Path.cwd())) / userdata_dir
+    identity_registry_path = state_dir() / "identities.json"
+    try:
+        backup_migration_state(
+            state_dir(),
+            paths=(
+                config_path,
+                identity_registry_path,
+                userdata_dir / "identity.json",
+                state_dir() / "channel-history",
+            ),
+        )
+        identity, identity_manifest_path = ensure_manifest(
+            userdata_dir,
+            profile=aki.profile,
+            agent_id=aki.agent_id,
+            fallback_name=channel_name,
+            fallback_aliases=channel_aliases,
+            userdata_label=userdata_label,
+        )
+    except IdentityError as exc:
+        raise ConfigError(str(exc)) from exc
+    channel_id = identity.id
+    channel_name = identity.name
+    channel_aliases = identity.aliases
+    try:
+        registry = IdentityRegistry(identity_registry_path)
+        registry.observe(identity, source=f"profile:{aki.profile}")
+    except OSError:
+        pass
+    if (
+        aki.channel.id != identity.id
+        or aki.channel.name != identity.name
+        or tuple(aki.channel.aliases) != tuple(identity.aliases)
+    ):
+        try:
+            sync_channel_identity(
+                config_path,
+                member_id=identity.id,
+                name=identity.name,
+                aliases=identity.aliases,
+            )
+        except OSError as exc:
+            raise ConfigError(f"cannot mirror identity into {config_path}: {exc}") from exc
     if os.environ.get("AKI_SOCKET"):
         socket_path = Path(os.environ["AKI_SOCKET"]).expanduser()
     elif aki.socket:
@@ -6475,9 +6958,6 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
     else:
         socket_path = default_socket_path(aki.profile)
     cwd = Path(os.environ.get("AKI_CWD", Path.cwd()))
-    userdata_dir = Path(aki.userdata).expanduser()
-    if not userdata_dir.is_absolute():
-        userdata_dir = cwd / userdata_dir
     username = aki.username.strip()
     username_source = "profile-config" if username else ""
     username_path: Path | None = None
@@ -6530,11 +7010,20 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         mqtt_topic=aki.mqtt_topic,
         mqtt_magic=aki.mqtt_magic,
         mqtt_sender_name=os.environ.get("AKI_MQTT_SENDER_NAME", channel_name),
-        mqtt_sender_id=os.environ.get("AKI_MQTT_SENDER_ID", channel_id),
+        mqtt_sender_id=(
+            configured_sender
+            if is_member_id(
+                configured_sender := os.environ.get("AKI_MQTT_SENDER_ID", "")
+            )
+            else channel_id
+        ),
         channel_id=channel_id,
+        channel_member_id=identity.id,
         channel_name=channel_name,
         channel_description=channel_description,
         channel_aliases=channel_aliases,
+        identity_manifest_path=identity_manifest_path,
+        identity_registry_path=identity_registry_path,
         mqtt_state=config_path,
         channel_history_dir=(
             Path(os.environ["AKI_CHANNEL_HISTORY_DIR"]).expanduser()

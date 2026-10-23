@@ -28,6 +28,7 @@ from engine.letta_process import LettaProcess
 from engine.live_context import WindowInfo, estimate_tokens
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from engine.tokifactor import TextEnvelope
+from engine.member_identity import legacy_member_id
 from tests.fake_mqtt_broker import FakeMqttBroker
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1199,7 +1200,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(body, published)
         self.assertEqual(server._channel_history[0].text, body)
         self.assertTrue(server._channel_history[0].from_agent)
-        self.assertEqual(server._channel_history[-1].sender_id, "aki")
+        self.assertEqual(server._channel_history[-1].sender_id, legacy_member_id("Aki"))
         self.assertTrue(server._channel_history[-1].from_agent)
         system = self._agent_system(agent_path)
         self.assertIn("<aki-channel-transcript", system)
@@ -1315,6 +1316,23 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [entry.text for entry in server._channel_history[:3]],
             ["只提醒用户", "只提醒别人", "@Aki 这条提醒你"],
+        )
+
+    async def test_wake_ids_accept_old_name_keys_and_normalize_to_member_id(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        base = {"schema": "akid.v1", "kind": "turn", "phase": "final"}
+
+        await server._on_channel_text(
+            "Fuyu",
+            "device-fuyu",
+            "这条没有 @ 提及，只靠 wakeIds。",
+            {**base, "wake": "mentions", "wakeIds": "Aki"},
+        )
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        self.assertEqual(
+            server._channel_history[0].sender_id,
+            legacy_member_id("Fuyu"),
         )
 
     async def test_busy_user_only_reply_is_recorded_without_deferral(self) -> None:
@@ -1526,7 +1544,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         system = self._agent_system(agent_path)
         self.assertNotIn("<aki-execution-lock", system)
         prompt = server._channel_prompt("alice", "alice-1", "do this")
-        self.assertIn('<execution-ownership responder="aki" self="true">', prompt)
+        self.assertIn(
+            f'<execution-ownership responder="{legacy_member_id("Aki")}" self="true">',
+            prompt,
+        )
         self.assertIn("唯一负责确认", prompt)
 
     async def test_single_channel_member_may_acquire_lock_without_mention(self) -> None:
@@ -1640,7 +1661,77 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await client.hello()
         local = await client.call("aki.chat.send", {"message": "local hello"})
         await client.collect_turn(local["turn_id"])
-        self.assertNotIn("<aki-channel-transcript", self._agent_system(agent_path))
+        local_system = self._agent_system(agent_path)
+        self.assertNotIn("<aki-channel-transcript", local_system)
+        self.assertIn("<aki-channel-identity", local_system)
+        self.assertIn('kind="agent"', local_system)
+
+    async def test_human_member_kind_does_not_count_as_agent(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["master"] = {
+            "id": "master",
+            "name": "Master",
+            "aliases": (),
+            "description": "human bio",
+            "kind": "user",
+            "last_seen": time.monotonic(),
+        }
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "agent bio",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+        }
+        self.assertFalse(server._channel_sender_is_agent("master"))
+        self.assertTrue(server._channel_sender_is_agent("fuyu"))
+        self.assertEqual(
+            server._channel_lock_authorization("do this", from_agent=False),
+            (False, "user-must-name-executor"),
+        )
+        await server._on_channel_text("Master", "master", "hello from a human")
+        self.assertFalse(server._channel_history[-1].from_agent)
+        prompt = server._channel_prompt("Master", "master", "hello from a human")
+        self.assertIn('kind="user"', prompt)
+        self.assertIn("human bio", prompt)
+        self.assertIn(f'responder="{legacy_member_id("Aki")}"', prompt)
+
+    async def test_control_profile_updates_are_sparse_and_bounded(self) -> None:
+        server = await self.start_server()
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "existing bio",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+        }
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "status",
+            "protocolVersion": "1",
+            "agentId": "fuyu",
+            "agent": "fuyu",
+            "agentName": "Fuyu",
+        }
+        await server._on_channel_control(
+            TextEnvelope(sender="Fuyu", text="status", sender_id="fuyu", metadata=metadata)
+        )
+        self.assertEqual(server._channel_members["fuyu"]["description"], "existing bio")
+        self.assertEqual(server._channel_members["fuyu"]["kind"], "agent")
+
+        await server._on_channel_control(
+            TextEnvelope(
+                sender="Fuyu",
+                text="status",
+                sender_id="fuyu",
+                metadata={**metadata, "description": "中" * 300, "memberKind": "user"},
+            )
+        )
+        self.assertEqual(server._channel_members["fuyu"]["description"], "中" * 256)
+        self.assertEqual(server._channel_members["fuyu"]["kind"], "user")
 
     async def test_channel_transcript_persists_across_server_restart(self) -> None:
         server = await self.start_server()
@@ -1834,7 +1925,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         text, metadata = presences[0]
         self.assertEqual(text, "Aki is online")
         self.assertEqual(metadata["kind"], "presence")
-        self.assertEqual(metadata["agent"], "aki")
+        self.assertEqual(metadata["agent"], legacy_member_id("Aki"))
         self.assertEqual(metadata["agentName"], "Aki")
         self.assertEqual(metadata["probeId"], "probe-1")
         self.assertEqual(metadata["protocolVersion"], "1")
@@ -1916,7 +2007,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 sender="Aki",
                 text="self status",
                 sender_id="aki",
-                metadata={**metadata, "agentId": "aki", "agent": "aki"},
+                metadata={
+                    **metadata,
+                    "agentId": "aki",
+                    "agent": "aki",
+                    "agentName": "Aki",
+                },
             )
         )
         plain = server._channel_prompt("alice", "alice-1", "hello everyone")
@@ -1985,7 +2081,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: bool(fake_channel.events))
         self.assertTrue(fake_channel.events)
         user_entry = next(
-            entry for entry in server._channel_history if entry.sender_id == "alice-1"
+            entry
+            for entry in server._channel_history
+            if entry.sender_id == legacy_member_id("alice")
         )
         self.assertEqual(user_entry.text, body)
         self.assertFalse(user_entry.from_agent)
@@ -2221,6 +2319,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "agent",
             "agentId",
             "agentName",
+            "memberId",
+            "memberName",
+            "sourceId",
+            "memberKind",
             "description",
             "aliases",
             "protocolVersion",
@@ -2240,6 +2342,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertIn(key, metadata)
         self.assertEqual(metadata["kind"], "status")
+        self.assertEqual(metadata["memberKind"], "agent")
+        self.assertEqual(metadata["agentId"], legacy_member_id(metadata["agentName"]))
         self.assertEqual(metadata["channelReady"], "true")
         self.assertEqual(metadata["queueDepth"], "0")
         self.assertEqual(metadata["pendingApprovals"], "0")
@@ -2260,7 +2364,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
         await server._on_channel_text("alice", "alice-1", "hello channel")
         await wait_until(lambda: any(item.get("activeTurn") == "false" for item in statuses()))
-        await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
+        await server._on_channel_text("alice", "device-pc", "run a dangerous tool")
         await wait_until(lambda: bool(fake_channel.events_of("approval")))
         await wait_until(lambda: any(item.get("pendingApprovals") == "1" for item in statuses()))
         await server._on_channel_text("alice", "alice-1", "akid-approve")
@@ -2468,10 +2572,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
         await wait_until(lambda: bool(fake_channel.events_of("approval")))
         approval = fake_channel.events_of("approval")[0]
-        self.assertEqual(approval.get("requesterId"), "alice-1")
+        self.assertEqual(approval.get("requesterId"), legacy_member_id("alice"))
 
         await server._on_channel_text(
-            "bob", "bob-1", f"akid-approve {approval['approvalId']}"
+            "bob", "device-bob", f"akid-approve {approval['approvalId']}"
         )
         await wait_until(
             lambda: any(
@@ -2482,7 +2586,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(approval["approvalId"], server.approvals)
 
         await server._on_channel_text(
-            "alice", "alice-1", f"akid-deny {approval['approvalId']}"
+            # Same member id, different transport source (PC -> Android).
+            "alice", "device-android", f"akid-deny {approval['approvalId']}"
         )
         await wait_until(
             lambda: any(

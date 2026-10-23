@@ -97,6 +97,16 @@ class SyncPersonaTests(unittest.TestCase):
         self.assertFalse((self.memory / "human.md").exists())
         self.assertFalse((self.memory / "profile" / "identity.md").exists())
 
+    def test_identity_manifest_is_metadata_not_memfs_content(self) -> None:
+        (self.source / "identity.json").write_text(
+            json.dumps({"id": "legacy_abc", "name": "Aki"}) + "\n",
+            encoding="utf-8",
+        )
+        result = self.run_sync("--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("private-looking files are ignored", result.stderr)
+        self.assertFalse((self.memory / "identity.json").exists())
+
     def test_invalid_frontmatter_is_rejected(self) -> None:
         (self.source / "persona.md").write_text("# no frontmatter\n", encoding="utf-8")
         result = self.run_sync()

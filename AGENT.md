@@ -2,6 +2,21 @@
 
 > 项目宪章与目标说明。本文档定义“要做什么、为什么这样做、什么不做”，是后续架构与实现的最高层依据。
 
+## 0. 强制：逻辑改动必须部署到本机
+
+任何会改变运行行为的项目逻辑改动（无论属于 Aki 还是 Tokifactor），在宣布任务完成前，
+都必须把最新构建安装到本机，并重启实际承载该逻辑的进程或 systemd 用户服务。只修改源码、
+只通过测试、或只生成构建产物但继续运行旧进程，都不算完成。
+
+- Aki：按改动范围运行 `python3 install-daemon.py`（unit/launcher/依赖变化时），并重启
+  `akid@aki.service`、`akid@fuyu.service` 及对应的 `akid-proxy@*.service`。通过服务启动时间、
+  `akid` health/status 和关键日志确认新代码正在运行。
+- Tokifactor：运行 `./install.sh` 重新打包并安装 daemon jar，重启
+  `tokifactord.service`；Android 逻辑有变化时重新安装最新 APK；桌面 UI 逻辑有变化时重启
+  桌面进程。通过安装产物时间、进程启动时间和 daemon/客户端握手确认版本一致。
+- 若用户明确要求不要部署，才可以跳过；此时必须在最终回复中说明“未部署”，不能把源码完成
+  当成运行状态完成。
+
 ## 1. 产品定位
 
 Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 AI 智能助手。
@@ -240,6 +255,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
+- System prompt 固定顺序：`base → core memory → <aki-channel-identity> →
+  <aki-channel-transcript> → <aki-live-context>`。identity 每个 turn 刷新；transcript
+  仅频道 turn 注入，local turn 会清除但保留 identity；live context 始终最后。
 - 长期记忆规则见 MemFS 中的 `memory-policy.md`；普通测试对话不得写入长期记忆。
 
 ## 13. GUI 与信道身份
@@ -248,7 +266,18 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不假设固定 IP，也不假设信道上一定有 Aki。
 - tokifactor 通过加密的 `tokifactor/control` 主题发送 probe；Aki 回复 presence，并用
   status 心跳维持在线状态。控制消息不进入聊天历史、不创建 turn、不触发通知。
-- 频道成员按 `agentId` 去重并由 control 心跳维护；tokifactor 顶部显示多成员栏，
+- `[channel] description` 就是该智能体的频道简介，最多 512 加权字符（ASCII 1、其他
+  Unicode 码点 2）。control 的 `memberKind` 为 `user` 或 `agent`，缺失按 `agent`
+  兼容；人类 Tokifactor 成员出现在 roster 与详情页，但不会触发 agent 专属逻辑，也不会
+  被选为执行确认者。
+- 频道成员的唯一 ID 是不可变 `memberId`，Name 只是显示标签。新成员为
+  `mem_<uuid4hex>`；旧数据为 `legacy_<sha256("tokifactor-member-v1\\0" + NFKC(trim(lower(name))))[:32]>`。
+  每个 profile 的 `userdata/identity.json` 是权威清单，`[channel] id/name/aliases` 是镜像；
+  `~/.aki/identities.json` 只是本机客户端共享的别名/标签注册表，不是中心化身份服务。
+  新 Name 与所有历史别名永久占用，改名不改变 memberId。control 同时发布
+  `memberId/memberName`，并保留 `agentId=memberId`、`agentName=memberName` 兼容旧客户端。
+  同名旧设备通过同一 legacy ID 合并；首个 source 拥有资料，后续 source 只增加在线来源。
+  tokifactor 顶部显示多成员栏，频道历史和 transcript 的 `sender_id` 同样规范化为 memberId。
   `@` 仅影响各智能体的回复判断，不阻止其他智能体启动 turn。
 - 每个智能体有默认 4 次“主动启动次数”：用户消息重置；其他智能体触发的 turn
   在第一次产生频道动作时扣 1，每 turn 最多 1 次；剩余次数写入 channel live context。

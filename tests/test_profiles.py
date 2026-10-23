@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from engine.akid import build_config_from_env
+from engine.member_identity import legacy_member_id
 from engine.aki_config import (
     ConfigError,
     set_key,
@@ -95,19 +96,23 @@ class ProfileConfigTests(unittest.TestCase):
         from engine.aki_config import set_key
 
         set_key(path, "gateway", "agent_id", "agent-fuyu")
+        identity_userdata = self.home / "fuyu-userdata"
+        identity_userdata.mkdir()
+        set_key(path, "gateway", "userdata", str(identity_userdata))
         with mock.patch.dict(
             os.environ,
             {
                 "AKI_CONFIG": str(path),
                 "AKI_LETTA_BACKEND_DIR": str(backend),
                 "XDG_RUNTIME_DIR": str(self.home / "run"),
+                "HOME": str(self.home),
             },
             clear=False,
         ):
             os.environ.pop("AKI_SOCKET", None)
             config = build_config_from_env()
         self.assertEqual(config.profile, "fuyu")
-        self.assertEqual(config.channel_id, "agent-fuyu")
+        self.assertEqual(config.channel_id, legacy_member_id("冬"))
         self.assertEqual(config.channel_name, "冬")
         self.assertEqual(config.channel_description, "agent record description")
         self.assertIn("冬", config.channel_aliases)
@@ -134,6 +139,7 @@ class ProfileConfigTests(unittest.TestCase):
                 "AKI_CONFIG": str(path),
                 "AKI_CWD": str(cwd),
                 "XDG_RUNTIME_DIR": str(self.home / "run"),
+                "HOME": str(self.home),
             },
             clear=False,
         ):
@@ -155,6 +161,7 @@ class ProfileConfigTests(unittest.TestCase):
                 "AKI_CONFIG": str(path),
                 "AKI_CWD": str(cwd),
                 "XDG_RUNTIME_DIR": str(self.home / "run"),
+                "HOME": str(self.home),
             },
             clear=False,
         ):
@@ -171,6 +178,7 @@ class ProfileConfigTests(unittest.TestCase):
                 "AKI_CONFIG": str(path),
                 "AKI_CWD": str(cwd),
                 "XDG_RUNTIME_DIR": str(self.home / "run"),
+                "HOME": str(self.home),
             },
             clear=False,
         ):

@@ -13,6 +13,8 @@
 - `character/boundaries.md` — 身份与安全边界
 - `character/examples.md` — 原创语气示例模板
 - `username.txt` — 旧版默认 profile 的称呼迁移源（新状态保存在 `<profile>.conf` 的 `[gateway] username`）
+- `identity.json` — 该 profile 的不可变 `memberId`、当前 Name、永久别名和 `kind`；
+  首次启动由 akid 创建，是 `[channel]` 配置的权威来源，不写入 MemFS
 - `MANIFEST.json` — 同步来源、MemFS commit 和模板哈希
 
 ## 占位符
@@ -38,6 +40,10 @@
 - `MEMORY.md` — 含用户身份信息的 MemFS 根索引
 - 聊天记录、transcript、凭据、API key、密码、令牌
 - `.git/**` 和任何运行时数据
+
+`identity.json` 属于身份运行时数据，会随 `userdata/` 一起移动，但
+`scripts/sync-persona.py` 会把它当作 metadata 忽略：它不会被渲染进 MemFS，也不会被当作
+人格模板。身份 ID 只保存在客户端本地，没有中心服务器签发或验证。
 
 请不要把隐私内容放进这个目录。同步脚本只接受固定的白名单文件，
 其他文件会被忽略；`human.md` 和 `profile/**` 会被明确警告并跳过。

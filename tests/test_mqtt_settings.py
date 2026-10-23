@@ -19,7 +19,10 @@ from engine.mqtt_settings import (
 class MqttSettingsTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
-        self.state = Path(self.tempdir.name) / "aki.conf"
+        self.root = Path(self.tempdir.name)
+        self.state = self.root / "aki.conf"
+        self.cwd = self.root / "repo"
+        self.cwd.mkdir()
 
     def tearDown(self) -> None:
         self.tempdir.cleanup()
@@ -35,6 +38,9 @@ class MqttSettingsTests(unittest.TestCase):
     def test_defaults_are_lan_broker(self) -> None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("AKI_")}
         env["AKI_CONFIG"] = str(self.state)
+        env["AKI_CWD"] = str(self.cwd)
+        env["HOME"] = str(self.root)
+        env["XDG_RUNTIME_DIR"] = str(self.root / "run")
         with mock.patch.dict(os.environ, env, clear=True):
             config = build_config_from_env()
         self.assertEqual(config.mqtt_host, DEFAULT_MQTT_HOST)
@@ -50,6 +56,9 @@ class MqttSettingsTests(unittest.TestCase):
         env.update(
             {
                 "AKI_CONFIG": str(self.state),
+                "AKI_CWD": str(self.cwd),
+                "HOME": str(self.root),
+                "XDG_RUNTIME_DIR": str(self.root / "run"),
                 "AKI_MQTT_HOST": "env.example",
                 "AKI_MQTT_PORT": "1999",
             }

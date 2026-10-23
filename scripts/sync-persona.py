@@ -291,7 +291,7 @@ def main(argv: list[str] | None = None) -> int:
         for path in source.rglob("*")
         if path.is_file() and path.relative_to(source).as_posix() not in ALLOWLIST
     ]
-    metadata = {"README.md", "MANIFEST.json", USERNAME_FILE}
+    metadata = {"README.md", "MANIFEST.json", USERNAME_FILE, "identity.json"}
     unexpected = sorted(rel for rel in extras if rel not in metadata)
     private = [
         rel for rel in unexpected if rel == "human.md" or rel.startswith("profile/")

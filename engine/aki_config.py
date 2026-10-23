@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from engine.member_profile import truncate_member_description
+
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 DEFAULT_PROFILE = "aki"
 PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
@@ -607,11 +609,15 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
     )
     channel_name = parser.get("channel", "name", fallback="").strip()
     channel_id = parser.get("channel", "id", fallback="").strip() or agent_id
-    channel_description = parser.get("channel", "description", fallback="").strip()
+    channel_description = truncate_member_description(
+        parser.get("channel", "description", fallback="").strip()
+    )
     if not channel_name or not channel_description:
         agent_name, agent_description = read_agent_identity(agent_id)
         channel_name = channel_name or agent_name
-        channel_description = channel_description or agent_description
+        channel_description = channel_description or truncate_member_description(
+            agent_description
+        )
     aliases = _list(parser.get("channel", "aliases", fallback=""))
     if channel_name and channel_name not in aliases:
         aliases = (channel_name, *aliases)
@@ -712,6 +718,21 @@ def set_key(path: Path, section: str, key: str, value: str) -> None:
         remove_until += 1
     lines[key_at:remove_until] = new_value_lines
     atomic_write(path, "\n".join(lines) + "\n")
+
+
+def sync_channel_identity(
+    path: Path,
+    *,
+    member_id: str,
+    name: str,
+    aliases: tuple[str, ...] | list[str],
+) -> None:
+    """Mirror an authoritative identity manifest into ``[channel]``."""
+    if not path.is_file():
+        return
+    set_key(path, "channel", "id", member_id)
+    set_key(path, "channel", "name", name)
+    set_key(path, "channel", "aliases", ",".join(str(item) for item in aliases))
 
 
 def read_writable(path: Path) -> tuple[int, tuple[str, ...]]:

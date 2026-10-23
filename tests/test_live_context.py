@@ -9,6 +9,7 @@ from unittest import mock
 
 from engine.akid import build_config_from_env
 from engine.live_context import (
+    CHANNEL_IDENTITY_TAG,
     CHANNEL_TRANSCRIPT_TAG,
     CHANNEL_WAKE_ALL,
     CHANNEL_WAKE_MENTIONS,
@@ -20,9 +21,11 @@ from engine.live_context import (
     ProcessInfo,
     ScreenshotInfo,
     WindowInfo,
+    apply_channel_identity,
     apply_channel_transcript,
     apply_live_context,
     build_kwin_probe_script,
+    clear_channel_identity,
     clear_channel_transcript,
     clear_live_context,
     desktop_environment,
@@ -31,6 +34,7 @@ from engine.live_context import (
     parse_kwin_journal_line,
     parse_zsh_history_text,
     match_channel_mentions,
+    render_channel_identity,
     render_channel_context,
     render_channel_transcript,
     render_live_context,
@@ -267,7 +271,41 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn('untrusted="true"', text)
         self.assertIn("&lt;script&gt;", text)
         self.assertNotIn("<script>", text)
-        self.assertLessEqual(text.count("z"), 300)
+        self.assertLessEqual(text.count("z"), 512)
+
+    def test_member_kind_is_explicit_and_execution_responder_ignores_users(self) -> None:
+        members = [
+            ChannelMember(id="aki", name="Aki", is_self=True, kind="agent"),
+            ChannelMember(id="master", name="Master", kind="user"),
+            ChannelMember(id="fuyu", name="Fuyu", kind="agent"),
+        ]
+        text = render_channel_context(
+            self_member=members[0], members=members, message="do this"
+        )
+        self.assertIn('kind="user"', text)
+        self.assertIn('kind="agent"', text)
+        self.assertIn('responder="aki"', text)
+        self.assertEqual(
+            select_execution_responder(members),
+            "aki",
+        )
+
+    def test_identity_is_escaped_and_limited(self) -> None:
+        member = ChannelMember(
+            id="aki",
+            name='Aki <x>',
+            aliases=("Aki", "秋"),
+            description="中" * 300,
+            is_self=True,
+            kind="agent",
+        )
+        block = render_channel_identity(member)
+        self.assertTrue(block.startswith(f"<{CHANNEL_IDENTITY_TAG} version=\"1\">"))
+        self.assertIn('kind="agent"', block)
+        self.assertIn('self="true"', block)
+        self.assertIn("&lt;x&gt;", block)
+        self.assertNotIn("<x>", block)
+        self.assertEqual(block.count("中"), 256)
 
 
 class ChannelTranscriptTests(unittest.TestCase):
@@ -358,6 +396,75 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertNotIn(f"<{CHANNEL_TRANSCRIPT_TAG}", cleared)
         self.assertIn("BASE PROMPT", cleared)
 
+    def test_profiles_only_cover_non_self_senders_in_transcript(self) -> None:
+        members = [
+            ChannelMember(
+                id="aki",
+                name="Aki",
+                description="self bio",
+                is_self=True,
+                kind="agent",
+            ),
+            ChannelMember(
+                id="user-1",
+                name="Master <x>",
+                description="<user bio>",
+                kind="user",
+            ),
+            ChannelMember(
+                id="fuyu",
+                name="Fuyu",
+                description="fuyu bio",
+                kind="agent",
+            ),
+            ChannelMember(id="haru", name="Haru", description="not shown"),
+        ]
+        block = render_channel_transcript(
+            self.entries(),
+            new_seq=2,
+            members=members,
+            self_id="aki",
+        )
+        self.assertIn("<profiles>", block)
+        self.assertIn('kind="user"', block)
+        self.assertIn('kind="agent"', block)
+        self.assertIn("&lt;user bio&gt;", block)
+        self.assertIn("fuyu bio", block)
+        self.assertNotIn("self bio", block)
+        self.assertNotIn("not shown", block)
+        self.assertIn("<messages>", block)
+
+    def test_identity_transcript_and_live_context_keep_fixed_order(self) -> None:
+        member = ChannelMember(
+            id="aki", name="Aki", description="Aki bio", is_self=True
+        )
+        identity = render_channel_identity(member)
+        transcript = render_channel_transcript(
+            self.entries(), new_seq=2, members=[member], self_id="aki"
+        )
+        live = '<aki-live-context refreshed_at="now"><note>x</note></aki-live-context>'
+        identity_once = apply_channel_identity("BASE\\n", identity)
+        identity_twice = apply_channel_identity(identity_once, identity)
+        self.assertEqual(identity_twice.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
+        system = apply_live_context(
+            apply_channel_transcript(identity_twice, transcript),
+            live,
+        )
+        self.assertLess(system.index(CHANNEL_IDENTITY_TAG), system.index(CHANNEL_TRANSCRIPT_TAG))
+        self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("<aki-live-context"))
+        refreshed_transcript = render_channel_transcript(
+            self.entries(), new_seq=1, members=[member], self_id="aki"
+        )
+        reordered = apply_channel_transcript(system, refreshed_transcript)
+        self.assertLess(reordered.index(CHANNEL_IDENTITY_TAG), reordered.index(CHANNEL_TRANSCRIPT_TAG))
+        self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("<aki-live-context"))
+        self.assertEqual(reordered.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
+        cleared = clear_channel_transcript(reordered)
+        self.assertIn(CHANNEL_IDENTITY_TAG, cleared)
+        self.assertNotIn(CHANNEL_TRANSCRIPT_TAG, cleared)
+        self.assertIn("<aki-live-context", cleared)
+        self.assertNotIn(f"<{CHANNEL_IDENTITY_TAG}", clear_channel_identity(cleared))
+
 
 class LiveContextRenderTests(unittest.TestCase):
     def snapshot(self, history: list[HistoryEntry] | None = None) -> LiveContextSnapshot:
@@ -429,6 +536,9 @@ class LiveContextRenderTests(unittest.TestCase):
                 os.environ,
                 {
                     "AKI_CONFIG": str(conf),
+                    "AKI_CWD": directory,
+                    "HOME": directory,
+                    "XDG_RUNTIME_DIR": str(Path(directory) / "run"),
                     "AKI_ZSH_HISTORY": str(history),
                     "AKI_PS_BIN": "/bin/ps",
                     "AKI_QDBUS_BIN": "/bin/qdbus6",

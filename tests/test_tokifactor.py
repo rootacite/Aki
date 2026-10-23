@@ -134,6 +134,8 @@ class TokifactorWireTests(unittest.TestCase):
             "kind": "status",
             "agent": "aki",
             "agentName": "Aki",
+            "memberKind": "agent",
+            "description": "Aki bio",
             "model": "aki/deepseek-flash",
             "reasoning": "low",
             "capabilities": "approvals,history",

@@ -45,6 +45,7 @@ COMMANDS = {
     "mqtt",
     "mcp",
     "avatar",
+    "identity",
     "reset",
     "username",
     "set-username",
@@ -61,7 +62,7 @@ ALL_COMMANDS = COMMANDS | SERVICE_COMMANDS
 
 HELP_TEXT = (
     "usage: akictl [--profile NAME] [profile] <command> [options]\n"
-    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|reset|username|set-username|recompile|compact|help] [options]\n"
+    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|identity|reset|username|set-username|recompile|compact|help] [options]\n"
     "\n"
     "  akictl <profile> up|down|restart|status|logs   manage one profile service\n"
     "  akictl profiles            list ~/.aki profiles and service state\n"
@@ -87,6 +88,8 @@ HELP_TEXT = (
     "  akictl reasoning           show reasoning_effort (default low)\n"
     "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
     "  akictl avatar              show Aki's avatar asset status\n"
+    "  akictl identity show       show this profile's immutable member id\n"
+    "  akictl identity rename N   rename this identity; old labels stay aliases\n"
     "  akictl reset               reset the default conversation (backs up first)\n"
     "  akictl username            show how Aki addresses the user\n"
     "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
@@ -699,6 +702,22 @@ def _history(args: argparse.Namespace, profile: str = "aki") -> int:
         client.close()
 
 
+def _identity(args: argparse.Namespace, profile: str = "aki") -> int:
+    command = getattr(args, "identity_command", None) or "show"
+    if command == "show":
+        return _management(args, "aki.identity.get", profile=profile)
+    if command == "rename":
+        name = getattr(args, "name", "").strip()
+        if not name:
+            print("akictl identity rename: name required", file=sys.stderr)
+            return 2
+        return _management(
+            args, "aki.identity.rename", {"name": name}, profile=profile
+        )
+    print(f"unknown identity command: {command}", file=sys.stderr)
+    return 2
+
+
 def _memory(args: argparse.Namespace, profile: str = "aki") -> int:
     socket_path = _socket_from(args, profile)
     try:
@@ -946,6 +965,11 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(prog="akictl avatar")
     _add_common(parser)
     parsers["avatar"] = parser
+    parser = argparse.ArgumentParser(prog="akictl identity")
+    _add_common(parser)
+    parser.add_argument("identity_command", nargs="?", choices=("show", "rename"), default="show")
+    parser.add_argument("name", nargs="?")
+    parsers["identity"] = parser
     parser = argparse.ArgumentParser(
         prog="akictl reset",
         description="Reset the default conversation (backs up the old transcript first)",
@@ -1111,6 +1135,8 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return _model(args, profile)
     if command == "avatar":
         return _management(args, "aki.avatar.status", profile=profile)
+    if command == "identity":
+        return _identity(args, profile)
     if command == "reset":
         return _management(args, "aki.conversation.reset", profile=profile)
     if command == "username":
