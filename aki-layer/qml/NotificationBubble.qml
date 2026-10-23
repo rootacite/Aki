@@ -9,16 +9,23 @@ Item {
     property bool blocksInput: true
     property bool hovered: false
     property bool dismissing: false
+    property bool collapsing: false
     property bool globalPaused: false
+    property bool activeNotification: true
+    property bool autoDismiss: true
+    property bool showDismiss: false
+    property bool seen: false
     property int defaultLifetimeMs: 15000
     property int minimumRemainingMs: 5000
     property int remainingMs: defaultLifetimeMs
     property string messageText: ""
+    property string timeText: ""
     property string character: "Aki"
     property var theme: Themes.get(character)
     property var stack: null
 
     signal dismissRequested()
+    signal collapseRequested()
     signal hoverChanged(bool hovered)
 
     width: 460
@@ -29,6 +36,7 @@ Item {
     transform: Translate {
         id: slide
         x: 28
+        y: 0
     }
 
     Behavior on scale {
@@ -128,6 +136,29 @@ Item {
                 }
 
                 Item { Layout.fillWidth: true }
+
+                Text {
+                    Layout.alignment: Qt.AlignVCenter
+                    text: bubble.timeText
+                    color: bubble.theme.accent
+                    opacity: 0.62
+                    font.pixelSize: 12
+                }
+
+                Text {
+                    Layout.alignment: Qt.AlignVCenter
+                    Layout.preferredWidth: visible ? 16 : 0
+                    visible: bubble.showDismiss
+                    text: "×"
+                    color: bubble.theme.accent
+                    opacity: 0.58
+                    font.pixelSize: 16
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: bubble.dismiss()
+                    }
+                }
             }
 
             Text {
@@ -146,6 +177,10 @@ Item {
         id: hoverHandler
         onHoveredChanged: {
             bubble.hovered = hovered
+            if (!bubble.activeNotification)
+                return
+            if (hovered)
+                bubble.seen = true
             bubble.hoverChanged(hovered)
         }
     }
@@ -153,16 +188,21 @@ Item {
     Timer {
         interval: 100
         repeat: true
-        running: !bubble.globalPaused && !bubble.dismissing
+        running: bubble.activeNotification && bubble.autoDismiss
+                 && !bubble.globalPaused && !bubble.dismissing && !bubble.collapsing
         onTriggered: {
             bubble.remainingMs = Math.max(0, bubble.remainingMs - interval)
-            if (bubble.remainingMs <= 0)
-                bubble.dismiss()
+            if (bubble.remainingMs <= 0) {
+                if (bubble.seen)
+                    bubble.dismiss()
+                else
+                    bubble.collapse()
+            }
         }
     }
 
     onGlobalPausedChanged: {
-        if (globalPaused)
+        if (activeNotification && autoDismiss && globalPaused)
             remainingMs = Math.max(remainingMs, minimumRemainingMs)
     }
 
@@ -177,18 +217,33 @@ Item {
         id: exitAnimation
         NumberAnimation { target: bubble; property: "opacity"; to: 0; duration: 180; easing.type: Easing.InCubic }
         NumberAnimation { target: slide; property: "x"; to: 20; duration: 180; easing.type: Easing.InCubic }
+        NumberAnimation { target: slide; property: "y"; to: -6; duration: 180; easing.type: Easing.InCubic }
         onFinished: bubble.dismissRequested()
     }
 
+    ParallelAnimation {
+        id: collapseAnimation
+        NumberAnimation { target: bubble; property: "opacity"; to: 0; duration: 180; easing.type: Easing.InCubic }
+        NumberAnimation { target: slide; property: "y"; to: -18; duration: 200; easing.type: Easing.InCubic }
+        onFinished: bubble.collapseRequested()
+    }
+
     function dismiss() {
-        if (dismissing)
+        if (dismissing || collapsing)
             return
         dismissing = true
         exitAnimation.start()
     }
 
+    function collapse() {
+        if (dismissing || collapsing)
+            return
+        collapsing = true
+        collapseAnimation.start()
+    }
+
     Component.onCompleted: {
-        if (globalPaused)
+        if (activeNotification && autoDismiss && globalPaused)
             remainingMs = Math.max(remainingMs, minimumRemainingMs)
         entryAnimation.start()
         if (stack)

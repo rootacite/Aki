@@ -310,6 +310,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   测试 `org.freedesktop.Notifications`。
 - 通知气泡由 `aki-layer/qml/BubbleStack.qml` 和 `NotificationBubble.qml` 实现：右上角向下
   堆叠，默认 15 秒；鼠标悬停任意气泡时全部气泡暂停计时，并把剩余时间提升到至少 5 秒。
+  未被指针划过的气泡到期后整体收出屏幕上边缘之外，不保留汇总条，也不会直接消失；上边缘
+  只露出气泡的细边，多条错过消息最多叠成 3 层卡片边缘。指针靠近上边缘时气泡本身自动滑回，
+  移开后重新收出，每条错过消息自带关闭按钮。主动气泡和错过消息都显示到达时间。
   角色主题定义在 `qml/Themes.js`：Aki 粉色秋叶、Fuyu 浅蓝雪花、Haru 翠绿画笔/耳机、
   Natsu 红色网格/几何。
 - `aki-layer` 在 `$XDG_RUNTIME_DIR/aki-layer.sock` 提供本地控制通道：每行文本生成一个

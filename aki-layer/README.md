@@ -12,7 +12,15 @@ else pass through to desktop icons and other windows below.
 
 The frontend also includes notification bubbles in the top-right corner:
 
-- 15 second lifetime by default.
+- 15 second lifetime by default. A bubble the pointer never touched retracts
+  above the top screen edge instead of disappearing. There is no summary bar:
+  the visible affordance is a thin card edge, stacked up to three layers for
+  multiple missed messages.
+- Moving the pointer near the top edge pulls the missed bubbles back in;
+  moving away retracts them again. Each missed bubble has its own small close
+  button, and the drawer keeps at most 50 entries.
+- Every bubble shows its arrival time (`HH:mm`, or `MM-DD HH:mm` for older
+  missed messages).
 - Multiple bubbles stack downward.
 - Hovering any bubble pauses every bubble's countdown and raises each remaining
   lifetime to at least 5 seconds.
@@ -43,9 +51,11 @@ plain line defaults to Aki; use JSON for another character:
 {"character": "Fuyu", "text": "代码我看过了。"}
 ```
 
-The server acknowledges each request with `queued <id>`; when that bubble
-finishes its lifetime, it writes `dismissed <id>` back to every connected
-client.
+The server acknowledges each request with `queued <id>`. It writes
+`dismissed <id>` back to every connected client when a seen bubble finishes
+its lifetime, when a missed entry is evicted or cleared, or when the layer is
+explicitly dismissed. An untouched bubble that folds into the missed rail is
+kept and is not reported as dismissed until the user clears it.
 
 `akid` writes final chat messages to this socket automatically; notification
 bubbles are not exposed to the model as a tool.
