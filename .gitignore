@@ -19,3 +19,6 @@ userdata2/identity.json
 
 # OS
 .DS_Store
+
+# aki-layer build output
+aki-layer/build/

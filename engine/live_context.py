@@ -227,6 +227,83 @@ def strip_user_wake_target(text: str, user_name: str) -> tuple[str, bool]:
     return text[match.end() :].lstrip(), True
 
 
+def _non_wake_alias_map(
+    members: list[ChannelMember] | tuple[ChannelMember, ...],
+) -> list[tuple[str, str]]:
+    aliases: list[tuple[str, str]] = []
+    for member in members:
+        if normalize_member_kind(member.kind) != MEMBER_KIND_AGENT:
+            continue
+        seen: set[str] = set()
+        for alias in (member.name, *member.aliases):
+            normalized = alias.strip()
+            key = canonical_name(normalized)
+            if not normalized or key in seen:
+                continue
+            seen.add(key)
+            aliases.append((normalized, member.id))
+    aliases.sort(key=lambda item: len(item[0]), reverse=True)
+    return aliases
+
+
+def _iter_non_wake_matches(
+    text: str, members: list[ChannelMember] | tuple[ChannelMember, ...]
+) -> list[tuple[int, int, str]]:
+    marker_text = _EMAIL_RE.sub(lambda match: " " * len(match.group(0)), text)
+    aliases = _non_wake_alias_map(members)
+    if not aliases:
+        return []
+    lookup = {canonical_name(alias): member_id for alias, member_id in aliases}
+    pattern = re.compile(
+        r"\^(" + "|".join(re.escape(alias) for alias, _member_id in aliases) + r")"
+        r"(?![A-Za-z0-9_])",
+        re.IGNORECASE,
+    )
+    matches: list[tuple[int, int, str]] = []
+    matched_ends: set[int] = set()
+    last_end = 0
+    for match in pattern.finditer(marker_text):
+        start, end = match.span()
+        if start < last_end:
+            continue
+        previous = marker_text[start - 1] if start > 0 else ""
+        if (
+            previous.isascii()
+            and (previous.isalnum() or previous == "_")
+            and start not in matched_ends
+        ):
+            continue
+        member_id = lookup.get(canonical_name(match.group(1)))
+        if not member_id:
+            continue
+        matches.append((start, end, member_id))
+        matched_ends.add(end)
+        last_end = end
+    return matches
+
+
+def match_channel_non_wakes(
+    text: str, members: list[ChannelMember] | tuple[ChannelMember, ...]
+) -> set[str]:
+    """Return member ids excluded by ``^alias`` markers."""
+    return {member_id for _start, _end, member_id in _iter_non_wake_matches(text, members)}
+
+
+def strip_channel_non_wakes(
+    text: str, members: list[ChannelMember] | tuple[ChannelMember, ...]
+) -> tuple[str, set[str]]:
+    """Remove ``^alias`` markers and return the excluded member ids."""
+    matches = _iter_non_wake_matches(text, members)
+    if not matches:
+        return text, set()
+    excluded = {member_id for _start, _end, member_id in matches}
+    cleaned = text
+    for start, end, _member_id in sorted(matches, reverse=True):
+        cleaned = cleaned[:start] + cleaned[end:]
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    return cleaned.strip(), excluded
+
+
 def route_channel_reply(
     text: str,
     members: list[ChannelMember] | tuple[ChannelMember, ...],
@@ -234,16 +311,30 @@ def route_channel_reply(
     user_name: str,
 ) -> ChannelReplyRoute:
     """Resolve which agents a final channel reply should wake."""
-    cleaned, user_only = strip_user_wake_target(text, user_name)
+    cleaned, excluded = strip_channel_non_wakes(text, members)
+    cleaned, user_only = strip_user_wake_target(cleaned, user_name)
     mentions = match_channel_mentions(cleaned, members)
     if mentions:
         return ChannelReplyRoute(
             text=cleaned,
             wake=CHANNEL_WAKE_MENTIONS,
-            target_ids=tuple(sorted(mentions)),
+            target_ids=tuple(sorted(mentions - excluded)),
         )
     if user_only:
         return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_USER)
+    if excluded:
+        eligible = {
+            member.id
+            for member in members
+            if member.id
+            and not member.is_self
+            and normalize_member_kind(member.kind) == MEMBER_KIND_AGENT
+        }
+        return ChannelReplyRoute(
+            text=cleaned,
+            wake=CHANNEL_WAKE_MENTIONS,
+            target_ids=tuple(sorted(eligible - excluded)),
+        )
     return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_ALL)
 
 

@@ -34,12 +34,14 @@ from engine.live_context import (
     parse_kwin_journal_line,
     parse_zsh_history_text,
     match_channel_mentions,
+    match_channel_non_wakes,
     render_channel_identity,
     render_channel_context,
     render_channel_transcript,
     render_live_context,
     route_channel_reply,
     select_execution_responder,
+    strip_channel_non_wakes,
 )
 
 
@@ -241,6 +243,41 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertEqual(not_the_user.wake, CHANNEL_WAKE_ALL)
         self.assertIn("@用户", not_the_user.text)
+
+    def test_non_wake_markers_exclude_members_and_are_stripped(self) -> None:
+        members = self.members()
+        route = route_channel_reply(
+            "大家都看一下。^Aki", members, user_name="Master"
+        )
+        self.assertEqual(route.text, "大家都看一下。")
+        self.assertEqual(route.wake, CHANNEL_WAKE_MENTIONS)
+        self.assertEqual(route.target_ids, ("fuyu",))
+
+        override = route_channel_reply(
+            "@Fuyu 这条给你。^fuyu", members, user_name="Master"
+        )
+        self.assertEqual(override.text, "@Fuyu 这条给你。")
+        self.assertEqual(override.wake, CHANNEL_WAKE_MENTIONS)
+        self.assertEqual(override.target_ids, ())
+
+        user_only = route_channel_reply(
+            "@Master 只提醒你。^Aki", members, user_name="Master"
+        )
+        self.assertEqual(user_only.text, "只提醒你。")
+        self.assertEqual(user_only.wake, CHANNEL_WAKE_USER)
+
+    def test_non_wake_marker_requires_agent_alias_and_boundary(self) -> None:
+        members = self.members()
+        self.assertEqual(match_channel_non_wakes("^Aki", members), {"aki"})
+        self.assertEqual(match_channel_non_wakes("2^3", members), set())
+        self.assertEqual(match_channel_non_wakes("foo^Aki", members), set())
+        self.assertEqual(match_channel_non_wakes("^unknown", members), set())
+        cleaned, excluded = strip_channel_non_wakes("好的 ^AKI 收到", members)
+        self.assertEqual(cleaned, "好的 收到")
+        self.assertEqual(excluded, {"aki"})
+        cleaned, excluded = strip_channel_non_wakes("收到^Aki^Fuyu", members)
+        self.assertEqual(cleaned, "收到")
+        self.assertEqual(excluded, {"aki", "fuyu"})
 
     def test_agent_initiation_budget_is_exposed_and_zero_blocks_replies(self) -> None:
         members = self.members()

@@ -169,6 +169,7 @@ def render_execution_lock_mod() -> str:
                 "tokifactor_send_image",
                 "camera_take_photo",
                 "desktop_take_screenshot",
+                "wait_other",
             }
         )
     )

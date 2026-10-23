@@ -25,6 +25,7 @@ from engine.akid import (
     unique_capture_path,
 )
 from engine.letta_process import LettaProcess
+from engine.execution_policy import WAIT_OTHER_TOOL
 from engine.live_context import WindowInfo, estimate_tokens
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from engine.tokifactor import TextEnvelope
@@ -120,6 +121,18 @@ class FakeChannel:
             for event in self.events_of("turn")
             if event.get("phase") == "final"
         ]
+
+
+class FakeLayerNotifier:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str]] = []
+
+    def notify(self, character: str, text: str) -> bool:
+        self.messages.append((character, text))
+        return True
+
+    async def stop(self) -> None:
+        return
 
 
 class AsyncClient:
@@ -277,6 +290,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         mqtt_host: str = "192.168.3.1",
         mqtt_port: int = 1883,
         mqtt_state: Path | None = None,
+        channel_wait_for: tuple[str, ...] = (),
         camera_enabled: bool = True,
         camera_require_approval: bool = True,
         camera_device: str = "/dev/video0",
@@ -327,6 +341,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             mqtt_host=mqtt_host,
             mqtt_port=mqtt_port,
             mqtt_state=mqtt_state,
+            channel_wait_for=channel_wait_for,
             camera_enabled=camera_enabled,
             camera_require_approval=camera_require_approval,
             camera_device=camera_device,
@@ -406,6 +421,57 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
         history = await client.call("aki.chat.history", {"limit": 10})
         self.assertEqual(history["messages"][0]["id"], "m1")
+
+    async def test_local_turn_notifies_layer_bubble(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        notifier = FakeLayerNotifier()
+        self.server._layer_notifier = notifier
+        client = await self.client()
+        await client.hello()
+        result = await client.call("aki.chat.send", {"message": "hello"})
+        events = await client.collect_turn(result["turn_id"])
+        final = next(event for event in events if event["type"] == "assistant_message")
+        self.assertEqual(notifier.messages, [("Aki", final["data"]["content"])])
+
+    async def test_channel_agent_final_notifies_layer_bubble(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        notifier = FakeLayerNotifier()
+        server._layer_notifier = notifier
+        member_id = legacy_member_id("Fuyu")
+        server._channel_members[member_id] = {
+            "id": member_id,
+            "name": "Fuyu",
+            "aliases": ["Fuyu", "冬"],
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {},
+        }
+        await server._on_channel_text(
+            "Fuyu",
+            member_id,
+            "代码我看过了。",
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "final",
+                "turnId": "turn-fuyu",
+                "wake": "user",
+            },
+            message_id="message-fuyu",
+        )
+        self.assertEqual(notifier.messages, [("Fuyu", "代码我看过了。")])
+
+    async def test_channel_final_publish_notifies_layer_bubble(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        notifier = FakeLayerNotifier()
+        server._layer_notifier = notifier
+        server.channel_conn._ensure_worker()
+        server.channel_conn._enqueue_turn("turn-final", 1, "final", "final reply")
+        await wait_until(lambda: bool(notifier.messages))
+        self.assertEqual(notifier.messages, [("Aki", "final reply")])
+        self.assertEqual(fake_channel.final_texts(), ["final reply"])
 
     async def test_internal_task_notification_result_does_not_end_turn(self) -> None:
         await self.start_server()
@@ -1487,6 +1553,346 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         server._queue_unhandled_busy_messages(busy_turn)
         self.assertEqual(server.queue, [])
         server.active = None
+
+    async def test_wait_other_is_registered_only_when_configured(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        names = {str(tool.get("name") or "") for tool in server._external_tools()}
+        self.assertIn(WAIT_OTHER_TOOL, names)
+
+        await server.stop()
+        self.server = None
+        plain = await self.start_server(channel=FakeChannel())
+        plain_names = {str(tool.get("name") or "") for tool in plain._external_tools()}
+        self.assertNotIn(WAIT_OTHER_TOOL, plain_names)
+
+    async def test_wait_other_tool_events_are_hidden(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        turn = Turn(
+            turn_id="hidden-wait",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"aki"}),
+            state="running",
+        )
+        server.active = turn
+        await server._emit_tool_call_once(turn, "call-1", WAIT_OTHER_TOOL, {})
+        await server._emit_tool_result_once(
+            turn, "call-1", {"status": "success", "tool_return": "hidden"}
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(fake_channel.events, [])
+        self.assertEqual(turn.tool_names["call-1"], WAIT_OTHER_TOOL)
+        server.active = None
+
+    async def test_wait_other_returns_target_final_after_turn_end(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        turn = Turn(
+            turn_id="wait-final",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"aki"}),
+            state="running",
+        )
+        server.active = turn
+        now = int(time.time() * 1000)
+        server._observe_channel_turn_event(
+            "aki",
+            {"schema": "akid.v1", "kind": "turn", "phase": "started", "turnId": "a1"},
+            "Aki is working…",
+            sent_at=now,
+        )
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ), mock.patch("engine.akid.WAIT_OTHER_POLL_INTERVAL", 0.01):
+            task = asyncio.create_task(
+                server._handle_wait_other_tool(turn, "wait-call")
+            )
+            await asyncio.sleep(0.02)
+            server._observe_channel_turn_event(
+                "aki",
+                {"schema": "akid.v1", "kind": "turn", "phase": "final", "turnId": "a1"},
+                "Aki 的完整回复",
+                sent_at=now + 1,
+            )
+            server._observe_channel_turn_event(
+                "aki",
+                {"schema": "akid.v1", "kind": "turn", "phase": "ended", "turnId": "a1"},
+                "",
+                sent_at=now + 2,
+            )
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("[Aki] status=completed", captured[0])
+        self.assertIn("Aki 的完整回复", captured[0])
+        self.assertIn("aki", turn.waited_agent_ids)
+        server.active = None
+
+    async def test_wait_other_reports_offline_target(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        turn = Turn(
+            turn_id="wait-offline",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"aki"}),
+            state="running",
+        )
+        server.active = turn
+        now = int(time.time() * 1000)
+        server._observe_channel_turn_event(
+            "aki",
+            {"schema": "akid.v1", "kind": "turn", "phase": "started", "turnId": "a1"},
+            "Aki is working…",
+            sent_at=now,
+        )
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ), mock.patch("engine.akid.WAIT_OTHER_POLL_INTERVAL", 0.01):
+            task = asyncio.create_task(
+                server._handle_wait_other_tool(turn, "wait-call")
+            )
+            await asyncio.sleep(0.02)
+            server._channel_members.pop("aki", None)
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertIn("[Aki] status=offline", captured[0])
+        server.active = None
+
+    async def test_wait_other_idle_target_returns_after_start_grace(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        turn = Turn(
+            turn_id="wait-idle",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"aki"}),
+            state="running",
+        )
+        server.active = turn
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ), mock.patch("engine.akid.WAIT_OTHER_START_GRACE", 0.05), mock.patch(
+            "engine.akid.WAIT_OTHER_POLL_INTERVAL", 0.01
+        ):
+            await asyncio.wait_for(
+                server._handle_wait_other_tool(turn, "wait-call"), timeout=2.0
+            )
+        self.assertIn("[Aki] status=idle", captured[0])
+        server.active = None
+
+    async def test_wait_other_skips_targets_not_in_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, channel_wait_for=("Aki",)
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        turn = Turn(
+            turn_id="wait-skip",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"fuyu"}),
+            state="running",
+        )
+        server.active = turn
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            await server._handle_wait_other_tool(turn, "wait-call")
+        self.assertIn("WAIT_OTHER_SKIPPED", captured[0])
+        server.active = None
+
+    async def test_waited_agent_message_is_not_requeued(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        turn = Turn(
+            turn_id="waited-no-requeue",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            state="running",
+            waited_agent_ids={"aki"},
+        )
+        server.active = turn
+        turn.busy_messages.append(
+            {
+                "sender": "Aki",
+                "sender_id": "aki",
+                "text": "已由 wait_other 返回",
+                "seq": 1,
+                "origin_is_agent": True,
+                "tool_results_at_arrival": 0,
+                "pending_tool_results_at_arrival": 0,
+                "participants": frozenset({"aki"}),
+            }
+        )
+        server._queue_unhandled_busy_messages(turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_empty_turn_end_events_update_wait_completion_state(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        now = int(time.time() * 1000)
+        member_id = server._member_key({}, "Fuyu", "fuyu")
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "Aki final",
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "final",
+                "turnId": "fuyu-turn",
+            },
+            sent_at=now,
+        )
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "ended",
+                "turnId": "fuyu-turn",
+            },
+            sent_at=now + 1,
+        )
+        state = server._channel_agent_states[member_id]
+        self.assertEqual(state.last_completion_phase, "ended")
+        self.assertEqual(state.last_final_text, "Aki final")
+        self.assertGreater(state.last_completion_seq, 0)
+
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "no_reply",
+                "turnId": "fuyu-turn-2",
+            },
+            sent_at=now + 2,
+        )
+        state = server._channel_agent_states[member_id]
+        self.assertEqual(state.last_completion_phase, "no_reply")
+        self.assertEqual(state.last_final_text, "")
+
+    async def test_non_wake_marker_controls_final_wake_scope(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._channel_members["fuyu"] = {
+            "id": "fuyu",
+            "name": "Fuyu",
+            "aliases": ("Fuyu",),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+        }
+        state = ChannelTurnState(text="大家都看一下。^Aki")
+        server.channel_conn._flush_progress(
+            "turn-non-wake", 1, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 1)
+        event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(event["text"], "大家都看一下。")
+        self.assertEqual(event["wake"], "mentions")
+        self.assertEqual(event["wakeIds"], "fuyu")
+
+        state = ChannelTurnState(text="@Fuyu 这条给你。^Fuyu")
+        server.channel_conn._flush_progress(
+            "turn-non-wake-empty", 2, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 2)
+        event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(event["text"], "@Fuyu 这条给你。")
+        self.assertEqual(event["wake"], "mentions")
+        self.assertNotIn("wakeIds", event)
 
     async def test_channel_prompt_omits_agent_message_body(self) -> None:
         await self.start_server()

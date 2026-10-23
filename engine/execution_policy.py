@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 EXECUTION_LOCK_TAG = "aki-execution-lock"
+WAIT_OTHER_TOOL = "wait_other"
 
 READ_ONLY_TOOLS = frozenset(
     {
@@ -24,6 +25,7 @@ READ_ONLY_TOOLS = frozenset(
         "AskUserQuestionAsync",
         "desktop_take_screenshot",
         "camera_take_photo",
+        WAIT_OTHER_TOOL,
     }
 )
 

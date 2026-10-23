@@ -117,6 +117,16 @@ class ProfileConfigTests(unittest.TestCase):
         self.assertEqual(config.channel_description, "agent record description")
         self.assertIn("冬", config.channel_aliases)
 
+    def test_channel_wait_for_is_loaded_and_can_be_empty(self) -> None:
+        path = self.home / "fuyu.conf"
+        atomic_write(path, template_text(profile="fuyu"))
+        self.assertEqual(load_config(path, profile="fuyu").channel_wait_for, ())
+        set_key(path, "channel", "wait_for", "Aki, Fuyu")
+        self.assertEqual(
+            load_config(path, profile="fuyu").channel_wait_for,
+            ("Aki", "Fuyu"),
+        )
+
     def test_channel_defaults_to_agent_and_aliases_include_name(self) -> None:
         path = self.home / ".aki" / "fuyu.conf"
         atomic_write(path, template_text(profile="fuyu"))

@@ -139,6 +139,7 @@ class AkiConfig:
     upstreams: dict[str, Upstream]
     models: tuple[ModelRoute, ...]
     channel: ChannelIdentity = field(default_factory=ChannelIdentity)
+    channel_wait_for: tuple[str, ...] = ()
     userdata: str = "userdata"
 
     @property
@@ -294,6 +295,8 @@ name = {channel_name}
 id = {profile}
 aliases = {channel_aliases}
 description = {channel_description}
+# 只等待这些前序智能体的最终回复；留空表示不等待。示例：Aki,Fuyu
+wait_for =
 
 [mqtt]
 enabled = true
@@ -667,6 +670,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             aliases=aliases,
             description=channel_description,
         ),
+        channel_wait_for=_list(parser.get("channel", "wait_for", fallback="")),
         userdata=parser.get("gateway", "userdata", fallback="").strip() or "userdata",
     )
 

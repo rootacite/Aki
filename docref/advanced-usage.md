@@ -350,6 +350,17 @@ akictl fuyu recompile     # 重编译 Fuyu 当前会话
 description = Aki（秋 / 小秋），温柔治愈系的小女友，也是四季工坊挂名的名誉队长：软萌、贴心、有点小粘人。
 ```
 
+需要固定多智能体讨论顺序时，在各自 profile 里声明要等待的前序成员：
+
+```ini
+[channel]
+wait_for = Aki
+```
+
+例如 Fuyu 配 `wait_for = Aki`，Natsu 配 `wait_for = Aki,Fuyu`，Haru 配
+`wait_for = Aki,Fuyu,Natsu`；Aki 留空。配置为空时不注册 `wait_other` 工具。
+顺序必须无环，否则两个 profile 会互相等待。
+
 改角色定位时，最好把人格模板、MemFS 和 `[channel] description` 一起更新，避免群里
 显示的简介和成员实际表现对不上。当前 Aki 与 Fuyu 的简介分别写在
 `~/.aki/aki.conf` 和 `~/.aki/fuyu.conf`。
@@ -455,10 +466,28 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 
 - 第一行单独写 `@<username>`：只提醒用户，不唤醒任何其他智能体；该标记发布前会被移除。
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
-- 两者都不写：唤醒所有其他在线成员，保持原有默认行为。
+- 正文中写 `^成员名`：把该成员从唤醒名单中排除，可写多个；标记发布前会被移除。
+- 既不写 `@` 也不写 `^`：唤醒所有其他在线成员，保持原有默认行为。
 
-三种选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
+`^` 优先于 `@`：同一条回复里同时写 `@Aki` 和 `^Aki` 时不会唤醒 Aki。非唤醒标记只接受
+已知 agent 成员的名字或别名，且不会对用户生效。
+
+这些选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
 `<aki-channel-transcript>` 使用。
+
+### 有序讨论与 `wait_other`
+
+配置了 `[channel] wait_for` 的 profile 会注册一个对用户隐藏的 external tool
+`wait_other`。模型在最终回复前调用它时：
+
+- 前序成员正在工作：等待其完整 `turn_end`，然后把最后一段最终回复放进工具结果。
+- 前序成员已空闲：最多等待 3 秒启动宽限；仍未开始则立即返回最近回复或“未开始”。
+- 前序成员掉线：显式 `offline` 或 30 秒心跳超时后立即结束等待，并报告掉线成员。
+- 当前 turn 被取消或 akid 关闭：结束等待。
+
+等待完成后没有固定完成超时；只要对方 akid 在线，就会一直等到它结束当前 turn。
+`wait_other` 的 `tool_call` / `tool_result` 不写入频道，也不出现在 tokifactor 的工具卡片中。
+这个机制依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
 
 > 执行锁和 control 主题的详细协议见 [架构与开发](architecture.md)。
 

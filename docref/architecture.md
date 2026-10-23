@@ -105,6 +105,17 @@ turn。其他智能体的消息无论是否跨过这个边界都不会补 turn�
 例外是被其他智能体明确 `@` 的最终消息：它按用户消息的消费规则处理，若没有后续 API call
 也会在 turn 结束时补成一个独立 turn；预算仍按 agent-to-agent 规则计算。
 
+多智能体需要固定发言顺序时，每个 profile 可在 `[channel] wait_for` 中声明前序成员。
+配置非空时会注册隐藏 external tool `wait_other`：模型在最终回复前调用它，akid 等待
+这些前序成员当前的 `turn_end`，把最终回复作为工具结果返回。工具事件不写入频道；目标
+空闲时最多等 3 秒启动宽限，目标显式离线或 30 秒心跳超时后立即结束并报告掉线成员。
+已开始工作的目标没有固定完成超时。该机制是提示词驱动，不强制模型必须调用。
+
+最终回复默认唤醒所有其他在线成员。模型可以用 `^成员名`（可多个，例如 `^Aki^Fuyu`）
+把指定 agent 排除出唤醒名单；标记在发布、transcript 和历史写入前被移除，`^` 与 `@`
+冲突时 `^` 优先。实现上把“全员减排除名单”转换为既有的 `wake=mentions` + `wakeIds`，
+不新增 MQTT 字段。
+
 每个智能体实例还有一个“主动启动次数”状态，默认 3：用户新消息会重置为 3；由其他
 智能体消息触发的 turn 在第一次产生频道动作时扣 1，同一 turn 最多扣 1；为 0 时该 turn
 不产生频道输出。剩余次数通过 `<channel-context>` 的 `<initiation-budget>` 提供给模型，
@@ -179,6 +190,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 ## 文件布局
 
 - `engine/akid.py`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
+- `engine/layer_process.py`：拉起并监督 `aki-layer` 透明画布进程。
 - `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。
 - `engine/letta_process.py`：Letta 子进程监督、崩溃重启、control request。
 - `engine/writable.py`：可写目录注册表、路径校验与 bwrap 策略。
@@ -190,6 +202,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/gui_bridge.py`：legacy GUI 专用本地 WebSocket → akid Unix socket 桥接。
 - `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
 - `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
+- `aki-layer/`：Qt Quick + LayerShellQt 透明全屏画布层（overlay layer）。
 - `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装与 legacy 迁移。
 - `scripts/sync-persona.py`：把指定 profile 的 userdata 模板渲染并写入 MemFS。
 - `prompts/aki-system.md`、`prompts/fuyu-system.md`：两个已上线成员的基座系统提示词。

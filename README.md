@@ -89,6 +89,9 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 - 和 Aki、Fuyu 连续聊天；每位成员都有独立的人格、记忆、模型和工具链。
 - 在 tokifactor 群聊里用 `@成员名` 点名，支持选择性唤醒和主动发言配额。
 - 用 `akictl` 在终端聊天，或用 tokifactor 的桌面 / Android GUI。
+- Aki 的透明桌面画布层（Layer shell overlay + Qt Quick），位于普通窗口之上的最高层。
+- 四季成员的专属通知气泡：Aki 粉色秋叶、Fuyu 浅蓝雪花、Haru 翠绿画笔耳机、Natsu 红色网格几何；
+  右上角堆叠、15 秒生命周期，悬停任意气泡会暂停全部倒计时并保底 5 秒。
 - 人格和长期记忆以 Markdown 保存，可按 profile 备份、同步和恢复。
 - 支持 tokifactor 图片、摄像头、桌面截图、MCP / Tavily 和桌面实况上下文。
 - 危险工具需要发起者批准；可写目录需要手动授权，Letta 运行在 bubblewrap 沙盒里。
