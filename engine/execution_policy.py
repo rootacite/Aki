@@ -6,6 +6,8 @@ import json
 import re
 from typing import Any
 
+from engine.tool_ownership import EXCLUSIVE_TOOL_NAMES, is_exclusive_tool
+
 EXECUTION_LOCK_TAG = "aki-execution-lock"
 WAIT_OTHER_TOOL = "wait_other"
 
@@ -26,6 +28,8 @@ READ_ONLY_TOOLS = frozenset(
         "desktop_take_screenshot",
         "camera_take_photo",
         WAIT_OTHER_TOOL,
+        "aki_schedule_list",
+        "aki_ledger_list",
     }
 )
 
@@ -75,6 +79,10 @@ def is_lock_control_tool(tool_name: str) -> bool:
 
 def requires_execution_lock(tool_name: str) -> bool:
     """Fail closed: every tool not explicitly classified as read-only is gated."""
+    if is_exclusive_tool(tool_name):
+        # Exclusive tools are profile-private state operations authorized by
+        # ownership. They never touch the device-wide execution surface.
+        return False
     return not is_read_only_tool(tool_name) and not is_lock_control_tool(tool_name)
 
 
@@ -84,6 +92,7 @@ def execution_policy_payload() -> dict[str, Any]:
         "read_only_tools": sorted(READ_ONLY_TOOLS),
         "read_only_mcp_tools": sorted(READ_ONLY_MCP_TOOLS),
         "lock_control_tools": sorted(LOCK_CONTROL_TOOLS),
+        "exclusive_tools": sorted(EXCLUSIVE_TOOL_NAMES),
     }
 
 

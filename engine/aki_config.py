@@ -27,6 +27,8 @@ _KNOWN_SECTIONS = {
     "camera",
     "screenshot",
     "live",
+    "schedule",
+    "presence",
     "avatar",
     "proxy",
     "channel",
@@ -141,6 +143,22 @@ class AkiConfig:
     channel: ChannelIdentity = field(default_factory=ChannelIdentity)
     channel_wait_for: tuple[str, ...] = ()
     userdata: str = "userdata"
+    schedule_enabled: bool = True
+    schedule_tick_seconds: int = 15
+    schedule_missed_grace_seconds: int = 600
+    schedule_max_records: int = 256
+    presence_enabled: bool = True
+    presence_session_id: str = ""
+    presence_loginctl_bin: str = "loginctl"
+    presence_poll_seconds: int = 15
+    presence_idle_reset_seconds: int = 300
+    presence_work_warn_seconds: int = 7200
+    presence_work_repeat_seconds: int = 3600
+    presence_night_start: str = "00:30"
+    presence_night_end: str = "05:30"
+    presence_night_history_days: int = 30
+    presence_return_idle_seconds: int = 2700
+    presence_return_debounce_seconds: int = 10
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:
@@ -335,6 +353,27 @@ enabled = true
 budget_tokens = 65536
 timeout = 3
 
+[schedule]
+enabled = true
+tick_seconds = 15
+missed_grace_seconds = 600
+max_records = 256
+
+[presence]
+enabled = true
+# 留空则使用 XDG_SESSION_ID 或 seat0 的活动会话
+session_id =
+loginctl_bin = loginctl
+poll_seconds = 15
+idle_reset_seconds = 300
+work_warn_seconds = 7200
+work_repeat_seconds = 3600
+night_start = 00:30
+night_end = 05:30
+night_history_days = 30
+return_idle_seconds = 2700
+return_debounce_seconds = 10
+
 [avatar]
 path =
 
@@ -471,6 +510,25 @@ def _require(parser: configparser.ConfigParser, section: str, key: str) -> str:
 
 def _int(parser: configparser.ConfigParser, section: str, key: str, *, minimum: int, maximum: int | None = None) -> int:
     raw = _require(parser, section, key).strip()
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ConfigError(f"[{section}] {key} must be an integer") from exc
+    if value < minimum or (maximum is not None and value > maximum):
+        raise ConfigError(f"[{section}] {key} is out of range")
+    return value
+
+
+def _int_or(
+    parser: configparser.ConfigParser,
+    section: str,
+    key: str,
+    default: int,
+    *,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    raw = parser.get(section, key, fallback=str(default)).strip()
     try:
         value = int(raw)
     except ValueError as exc:
@@ -672,6 +730,48 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         ),
         channel_wait_for=_list(parser.get("channel", "wait_for", fallback="")),
         userdata=parser.get("gateway", "userdata", fallback="").strip() or "userdata",
+        schedule_enabled=_bool_or(parser, "schedule", "enabled", True),
+        schedule_tick_seconds=_int_or(
+            parser, "schedule", "tick_seconds", 15, minimum=1, maximum=3600
+        ),
+        schedule_missed_grace_seconds=_int_or(
+            parser, "schedule", "missed_grace_seconds", 600, minimum=0
+        ),
+        schedule_max_records=_int_or(
+            parser, "schedule", "max_records", 256, minimum=1
+        ),
+        presence_enabled=_bool_or(parser, "presence", "enabled", True),
+        presence_session_id=parser.get("presence", "session_id", fallback="").strip(),
+        presence_loginctl_bin=(
+            parser.get("presence", "loginctl_bin", fallback="").strip() or "loginctl"
+        ),
+        presence_poll_seconds=_int_or(
+            parser, "presence", "poll_seconds", 15, minimum=1, maximum=600
+        ),
+        presence_idle_reset_seconds=_int_or(
+            parser, "presence", "idle_reset_seconds", 300, minimum=1
+        ),
+        presence_work_warn_seconds=_int_or(
+            parser, "presence", "work_warn_seconds", 7200, minimum=60
+        ),
+        presence_work_repeat_seconds=_int_or(
+            parser, "presence", "work_repeat_seconds", 3600, minimum=60
+        ),
+        presence_night_start=(
+            parser.get("presence", "night_start", fallback="").strip() or "00:30"
+        ),
+        presence_night_end=(
+            parser.get("presence", "night_end", fallback="").strip() or "05:30"
+        ),
+        presence_night_history_days=_int_or(
+            parser, "presence", "night_history_days", 30, minimum=1
+        ),
+        presence_return_idle_seconds=_int_or(
+            parser, "presence", "return_idle_seconds", 2700, minimum=60
+        ),
+        presence_return_debounce_seconds=_int_or(
+            parser, "presence", "return_debounce_seconds", 10, minimum=0
+        ),
     )
 
 

@@ -255,9 +255,19 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
-- System prompt 固定顺序：`base → core memory → <aki-channel-identity> →
-  <aki-channel-transcript> → <aki-live-context>`。identity 每个 turn 刷新；transcript
-  仅频道 turn 注入，local turn 会清除但保留 identity；live context 始终最后。
+- System prompt 固定顺序：`base → core memory → <aki-tool-ownership> →
+  <aki-channel-identity> → <aki-channel-transcript> → <aki-live-context>`。ownership 与
+  identity 每个 turn 刷新；transcript 仅频道/proactive turn 注入，local turn 会清除但保留
+  ownership/identity；live context 始终最后。
+- 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
+  schema 过滤、Letta ownership mod、akid 运行时校验和 `<aki-tool-ownership>` 提示词共同
+  拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。
+- Aki 状态：`~/.aki/schedules/aki.json`（最多 256 条，10 分钟 missed 宽限）、
+  `~/.aki/ledger/aki.json`（文件 ≤16384 UTF-8 字节，单条正文 ≤1024 字节，FIFO 淘汰）、
+  `~/.aki/presence/aki.json`（工作/深夜/归来触发器状态）。
+- 主动触发器：logind 活动采样；连续工作 2 小时后首次唤醒、之后每小时；00:30–05:30
+  每夜最多一次；空闲 45 分钟后归来唤醒，10 秒防抖且启动/重启后首次过渡抑制。
+  主动提醒走频道 final 输出（`wake=user`）并镜像桌面气泡，不唤醒其他智能体。
 - 长期记忆规则见 MemFS 中的 `memory-policy.md`；普通测试对话不得写入长期记忆。
 
 ## 13. GUI 与信道身份

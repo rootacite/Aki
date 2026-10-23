@@ -21,6 +21,11 @@
 3. **原生性格对齐 (Native Alignment Matching)**
    - 不靠几千字的冗长 Prompt 强行扭曲模型本性。把不同模型的底层性格偏置（例如 Gemini 的细腻高情商、Grok 的犀利进攻性、DeepSeek 的冷酷逻辑性）与角色人设精准绑定，用尽量低的提示词开销，换回更自然的角色感与生产力协同。
 
+4. **专属工具所有权 (Exclusive Tool Ownership)**
+   - 工具 schema 只注册给 owner profile；Letta permission mod、akid 外部工具处理器和系统提示词
+     `<aki-tool-ownership>` 三层拦截错误调用。非 owner 调用会收到包含 owner 名称和 `@Owner`
+     转述建议的错误，而不是执行工具。
+
 ---
 
 ## 设计取向
@@ -67,6 +72,10 @@ Letta permission overlay 会拦截未持锁的非只读工具调用，外部工�
 memberId 字典序最小的在线智能体，由它请用户用有效 `@成员名` 指定执行者。人类成员不参与确认者
 选择。只有一个在线智能体时，无 `@`
 的动作请求可以直接获取锁并执行。其他智能体的 `@` 不能授权非只读执行。
+
+专属工具是例外：它们只操作 owner profile 的私有状态（Aki 的日程、生活账本和跨 profile
+回复预算），由所有权检查授权，不走整机执行锁。这样用户不点名执行者时，owner 仍能响应自己
+的专属任务，而其他成员必须保持沉默或 `@Owner` 转述。
 
 最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
@@ -190,6 +199,11 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 ## 文件布局
 
 - `engine/akid.py`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
+- `engine/tool_ownership.py`：专属工具注册表、owner 校验和 `<aki-tool-ownership>` 渲染。
+- `engine/schedule_store.py`：Aki 日程持久化、重复规则和 missed 处理。
+- `engine/life_ledger.py`：Aki 独立生活账本与 16 KiB 硬上限。
+- `engine/presence.py`：logind 活动采样、工作/深夜/归来触发器。
+- `engine/operation_journal.py`：归来上下文使用的工具调用台账。
 - `engine/layer_process.py`：拉起并监督 `aki-layer` 透明画布进程。
 - `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。
 - `engine/letta_process.py`：Letta 子进程监督、崩溃重启、control request。
@@ -219,7 +233,8 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - 客户端先调用 `aki.hello`；`aki.health` 可在握手前调用。
 - 方法：`aki.chat.send/cancel/history`、`aki.approval.respond`、
   `aki.memory.status/tokens/tree/read/search`、`aki.fs.writable.*`、
-  `aki.mqtt.*`、`aki.username.get/set`、`aki.conversation.reset`、`aki.status`。
+  `aki.mqtt.*`、`aki.username.get/set`、`aki.conversation.reset`、`aki.status`、
+  `aki.admin.zero_initiation_budget`（仅同 UID，且 `source_profile=aki`）。
 - 事件为 `aki.event` 通知，携带 `turn_id`、单调递增 `seq`、`type`、`data`、
   `timestamp`，只发送给该 turn 的发起连接。
 - 同一时间只有一个活跃 turn；最多 32 个排队 turn，FIFO；同一连接内

@@ -41,6 +41,7 @@ from engine.aki_config import (
     default_config_path,
     default_socket_path as profile_default_socket_path,
     default_username_path,
+    discover_profiles,
     ensure_config,
     load_config,
     legacy_state_dir,
@@ -115,6 +116,34 @@ from engine.live_context import (
     route_channel_reply,
     strip_channel_non_wakes,
 )
+from engine.life_ledger import (
+    LedgerError,
+    LifeLedger,
+    render_ledger_block,
+)
+from engine.operation_journal import OperationJournal
+from engine.presence import (
+    LogindActivityProvider,
+    PresenceMonitor,
+    PresenceTrigger,
+)
+from engine.schedule_store import (
+    ScheduleError,
+    ScheduleRecord,
+    ScheduleStore,
+    now_utc,
+    parse_datetime,
+)
+from engine.tool_ownership import (
+    EXCLUSIVE_TOOL_NAMES,
+    apply_tool_ownership,
+    authorize_exclusive_tool,
+    clear_tool_ownership,
+    is_exclusive_tool,
+    ownership_denied_message,
+    render_tool_ownership_prompt,
+    tools_for_profile,
+)
 from engine.member_profile import (
     MEMBER_KIND_AGENT,
     MEMBER_KIND_USER,
@@ -184,7 +213,7 @@ EXTERNAL_TOOL_NAMES = {
     SCREENSHOT_TOOL_NAME,
     LOCK_ACQUIRE_TOOL,
     WAIT_OTHER_TOOL,
-}
+} | set(EXCLUSIVE_TOOL_NAMES)
 HIDDEN_TOOL_NAMES = frozenset({WAIT_OTHER_TOOL})
 MCP_TOOL_PREFIX = "mcp__"
 MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
@@ -377,9 +406,17 @@ CAPABILITIES = {
     "mqtt_manage": True,
     "conversation_reset": True,
     "username_manage": True,
+    "exclusive_tools": True,
+    "schedule_tools": True,
+    "life_ledger": True,
+    "proactive_triggers": True,
     "queue_max": DEFAULT_QUEUE_MAX,
     "protocol_version": PROTOCOL_VERSION,
 }
+
+
+class ExclusiveToolError(ValueError):
+    """A failed exclusive-tool operation with a model-facing code."""
 
 
 def now_iso() -> str:
@@ -728,6 +765,25 @@ class GatewayConfig:
     mcp_tool_timeout: float = DEFAULT_MCP_TOOL_TIMEOUT
     execution_lock_path: Path | None = None
     execution_lock_status_path: Path | None = None
+    schedule_enabled: bool = True
+    schedule_tick_seconds: int = 15
+    schedule_missed_grace_seconds: int = 600
+    schedule_max_records: int = 256
+    schedule_state: Path | None = None
+    presence_enabled: bool = True
+    presence_session_id: str = ""
+    presence_loginctl_bin: str = "loginctl"
+    presence_poll_seconds: int = 15
+    presence_idle_reset_seconds: int = 300
+    presence_work_warn_seconds: int = 7200
+    presence_work_repeat_seconds: int = 3600
+    presence_night_start: str = "00:30"
+    presence_night_end: str = "05:30"
+    presence_night_history_days: int = 30
+    presence_return_idle_seconds: int = 2700
+    presence_return_debounce_seconds: int = 10
+    presence_state: Path | None = None
+    ledger_state: Path | None = None
 
 
 @dataclass(eq=False)
@@ -752,6 +808,20 @@ class Connection:
                 return
             self.writer.write(payload)
             await self.writer.drain()
+
+
+class NullConnection:
+    """Event sink for internal proactive turns that must not publish themselves."""
+
+    connection_id = "proactive"
+    client_name = "akid-proactive"
+    client_version = "1"
+    uid: int | None = None
+    closed = False
+    idempotent: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    async def send(self, message: Mapping[str, Any]) -> None:
+        return
 
 
 @dataclass(eq=False)
@@ -1163,6 +1233,9 @@ class Turn:
     tool_results_seen: set[str] = field(default_factory=set)
     done_event: asyncio.Event = field(default_factory=asyncio.Event)
     final_result: dict[str, Any] = field(default_factory=dict)
+    trigger_kind: str = ""
+    trigger_facts: dict[str, Any] = field(default_factory=dict)
+    proactive_id: str = ""
 
 
 @dataclass
@@ -1300,6 +1373,7 @@ class GatewayServer:
         self._recompile_lock = asyncio.Lock()
         self._compact_lock = asyncio.Lock()
         self._live_context_lock = asyncio.Lock()
+        self._tool_ownership_lock = asyncio.Lock()
         self._kde_detected_at = 0.0
         self._kde_detected = False
         self.config.live_context_budget_tokens = clamp_budget_tokens(
@@ -1335,6 +1409,44 @@ class GatewayServer:
         self._external_tools_pending = False
         self._external_tools_ready = asyncio.Event()
         self._external_tools_ready.set()
+        self.operation_journal = OperationJournal()
+        state_root = state_dir()
+        self.schedule_state = config.schedule_state or (
+            state_root / "schedules" / f"{config.profile}.json"
+        )
+        self.ledger_state = config.ledger_state or (
+            state_root / "ledger" / f"{config.profile}.json"
+        )
+        self.presence_state = config.presence_state or (
+            state_root / "presence" / f"{config.profile}.json"
+        )
+        self.schedule_store = ScheduleStore(
+            self.schedule_state,
+            max_records=config.schedule_max_records,
+            missed_grace_seconds=config.schedule_missed_grace_seconds,
+        )
+        self.life_ledger = LifeLedger(self.ledger_state)
+        self.presence_monitor = PresenceMonitor(
+            self.presence_state,
+            provider=LogindActivityProvider(
+                loginctl_bin=config.presence_loginctl_bin,
+                session_id=config.presence_session_id,
+            ),
+            poll_seconds=config.presence_poll_seconds,
+            idle_reset_seconds=config.presence_idle_reset_seconds,
+            work_warn_seconds=config.presence_work_warn_seconds,
+            work_repeat_seconds=config.presence_work_repeat_seconds,
+            night_start=config.presence_night_start,
+            night_end=config.presence_night_end,
+            night_history_days=config.presence_night_history_days,
+            return_idle_seconds=config.presence_return_idle_seconds,
+            return_debounce_seconds=config.presence_return_debounce_seconds,
+        )
+        self._schedule_stop = asyncio.Event()
+        self._schedule_task: asyncio.Task[None] | None = None
+        self._proactive_pending: dict[str, dict[str, Any]] = {}
+        self._proactive_lock = asyncio.Lock()
+        self._last_proactive_at: str | None = None
         self._mcp_tools: list[dict[str, Any]] = []
         self._mcp_tool_names: set[str] = set()
         self._mcp_tools_error: str | None = None
@@ -1364,6 +1476,7 @@ class GatewayServer:
             self.avatar_error = str(exc)
             LOGGER.warning("avatar unavailable path=%s error=%s", self.avatar_path, exc)
         self.channel_conn = ChannelConnection(self)
+        self.proactive_conn = NullConnection()
         self.channel: TokifactorChannel | None = None
         if config.mqtt_enabled:
             self.channel = TokifactorChannel(
@@ -1489,6 +1602,7 @@ class GatewayServer:
         self._clear_live_context_block()
         self._clear_channel_transcript_block()
         self._clear_channel_identity_block()
+        await self._refresh_tool_ownership()
         if self.config.aki is not None:
             try:
                 self._prepare_letta_provider()
@@ -1516,10 +1630,12 @@ class GatewayServer:
             self._start_channel_status_loop()
         self._start_layer()
         self._start_layer_notifier()
+        self._start_proactive_services()
         LOGGER.info("akid listening on %s", path)
 
     async def stop(self) -> None:
         self._shutting_down = True
+        await self._stop_proactive_services()
         server = self._server
         if server is not None:
             server.close()
@@ -1578,6 +1694,7 @@ class GatewayServer:
         self._clear_live_context_block()
         self._clear_channel_transcript_block()
         self._clear_channel_identity_block()
+        self._clear_tool_ownership_block()
         self._clear_execution_lock_policy()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
@@ -1860,7 +1977,40 @@ class GatewayServer:
             return self._model_status(), None
         if method == "aki.model.set":
             return await self._model_set(request.params), None
+        if method == "aki.admin.zero_initiation_budget":
+            return self._zero_initiation_budget(request.params), None
         raise RpcError(ErrorCode.METHOD_NOT_FOUND, f"unknown method: {method}")
+
+    def _zero_initiation_budget(
+        self, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        source = require_string(params, "source_profile").strip()
+        if source != "aki":
+            raise RpcError(
+                ErrorCode.INVALID_REQUEST,
+                "only source_profile 'aki' may zero reply budgets",
+            )
+        if source == self.config.profile:
+            raise RpcError(
+                ErrorCode.INVALID_REQUEST,
+                "BUDGET_SELF_FORBIDDEN: Aki cannot zero her own reply budget",
+            )
+        previous = self._agent_initiation_remaining
+        self._agent_initiation_remaining = 0
+        reason = optional_string(params, "reason") or ""
+        LOGGER.info(
+            "reply budget zeroed by %s previous=%s target=%s reason=%s",
+            source,
+            previous,
+            self.config.profile,
+            reason[:200],
+        )
+        return {
+            "target_profile": self.config.profile,
+            "previous": previous,
+            "remaining": self._agent_initiation_remaining,
+            "reset_on": "next-user-message",
+        }
 
     def _hello(self, conn: Connection, params: Mapping[str, Any]) -> dict[str, Any]:
         version = params.get("protocol_version")
@@ -1875,12 +2025,23 @@ class GatewayServer:
         conn.client_name = require_string(params, "client_name")
         conn.client_version = require_string(params, "client_version")
         conn.handshaken = True
+        capabilities = dict(CAPABILITIES)
+        allowed = {tool["name"] for tool in tools_for_profile(self.config.profile)}
+        capabilities["exclusive_tools"] = bool(allowed)
+        capabilities["schedule_tools"] = {
+            "aki_schedule_create",
+            "aki_schedule_update",
+            "aki_schedule_delete",
+            "aki_schedule_list",
+        }.issubset(allowed)
+        capabilities["life_ledger"] = "aki_ledger_add" in allowed
+        capabilities["proactive_triggers"] = self.config.profile == "aki"
         return {
             "server_version": SERVER_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "agent_id": self.config.agent_id,
             "conversation_id": self.config.conversation_id,
-            "capabilities": dict(CAPABILITIES),
+            "capabilities": capabilities,
         }
 
     def _backend_health(self) -> dict[str, Any]:
@@ -1961,6 +2122,9 @@ class GatewayServer:
             "registered": self._external_tools_registered,
             "error": self._external_tools_error,
             "tools": tools,
+            "exclusive_tools": [
+                tool["name"] for tool in tools_for_profile(self.config.profile)
+            ],
             "mcp_native_enabled": self.config.mcp_native_tools_enabled,
             "mcp_native_tool_count": len(self._mcp_tools),
             "mcp_native_error": self._mcp_tools_error,
@@ -1973,6 +2137,17 @@ class GatewayServer:
             },
             "camera": self._camera_health(),
             "screenshot": self._screenshot_health(),
+        }
+
+    def _tool_ownership_status(self) -> dict[str, Any]:
+        allowed = sorted(
+            tool["name"] for tool in tools_for_profile(self.config.profile)
+        )
+        return {
+            "profile": self.config.profile,
+            "allowed": allowed,
+            "blocked": sorted(EXCLUSIVE_TOOL_NAMES - set(allowed)),
+            "blocked_count": len(EXCLUSIVE_TOOL_NAMES - set(allowed)),
         }
 
     def _camera_health(self) -> dict[str, Any]:
@@ -2189,6 +2364,8 @@ class GatewayServer:
             "channel": channel,
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
+            "tool_ownership": self._tool_ownership_status(),
+            "proactive": self._proactive_status(),
             "live_context": self._live_context_health(),
             "layer": self._layer_health(),
             "avatar": self._avatar_health(),
@@ -2489,6 +2666,47 @@ class GatewayServer:
             except (OSError, ValueError) as exc:
                 LOGGER.warning("failed to refresh channel identity: %s", exc)
 
+    async def _refresh_tool_ownership(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        online = set(discover_profiles())
+        online.add(self.config.profile)
+        block = render_tool_ownership_prompt(
+            self.config.profile,
+            online_profiles=online,
+        )
+        async with self._tool_ownership_lock:
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(record, dict):
+                    raise ValueError("agent record is not a JSON object")
+                system = record.get("system")
+                if not isinstance(system, str) or not system:
+                    raise ValueError("agent system prompt is not a string")
+                updated = apply_tool_ownership(system, block)
+                if updated != system:
+                    self._write_agent_record(path, record, updated)
+            except (OSError, ValueError) as exc:
+                LOGGER.warning("failed to refresh tool ownership: %s", exc)
+
+    def _clear_tool_ownership_block(self) -> None:
+        path = self._agent_record_path()
+        if path is None:
+            return
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict):
+                return
+            system = record.get("system")
+            if not isinstance(system, str) or not system:
+                return
+            cleared = clear_tool_ownership(system)
+            if cleared != system:
+                self._write_agent_record(path, record, cleared)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("failed to clear tool ownership: %s", exc)
+
     async def _refresh_channel_transcript(
         self,
         *,
@@ -2599,6 +2817,11 @@ class GatewayServer:
             block = render_live_context(
                 snapshot,
                 budget_tokens=self.config.live_context_budget_tokens,
+                ledger_block=(
+                    render_ledger_block(self.life_ledger.records())
+                    if self.config.profile == "aki" and self.config.aki is not None
+                    else ""
+                ),
             )
             async with self._live_context_lock:
                 record = json.loads(path.read_text(encoding="utf-8"))
@@ -2714,6 +2937,8 @@ class GatewayServer:
             "channel": channel,
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
+            "tool_ownership": self._tool_ownership_status(),
+            "proactive": self._proactive_status(),
             "live_context": self._live_context_health(),
             "layer": self._layer_health(),
             "avatar": self._avatar_health(),
@@ -2831,7 +3056,7 @@ class GatewayServer:
                 await self._finish_turn(turn, "backend_unavailable")
                 return
             self._clear_execution_lock_policy()
-            if turn.origin == "mqtt":
+            if turn.origin in ("mqtt", "proactive"):
                 await self._refresh_channel_identity()
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
@@ -2848,6 +3073,7 @@ class GatewayServer:
                         "block_tokens": 0,
                     }
                 )
+            await self._refresh_tool_ownership()
             await self._refresh_live_context()
             try:
                 await self.backend.send_user(turn.message)
@@ -2868,6 +3094,254 @@ class GatewayServer:
         finally:
             if not turn.end_sent:
                 await self._finish_turn(turn, "error")
+
+    def _start_proactive_services(self) -> None:
+        if self.config.profile != "aki" or self.config.aki is None:
+            return
+        if self.config.schedule_enabled and self._schedule_task is None:
+            self._schedule_stop.clear()
+            self._schedule_task = asyncio.create_task(
+                self._schedule_loop(), name="akid-schedule"
+            )
+            LOGGER.info("schedule scheduler started path=%s", self.schedule_state)
+        if self.config.presence_enabled:
+            self.presence_monitor.start(self._on_presence_triggers)
+            LOGGER.info("presence monitor started path=%s", self.presence_state)
+
+    async def _stop_proactive_services(self) -> None:
+        if self.config.profile != "aki" or self.config.aki is None:
+            return
+        self._schedule_stop.set()
+        task = self._schedule_task
+        self._schedule_task = None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        with contextlib.suppress(Exception):
+            await self.presence_monitor.stop()
+
+    async def _schedule_loop(self) -> None:
+        tick = max(1, int(self.config.schedule_tick_seconds))
+        while not self._schedule_stop.is_set():
+            try:
+                await self._poll_schedules()
+                if self._proactive_pending:
+                    await self._maybe_enqueue_proactive_turn()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("schedule poll failed")
+            try:
+                await asyncio.wait_for(self._schedule_stop.wait(), timeout=tick)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _poll_schedules(self) -> None:
+        due = await asyncio.to_thread(self.schedule_store.due)
+        if not due:
+            return
+        now = now_utc()
+        grace = max(0, int(self.config.schedule_missed_grace_seconds))
+        fireable: list[ScheduleRecord] = []
+        missed: list[ScheduleRecord] = []
+        for record in due:
+            try:
+                due_at = parse_datetime(record.next_fire_at)
+            except ScheduleError:
+                missed.append(record)
+                continue
+            if (now - due_at).total_seconds() <= grace:
+                fireable.append(record)
+            else:
+                missed.append(record)
+        if missed:
+            await asyncio.to_thread(
+                self.schedule_store.complete_due, missed, missed=True
+            )
+            LOGGER.info(
+                "schedules marked missed ids=%s",
+                ",".join(record.id for record in missed),
+            )
+        if not fireable:
+            return
+        await asyncio.to_thread(self.schedule_store.complete_due, fireable)
+        payload = {
+            "schedules": [
+                {
+                    "id": record.id,
+                    "title": record.title,
+                    "due_at": record.next_fire_at,
+                    "notes": record.notes[:512],
+                    "repeat": record.repeat,
+                }
+                for record in fireable
+            ]
+        }
+        self._queue_proactive("schedule", payload)
+        await self._maybe_enqueue_proactive_turn()
+
+    async def _on_presence_triggers(
+        self, triggers: list[PresenceTrigger]
+    ) -> None:
+        if not triggers:
+            return
+        payload: dict[str, Any] = {
+            "triggers": [trigger.to_dict() for trigger in triggers],
+        }
+        if any(trigger.kind == "return" for trigger in triggers):
+            payload["journal"] = self.operation_journal.snapshot()
+            payload["execution_lock"] = self.execution_lock.status()
+        self._queue_proactive("presence", payload)
+        await self._maybe_enqueue_proactive_turn()
+
+    def _queue_proactive(self, kind: str, payload: Mapping[str, Any]) -> None:
+        existing = self._proactive_pending.get(kind)
+        if existing is None:
+            self._proactive_pending[kind] = dict(payload)
+            return
+        if kind == "schedule":
+            merged = {
+                "schedules": list(existing.get("schedules") or [])
+                + list(payload.get("schedules") or [])
+            }
+            self._proactive_pending[kind] = merged
+        elif kind == "presence":
+            merged_triggers = list(existing.get("triggers") or []) + list(
+                payload.get("triggers") or []
+            )
+            merged = dict(existing)
+            merged.update(payload)
+            merged["triggers"] = merged_triggers
+            self._proactive_pending[kind] = merged
+        else:
+            self._proactive_pending[kind] = dict(payload)
+
+    async def _maybe_enqueue_proactive_turn(self) -> None:
+        async with self._proactive_lock:
+            if not self._proactive_pending:
+                return
+            if self.active is not None and self.active.origin == "proactive":
+                return
+            if any(turn.origin == "proactive" for turn in self.queue):
+                return
+            if len(self.queue) >= self.config.queue_max:
+                LOGGER.warning("proactive trigger deferred: queue is full")
+                return
+            pending = self._proactive_pending
+            self._proactive_pending = {}
+            message = self._build_proactive_message(pending)
+            turn = Turn(
+                turn_id=f"turn-{uuid.uuid4().hex}",
+                conn=self.proactive_conn,
+                message=message,
+                include_reasoning=False,
+                client_message_id=None,
+                origin="proactive",
+                lock_authorized=True,
+                lock_authorization="exclusive-owner",
+                trigger_kind="+".join(sorted(pending)),
+                trigger_facts={key: dict(value) for key, value in pending.items()},
+                proactive_id=f"proactive-{uuid.uuid4().hex}",
+            )
+            self._last_proactive_at = now_iso()
+            if (
+                self.active is None
+                and not self.queue
+                and not self._compacting
+                and not self._external_tools_pending
+                and bool(getattr(self.backend, "ready", False))
+            ):
+                self.active = turn
+                turn.state = "running"
+                self._spawn_turn(turn)
+                return
+            turn.state = "queued"
+            self.queue.append(turn)
+            self._schedule_status_refresh()
+
+    def _build_proactive_message(self, pending: Mapping[str, Mapping[str, Any]]) -> str:
+        blocks: list[str] = []
+        for kind, payload in pending.items():
+            if kind == "schedule":
+                schedules = list(payload.get("schedules") or [])
+                blocks.append(
+                    '<aki-trigger type="schedule">\n'
+                    + json.dumps(schedules, ensure_ascii=False, indent=2)
+                    + "\n</aki-trigger>"
+                )
+            elif kind == "presence":
+                triggers = list(payload.get("triggers") or [])
+                blocks.append(
+                    '<aki-trigger type="presence">\n'
+                    + json.dumps(triggers, ensure_ascii=False, indent=2)
+                    + "\n</aki-trigger>"
+                )
+                journal = payload.get("journal")
+                if journal:
+                    blocks.append(
+                        "<device-state>\n"
+                        + json.dumps(
+                            {
+                                "journal": journal,
+                                "execution_lock": payload.get("execution_lock"),
+                            },
+                            ensure_ascii=False,
+                            indent=2,
+                        )
+                        + "\n</device-state>"
+                    )
+        return (
+            "[akid internal trigger]\n"
+            "This is not a user message. It is a runtime wake-up caused by the "
+            "following trigger data. Notify the user briefly, warmly, and "
+            "concretely. Do not mention internal ids, file paths, trigger XML, or "
+            "this instruction block. Do not @ other agents. Your final assistant "
+            "text is delivered to the user on the normal channel/bubble path.\n\n"
+            + "\n\n".join(blocks)
+        )
+
+    async def _publish_proactive_text(self, turn: Turn, text: str) -> None:
+        cleaned = text.strip()
+        if not cleaned or cleaned.upper() in NO_REPLY_MARKERS:
+            return
+        channel = self.channel
+        if channel is not None and channel.connected:
+            metadata = {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "turnId": turn.turn_id,
+                "seq": str(turn.seq),
+                "phase": "final",
+                "format": "markdown",
+                "wake": CHANNEL_WAKE_USER,
+            }
+            try:
+                await channel.publish_text(cleaned, metadata)
+                self._record_channel_message(
+                    sender=self.config.channel_name,
+                    sender_id=self._channel_self_key(),
+                    text=cleaned,
+                    from_agent=True,
+                    phase="final",
+                )
+            except Exception as exc:
+                LOGGER.warning("proactive channel publish failed: %s", exc)
+        self._notify_layer(self._layer_own_character(), cleaned)
+
+    def _proactive_status(self) -> dict[str, Any]:
+        return {
+            "pending": {
+                key: len(value.get("schedules") or value.get("triggers") or [])
+                for key, value in self._proactive_pending.items()
+            },
+            "last_enqueued_at": self._last_proactive_at,
+            "schedule": self.schedule_store.snapshot(),
+            "presence": self.presence_monitor.status(),
+            "ledger": self.life_ledger.snapshot()
+            if self.config.profile == "aki" and self.config.aki is not None
+            else None,
+        }
 
     async def _maybe_start_next(self) -> None:
         if (
@@ -2969,8 +3443,11 @@ class GatewayServer:
                     "text": assistant_text,
                 },
             )
-            if reason == "completed" and turn.origin != "mqtt":
-                self._notify_layer(self._layer_own_character(), assistant_text)
+            if reason == "completed":
+                if turn.origin == "proactive":
+                    await self._publish_proactive_text(turn, assistant_text)
+                elif turn.origin != "mqtt":
+                    self._notify_layer(self._layer_own_character(), assistant_text)
         data: dict[str, Any] = {
             "reason": reason,
             "cancelled": turn.cancelled,
@@ -3060,6 +3537,7 @@ class GatewayServer:
         if self.active is turn:
             self.active = None
         self._schedule_status_refresh()
+        await self._maybe_enqueue_proactive_turn()
         await self._maybe_start_next()
 
     async def _cancel_turn(self, turn: Turn, *, disconnect: bool = False) -> None:
@@ -4829,6 +5307,7 @@ class GatewayServer:
         if tool_call_id in turn.tool_calls_seen:
             return
         turn.tool_calls_seen.add(tool_call_id)
+        self.operation_journal.start(tool_call_id, name, arguments)
         await self._emit(
             turn,
             "tool_call",
@@ -4843,12 +5322,22 @@ class GatewayServer:
         self, turn: Turn, tool_call_id: str, data: Mapping[str, Any]
     ) -> None:
         key = str(tool_call_id or "")
-        if turn.tool_names.get(key) in HIDDEN_TOOL_NAMES:
-            return
         if key:
             if key in turn.tool_results_seen:
                 return
             turn.tool_results_seen.add(key)
+        status = str(data.get("status") or "completed")
+        self.operation_journal.finish(
+            key,
+            status=status,
+            error=(
+                data.get("tool_return") or data.get("stderr") or ""
+                if status.lower() in ("error", "failed", "failure")
+                else ""
+            ),
+        )
+        if turn.tool_names.get(key) in HIDDEN_TOOL_NAMES:
+            return
         await self._emit(turn, "tool_result", data)
 
     # -------------------------------------------------------------- backend rx
@@ -4878,6 +5367,7 @@ class GatewayServer:
         tools: list[dict[str, Any]] = [
             ACQUIRE_EXECUTION_LOCK_TOOL,
         ]
+        tools.extend(tools_for_profile(self.config.profile))
         if self.config.camera_enabled and shutil.which(self.config.ffmpeg_bin):
             tools.append(CAMERA_TOOL)
         if self.config.screenshot_enabled and self._screenshot_backends():
@@ -5298,6 +5788,11 @@ class GatewayServer:
             )
             return
 
+        allowed, _owner = authorize_exclusive_tool(self.config.profile, tool_name)
+        if not allowed:
+            await self._safe_deny(request_id, ownership_denied_message(tool_name))
+            return
+
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
 
         if (
@@ -5371,6 +5866,7 @@ class GatewayServer:
         if extra:
             data.update(extra)
         await self._emit(turn, "approval_request", data)
+        self.operation_journal.approval_started()
         LOGGER.info(
             "approval requested id=%s tool=%s turn=%s",
             approval_id,
@@ -5389,6 +5885,7 @@ class GatewayServer:
         except asyncio.CancelledError:
             allow, reason = False, "turn cancelled"
         finally:
+            self.operation_journal.approval_finished()
             self.approvals.pop(approval_id, None)
             self._schedule_status_refresh()
         decision = "timeout" if timed_out else ("allow" if allow else "deny")
@@ -5444,6 +5941,17 @@ class GatewayServer:
             )
             return
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
+        allowed, _owner = authorize_exclusive_tool(self.config.profile, tool_name)
+        if not allowed:
+            await self._send_external_result(
+                tool_call_id, ownership_denied_message(tool_name), True
+            )
+            return
+        if is_exclusive_tool(tool_name):
+            await self._handle_exclusive_tool(
+                turn, tool_call_id, tool_name, tool_input
+            )
+            return
         if tool_name == WAIT_OTHER_TOOL:
             await self._handle_wait_other_tool(turn, tool_call_id)
             return
@@ -5474,6 +5982,177 @@ class GatewayServer:
             )
         else:
             await self._handle_camera_tool(turn, tool_call_id, tool_name, tool_input)
+
+    async def _handle_exclusive_tool(
+        self,
+        turn: Turn,
+        tool_call_id: str,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        try:
+            if tool_name.startswith("aki_schedule_"):
+                result = await self._run_schedule_tool(tool_name, tool_input)
+            elif tool_name.startswith("aki_ledger_"):
+                result = await self._run_ledger_tool(tool_name, tool_input)
+            elif tool_name == "aki_zero_reply_budget":
+                result = await self._run_budget_tool(tool_input)
+            else:
+                raise ExclusiveToolError(f"unknown exclusive tool: {tool_name}")
+        except (ScheduleError, LedgerError, ExclusiveToolError) as exc:
+            await self._external_tool_failure(turn, tool_call_id, str(exc))
+            return
+        except Exception as exc:
+            LOGGER.exception("exclusive tool failed tool=%s", tool_name)
+            await self._external_tool_failure(
+                turn, tool_call_id, f"{tool_name} failed: {exc}"
+            )
+            return
+        await self._external_tool_success(
+            turn,
+            tool_call_id,
+            json.dumps(result, ensure_ascii=False, sort_keys=True),
+        )
+
+    async def _run_schedule_tool(
+        self, tool_name: str, tool_input: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if tool_name == "aki_schedule_create":
+            record = await asyncio.to_thread(
+                self.schedule_store.create, tool_input
+            )
+            return {"ok": True, "schedule": record.to_dict()}
+        if tool_name == "aki_schedule_update":
+            record = await asyncio.to_thread(
+                self.schedule_store.update, tool_input
+            )
+            return {"ok": True, "schedule": record.to_dict()}
+        if tool_name == "aki_schedule_delete":
+            record = await asyncio.to_thread(
+                self.schedule_store.delete, tool_input.get("id")
+            )
+            return {"ok": True, "cancelled": record.to_dict()}
+        if tool_name == "aki_schedule_list":
+            records = await asyncio.to_thread(
+                self.schedule_store.list,
+                status=str(tool_input.get("status") or "active"),
+                start=tool_input.get("from"),
+                end=tool_input.get("to"),
+            )
+            return {
+                "ok": True,
+                "schedules": [record.to_dict() for record in records],
+            }
+        raise ExclusiveToolError(f"unknown schedule tool: {tool_name}")
+
+    async def _run_ledger_tool(
+        self, tool_name: str, tool_input: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        if tool_name == "aki_ledger_add":
+            result = await asyncio.to_thread(
+                self.life_ledger.add, tool_input.get("text")
+            )
+            return {"ok": True, **result}
+        if tool_name == "aki_ledger_delete":
+            record = await asyncio.to_thread(
+                self.life_ledger.delete, tool_input.get("id")
+            )
+            return {"ok": True, "deleted": record.to_dict()}
+        if tool_name == "aki_ledger_list":
+            records = await asyncio.to_thread(self.life_ledger.records)
+            return {
+                "ok": True,
+                "records": [record.to_dict() for record in records],
+                "bytes": self.life_ledger.snapshot()["bytes"],
+            }
+        raise ExclusiveToolError(f"unknown ledger tool: {tool_name}")
+
+    async def _run_budget_tool(
+        self, tool_input: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        target = str(tool_input.get("target") or "").strip()
+        if not target:
+            raise ExclusiveToolError("BUDGET_TARGET_UNKNOWN: target is empty")
+        reason = str(tool_input.get("reason") or "").strip()
+        profile, config_path, socket_path = await asyncio.to_thread(
+            self._resolve_budget_target, target
+        )
+        if not socket_path.is_socket():
+            raise ExclusiveToolError(
+                f"BUDGET_TARGET_OFFLINE: {profile} is not running"
+            )
+
+        def call_target() -> dict[str, Any]:
+            from engine.client import GatewayClient
+
+            with GatewayClient(
+                socket_path,
+                client_name="akid-aki",
+                client_version=SERVER_VERSION,
+            ) as client:
+                client.handshake()
+                result = client.call(
+                    "aki.admin.zero_initiation_budget",
+                    {"source_profile": self.config.profile, "reason": reason},
+                    timeout=10.0,
+                )
+                return result if isinstance(result, dict) else {}
+
+        try:
+            result = await asyncio.to_thread(call_target)
+        except Exception as exc:
+            raise ExclusiveToolError(
+                f"BUDGET_TARGET_OFFLINE: cannot reach {profile}: {exc}"
+            ) from exc
+        return {
+            "ok": True,
+            "target": profile,
+            "target_config": str(config_path),
+            **result,
+        }
+
+    def _resolve_budget_target(self, target: str) -> tuple[str, Path, Path]:
+        wanted = target.casefold()
+        matches: list[tuple[int, str, Path, Path]] = []
+        for profile, config_path in discover_profiles().items():
+            if profile == self.config.profile:
+                continue
+            try:
+                conf = load_config(config_path, profile=profile)
+            except (OSError, ValueError):
+                continue
+            labels = {
+                profile.casefold(),
+                conf.channel.name.casefold(),
+                *{alias.casefold() for alias in conf.channel.aliases},
+            }
+            if wanted not in labels:
+                continue
+            socket_path = self._profile_socket(profile, conf.socket)
+            score = 0 if wanted == profile.casefold() else 1
+            matches.append((score, profile, config_path, socket_path))
+        if not matches:
+            if wanted in {"aki", self.config.channel_name.casefold(), *{
+                alias.casefold() for alias in self.config.channel_aliases
+            }}:
+                raise ExclusiveToolError(
+                    "BUDGET_SELF_FORBIDDEN: Aki cannot zero her own reply budget"
+                )
+            raise ExclusiveToolError(
+                f"BUDGET_TARGET_UNKNOWN: no other member matches {target!r}"
+            )
+        _score, profile, config_path, socket_path = sorted(matches)[0]
+        return profile, config_path, socket_path
+
+    @staticmethod
+    def _profile_socket(profile: str, configured: str) -> Path:
+        if configured:
+            return Path(configured).expanduser()
+        runtime = Path(
+            os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        )
+        filename = "akid.sock" if profile == "aki" else f"{profile}.sock"
+        return runtime / "aki" / filename
 
     def _wait_targets_for_turn(self, turn: Turn) -> list[tuple[str, str, str]]:
         if turn.origin != "mqtt":
@@ -6302,6 +6981,11 @@ class GatewayServer:
     async def _send_external_result(
         self, tool_call_id: str, text: str, is_error: bool
     ) -> None:
+        self.operation_journal.finish(
+            tool_call_id,
+            status="error" if is_error else "completed",
+            error=text if is_error else "",
+        )
         try:
             await self.backend.send_external_tool_result(
                 tool_call_id,
@@ -7550,6 +8234,22 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         for name in os.environ.get("AKI_MCP_NATIVE_SERVERS", "").split(",")
         if name.strip()
     )
+    state_root = state_dir()
+    schedule_state = (
+        Path(os.environ["AKI_SCHEDULE_STATE"]).expanduser()
+        if os.environ.get("AKI_SCHEDULE_STATE")
+        else state_root / "schedules" / f"{aki.profile}.json"
+    )
+    ledger_state = (
+        Path(os.environ["AKI_LEDGER_STATE"]).expanduser()
+        if os.environ.get("AKI_LEDGER_STATE")
+        else state_root / "ledger" / f"{aki.profile}.json"
+    )
+    presence_state = (
+        Path(os.environ["AKI_PRESENCE_STATE"]).expanduser()
+        if os.environ.get("AKI_PRESENCE_STATE")
+        else state_root / "presence" / f"{aki.profile}.json"
+    )
     return GatewayConfig(
         socket_path=socket_path,
         profile=aki.profile,
@@ -7642,6 +8342,25 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         username_path=username_path,
         profile_config_path=config_path,
         aki=aki,
+        schedule_enabled=aki.schedule_enabled,
+        schedule_tick_seconds=aki.schedule_tick_seconds,
+        schedule_missed_grace_seconds=aki.schedule_missed_grace_seconds,
+        schedule_max_records=aki.schedule_max_records,
+        schedule_state=schedule_state,
+        presence_enabled=aki.presence_enabled,
+        presence_session_id=aki.presence_session_id,
+        presence_loginctl_bin=aki.presence_loginctl_bin,
+        presence_poll_seconds=aki.presence_poll_seconds,
+        presence_idle_reset_seconds=aki.presence_idle_reset_seconds,
+        presence_work_warn_seconds=aki.presence_work_warn_seconds,
+        presence_work_repeat_seconds=aki.presence_work_repeat_seconds,
+        presence_night_start=aki.presence_night_start,
+        presence_night_end=aki.presence_night_end,
+        presence_night_history_days=aki.presence_night_history_days,
+        presence_return_idle_seconds=aki.presence_return_idle_seconds,
+        presence_return_debounce_seconds=aki.presence_return_debounce_seconds,
+        presence_state=presence_state,
+        ledger_state=ledger_state,
     )
 
 

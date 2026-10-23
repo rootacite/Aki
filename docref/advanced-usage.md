@@ -166,18 +166,42 @@ systemctl --user restart akid-proxy@aki.service
 ```
 
 脚本会保留现有 core memory 和 `<aki-live-context>`，并先备份到
-`~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 identity/transcript/live
-块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
+`~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 ownership/identity/
+transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
 `{CORE_MEMORY}` 占位符必须保留。
 
-编译后模型看到的固定顺序是 `base → core memory → identity → transcript → live context`：
+编译后模型看到的固定顺序是 `base → core memory → tool ownership → identity → transcript →
+live context`：
 
 1. 稳定基座 prompt（`prompts/aki-system.md` 或 `prompts/fuyu-system.md`），包含身份、记忆机制、
    工具规则、执行锁规则和模式边界。
 2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
-3. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新，始终存在。
-4. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
-5. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史和截图路径，始终最后追加。
+3. `<aki-tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
+   `@Owner` 转述规则，每个 turn 刷新。
+4. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新，始终存在。
+5. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
+6. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
+   始终最后追加。
+
+### Aki 专属工具与触发器
+
+Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，错误调用会返回
+`TOOL_OWNERSHIP_DENIED` 并提示 `@Aki`：
+
+- `aki_schedule_create/update/delete/list`：单次、每日、每周日程。状态保存在
+  `~/.aki/schedules/aki.json`；到点后 akid 唤醒 Aki，由她通过正常频道/气泡路径提醒用户。
+  错过不超过 10 分钟会补触发，更久标记 `missed`。
+- `aki_zero_reply_budget`：把另一个成员（当前为 Fuyu）的 agent-to-agent 主动回复预算清零，
+  直到下一条用户频道消息。不能作用于 Aki 自己，不取消正在执行的 turn。
+- `aki_ledger_add/delete/list`：独立于 Letta 的生活账本，保存在
+  `~/.aki/ledger/aki.json`。整个文件硬上限 16384 UTF-8 字节，单条正文最多 1024 字节；
+  超出时逐条淘汰最旧记录。账本固定注入 Aki 的 `<aki-live-context>`，不参与预算裁剪。
+
+触发器只由 Aki profile 运行。活动状态来自 `loginctl` 的 `IdleHint`/`IdleSinceHint`/
+`LockedHint`：连续工作 2 小时后提醒一次，之后每小时一次；00:30–05:30 仍活跃时每夜最多提醒
+一次并附带最近 30 天夜晚工作次数；连续空闲 45 分钟后返回时提醒，并要求两次活跃采样、
+至少 10 秒防抖。设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
+`~/.aki/aki.conf` 的 `[schedule]` 和 `[presence]` 段。
 
 执行锁规则只存在于基座 prompt，不再生成 `<aki-execution-lock>` 动态块。动态块按标签原地
 更新；即使 transcript 在 turn 之间单独刷新，也不会跑到 live context 后面。

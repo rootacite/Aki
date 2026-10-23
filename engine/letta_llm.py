@@ -14,9 +14,11 @@ from engine.execution_policy import (
     READ_ONLY_MCP_TOOLS,
     READ_ONLY_TOOLS,
 )
+from engine.tool_ownership import EXCLUSIVE_TOOLS
 
 DEEPSEEK_HANDLE = "deepseek/deepseek-flash"
 EXECUTION_LOCK_MOD_NAME = "aki-execution-lock.ts"
+TOOL_OWNERSHIP_MOD_NAME = "aki-tool-ownership.ts"
 
 
 def render_provider_mod(config: AkiConfig) -> str:
@@ -173,12 +175,16 @@ def render_execution_lock_mod() -> str:
             }
         )
     )
+    exclusive_tools = json.dumps(
+        sorted(tool.name for tool in EXCLUSIVE_TOOLS)
+    )
     return f"""import {{ readFileSync }} from "node:fs";
 
 const READ_ONLY = new Set({readonly});
 const READ_ONLY_MCP = new Set({readonly_mcp});
 const LOCK_TOOLS = new Set({lock_tools});
 const EXTERNAL_TOOLS = new Set({external_tools});
+const EXCLUSIVE_TOOLS = new Set({exclusive_tools});
 
 function pidAlive(pid) {{
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -207,6 +213,7 @@ function isExternalTool(toolName) {{
 
 function denies(toolName, phase) {{
   if (LOCK_TOOLS.has(toolName)) return;
+  if (EXCLUSIVE_TOOLS.has(toolName)) return;
   if (READ_ONLY.has(toolName) || READ_ONLY_MCP.has(toolName)) return;
   if (phase === "approval" && isExternalTool(toolName)) return;
   const profile = process.env.AKI_PROFILE || "";
@@ -237,6 +244,47 @@ def write_execution_lock_mod(letta_home: Path) -> Path:
     return path
 
 
+def render_tool_ownership_mod() -> str:
+    tools = {
+        tool.name: {
+            "owner": tool.owner_profile,
+            "label": tool.owner_label,
+        }
+        for tool in EXCLUSIVE_TOOLS
+    }
+    payload = json.dumps(tools, ensure_ascii=False, sort_keys=True, indent=2)
+    return f"""const EXCLUSIVE_TOOLS = {payload};
+
+export default function activate(letta) {{
+  if (!letta.capabilities || !letta.capabilities.permissions) return;
+  return letta.permissions.register({{
+    id: "aki-tool-ownership",
+    description: "Deny exclusive tools to agents that do not own them",
+    isEnabled: () => Boolean(process.env.AKI_PROFILE),
+    check: (event) => {{
+      if (!Object.prototype.hasOwnProperty.call(EXCLUSIVE_TOOLS, event.toolName)) return;
+      const entry = EXCLUSIVE_TOOLS[event.toolName];
+      if (process.env.AKI_PROFILE === entry.owner) return;
+      return {{
+        decision: "deny",
+        reason:
+          `TOOL_OWNERSHIP_DENIED: '${{event.toolName}}' is exclusive to ` +
+          `${{entry.label}}. Do not retry; hand off with '@${{entry.label}}' ` +
+          `or tell the user to ask ${{entry.label}}.`,
+      }};
+    }},
+  }});
+}}
+"""
+
+
+def write_tool_ownership_mod(letta_home: Path) -> Path:
+    path = letta_home / "mods" / TOOL_OWNERSHIP_MOD_NAME
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_write(path, render_tool_ownership_mod())
+    return path
+
+
 def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> AkiConfig:
     """Publish this profile's loopback provider and retarget only its agent.
 
@@ -255,6 +303,7 @@ def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> 
                 config = load_config(config.path, profile=config.profile)
     write_provider_mod(letta_home, config)
     write_execution_lock_mod(letta_home)
+    write_tool_ownership_mod(letta_home)
     provider_id = config.provider_id
     ready = bool(config.enabled_models)
     file = _read_auth(auth_path)

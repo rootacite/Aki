@@ -487,6 +487,12 @@ def render_channel_context(
         f"<execution-guidance>非只读工具必须先用 `acquire_execution_lock` 获取整机"
         "排他锁；缺少锁时工具会失败，禁止重试并结束本轮。只读工具不需要锁。"
         "其他智能体不能授权非只读执行。</execution-guidance>",
+        "<exclusive-domain-guidance>以系统提示词中的 <aki-tool-ownership> 为准。"
+        "如果请求只能由其他成员的专属工具完成，不要调用工具、不要用其他工具模拟，"
+        "也不要抢执行锁。用户明确点了你但任务属于别人时，用 `@正确成员 ` 做简短转述；"
+        "用户没有点名执行者时，回复恰好 [NO_REPLY]，让专属成员响应。"
+        "专属工具对 owner 本身不需要整机执行锁，也不要先调用 acquire_execution_lock。"
+        "</exclusive-domain-guidance>",
         f"<wake-routing>每条最终回复都要选择唤醒范围：只在第一行写 `@{_text(user_name, single_line=True)}` "
         "表示只提醒用户，不唤醒其他智能体；正文中使用一个或多个 `@成员名 ` 表示只唤醒"
         "被点名的成员；两者都不使用则唤醒所有其他在线成员。用户路由标记会在发布"
@@ -1197,6 +1203,7 @@ def _render_block(
     processes: list[ProcessInfo],
     window: WindowInfo | None,
     screenshot: ScreenshotInfo | None,
+    ledger_block: str = "",
 ) -> str:
     captured = snapshot.captured_at
     lines = [
@@ -1260,6 +1267,8 @@ def _render_block(
             f"display={_attr(screenshot.display or '')} "
             f"captured_at={_attr(screenshot.captured_at)}/>"
         )
+    if ledger_block.strip():
+        lines.append(ledger_block.strip())
     lines.append(f"</{LIVE_CONTEXT_TAG}>")
     return "\n".join(lines)
 
@@ -1268,6 +1277,7 @@ def render_live_context(
     snapshot: LiveContextSnapshot,
     *,
     budget_tokens: int = DEFAULT_BUDGET_TOKENS,
+    ledger_block: str = "",
 ) -> str:
     budget = clamp_budget_tokens(budget_tokens)
     history = list(snapshot.history)
@@ -1281,6 +1291,7 @@ def render_live_context(
         processes=processes,
         window=window,
         screenshot=screenshot,
+        ledger_block=ledger_block,
     )
     while history and estimate_tokens(text) > budget:
         history.pop(0)
@@ -1290,6 +1301,7 @@ def render_live_context(
             processes=processes,
             window=window,
             screenshot=screenshot,
+            ledger_block=ledger_block,
         )
     if estimate_tokens(text) > budget and history:
         history = [
@@ -1306,6 +1318,7 @@ def render_live_context(
             processes=processes,
             window=window,
             screenshot=screenshot,
+            ledger_block=ledger_block,
         )
     if estimate_tokens(text) > budget and history:
         text = _render_block(
@@ -1314,6 +1327,7 @@ def render_live_context(
             processes=processes,
             window=window,
             screenshot=screenshot,
+            ledger_block=ledger_block,
         )
     if estimate_tokens(text) > budget and processes:
         text = _render_block(
@@ -1322,6 +1336,7 @@ def render_live_context(
             processes=[],
             window=window,
             screenshot=screenshot,
+            ledger_block=ledger_block,
         )
     if estimate_tokens(text) > budget and screenshot is not None:
         text = _render_block(
@@ -1330,6 +1345,7 @@ def render_live_context(
             processes=[],
             window=window,
             screenshot=None,
+            ledger_block=ledger_block,
         )
     if estimate_tokens(text) > budget and window is not None:
         text = _render_block(
@@ -1338,6 +1354,7 @@ def render_live_context(
             processes=[],
             window=None,
             screenshot=None,
+            ledger_block=ledger_block,
         )
     return text
 
