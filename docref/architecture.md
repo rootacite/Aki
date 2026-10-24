@@ -202,7 +202,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/tool_ownership.py`：专属工具注册表、owner 校验和 `<aki-tool-ownership>` 渲染。
 - `engine/schedule_store.py`：Aki 日程持久化、重复规则和 missed 处理。
 - `engine/life_ledger.py`：Aki 独立生活账本与 16 KiB 硬上限。
-- `engine/presence.py`：logind 活动采样、工作/深夜/归来触发器。
+- `engine/presence.py`：evdev/logind 活动采样、工作/深夜/归来触发器。
 - `engine/operation_journal.py`：归来上下文使用的工具调用台账。
 - `engine/layer_process.py`：拉起并监督 `aki-layer` 透明画布进程。
 - `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。

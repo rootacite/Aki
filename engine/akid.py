@@ -123,6 +123,7 @@ from engine.life_ledger import (
 )
 from engine.operation_journal import OperationJournal
 from engine.presence import (
+    EvdevActivityProbe,
     LogindActivityProvider,
     PresenceMonitor,
     PresenceTrigger,
@@ -1431,6 +1432,8 @@ class GatewayServer:
             provider=LogindActivityProvider(
                 loginctl_bin=config.presence_loginctl_bin,
                 session_id=config.presence_session_id,
+                input_probe=EvdevActivityProbe(),
+                input_idle_seconds=config.presence_idle_reset_seconds,
             ),
             poll_seconds=config.presence_poll_seconds,
             idle_reset_seconds=config.presence_idle_reset_seconds,

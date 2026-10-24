@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -67,6 +68,17 @@ class PresenceTests(unittest.TestCase):
         state = self.monitor.state
         self.assertEqual(state["active_seconds"], 0.0)
         self.assertEqual(state["next_work_threshold"], 7200.0)
+
+    def test_long_idle_period_does_not_accumulate_work_time(self) -> None:
+        start = local_epoch(2026, 10, 24, 8, 0)
+        self.monitor.process_sample(active(start), now=start)
+        current = start
+        triggers = []
+        for _ in range(8 * 60):
+            current += 60
+            triggers.extend(self.monitor.process_sample(idle(current), now=current))
+        self.assertFalse([item for item in triggers if item.kind == "work"])
+        self.assertEqual(self.monitor.state["active_seconds"], 0.0)
 
     def test_late_night_fires_once_per_cycle_and_counts_prior_nights(self) -> None:
         first = local_epoch(2026, 10, 24, 1, 0)
@@ -166,6 +178,108 @@ class LogindProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sample.valid)
         self.assertTrue(sample.active)
         self.assertEqual(sample.session_id, "2")
+
+    async def _real_input_probe_sample(
+        self,
+        *,
+        last_activity_at: float | None,
+        idle_hint: str = "no",
+        locked_hint: str = "no",
+    ):
+        now = time.time()
+        provider = LogindActivityProvider(
+            input_probe=FakeInputProbe(last_activity_at=last_activity_at),
+            input_idle_seconds=300,
+        )
+
+        async def show_session(session_id: str):
+            if session_id == "2":
+                return {
+                    "Id": "2",
+                    "Active": "yes",
+                    "State": "active",
+                    "IdleHint": idle_hint,
+                    "IdleSinceHint": "0",
+                    "LockedHint": locked_hint,
+                }
+            return {}
+
+        async def choose_session():
+            provider._session_id = "2"
+            return "2"
+
+        with mock.patch.object(provider, "_show_session", side_effect=show_session), mock.patch.object(
+            provider, "_choose_session", side_effect=choose_session
+        ):
+            return await provider.sample()
+
+    async def test_recent_input_overrides_stuck_logind_idle_hint(self) -> None:
+        now = time.time()
+        sample = await self._real_input_probe_sample(last_activity_at=now - 30)
+        self.assertTrue(sample.valid)
+        self.assertTrue(sample.active)
+
+    async def test_stale_input_marks_session_idle(self) -> None:
+        now = time.time()
+        last = now - 600
+        sample = await self._real_input_probe_sample(last_activity_at=last)
+        self.assertTrue(sample.valid)
+        self.assertFalse(sample.active)
+        self.assertAlmostEqual(sample.idle_since or 0, last, delta=1)
+
+    async def test_locked_session_is_idle_even_with_recent_input(self) -> None:
+        sample = await self._real_input_probe_sample(
+            last_activity_at=time.time() - 30,
+            locked_hint="yes",
+        )
+        self.assertFalse(sample.active)
+
+    async def test_unavailable_input_probe_uses_logind_idle_hint(self) -> None:
+        provider = LogindActivityProvider(
+            input_probe=FakeInputProbe(
+                available=False,
+                ever_available=False,
+                last_activity_at=None,
+            )
+        )
+
+        async def show_session(session_id: str):
+            return {
+                "Id": "2",
+                "Active": "yes",
+                "State": "active",
+                "IdleHint": "yes",
+                "IdleSinceHint": "0",
+                "LockedHint": "no",
+            }
+
+        with mock.patch.object(provider, "_show_session", side_effect=show_session):
+            provider._session_id = "2"
+            sample = await provider.sample()
+        self.assertTrue(sample.valid)
+        self.assertFalse(sample.active)
+
+
+class FakeInputProbe:
+    def __init__(
+        self,
+        *,
+        available: bool = True,
+        ever_available: bool = True,
+        last_activity_at: float | None = None,
+    ) -> None:
+        self.available = available
+        self.ever_available = ever_available
+        self.last_activity_at = last_activity_at
+
+    def poll(self, now: float | None = None) -> float | None:
+        return self.last_activity_at
+
+    def status(self):
+        return {"available": self.available}
+
+    def close(self) -> None:
+        pass
 
 
 if __name__ == "__main__":

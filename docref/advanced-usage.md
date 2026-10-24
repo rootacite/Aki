@@ -197,10 +197,14 @@ Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，�
   `~/.aki/ledger/aki.json`。整个文件硬上限 16384 UTF-8 字节，单条正文最多 1024 字节；
   超出时逐条淘汰最旧记录。账本固定注入 Aki 的 `<aki-live-context>`，不参与预算裁剪。
 
-触发器只由 Aki profile 运行。活动状态来自 `loginctl` 的 `IdleHint`/`IdleSinceHint`/
-`LockedHint`：连续工作 2 小时后提醒一次，之后每小时一次；00:30–05:30 仍活跃时每夜最多提醒
-一次并附带最近 30 天夜晚工作次数；连续空闲 45 分钟后返回时提醒，并要求两次活跃采样、
-至少 10 秒防抖。设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
+触发器只由 Aki profile 运行。活动状态优先使用 evdev 键盘/鼠标事件判断；`loginctl` 的
+`LockedHint` 仍然有效，而 `IdleHint`/`IdleSinceHint` 只在不具备输入设备读取权限时兜底。
+部分桌面（例如 KDE Wayland）可能永远不更新 `IdleHint`，只依赖它会把睡眠和待机时间也算成
+连续工作。akid 需要 `input` 组权限才能读取 `/dev/input/event*`；超过
+`idle_reset_seconds`（默认 300 秒）没有真实输入就视为空闲并清零连续工作计时。
+连续工作 2 小时后提醒一次，之后每小时一次；00:30–05:30 仍活跃时每夜最多提醒一次并附带最近
+30 天夜晚工作次数；连续空闲 45 分钟后返回时提醒，并要求两次活跃采样、至少 10 秒防抖。
+设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
 `~/.aki/aki.conf` 的 `[schedule]` 和 `[presence]` 段。
 
 执行锁规则只存在于基座 prompt，不再生成 `<aki-execution-lock>` 动态块。动态块按标签原地
