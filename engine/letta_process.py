@@ -273,7 +273,7 @@ class LettaProcess:
             except (BrokenPipeError, ConnectionResetError, RuntimeError) as exc:
                 raise BackendUnavailable("backend stdin is closed") from exc
 
-    async def send_user(self, content: str) -> None:
+    async def send_user(self, content: str | Sequence[Mapping[str, Any]]) -> None:
         if not self.ready:
             raise BackendUnavailable("backend is not ready")
         await self._write_json(

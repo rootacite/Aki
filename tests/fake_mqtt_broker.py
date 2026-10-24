@@ -28,13 +28,15 @@ class FakeMqttBroker:
         self.port = int(sockets[0].getsockname()[1])
 
     async def stop(self) -> None:
-        if self.server is not None:
-            self.server.close()
-            await self.server.wait_closed()
-            self.server = None
+        server = self.server
+        self.server = None
+        if server is not None:
+            server.close()
         for writer in list(self._writers):
             with contextlib.suppress(Exception):
                 writer.close()
+        if server is not None:
+            await server.wait_closed()
         self._writers.clear()
         self._subscriptions.clear()
         self._client_ids.clear()

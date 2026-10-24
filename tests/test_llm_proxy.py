@@ -261,6 +261,84 @@ class LocalBypassProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captured["body"]["model"], "gemma.gguf")
 
 
+class ExtraBodyProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.captured: dict[str, object] = {}
+
+        async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            self.captured["body"] = json.loads(rest[:length])
+            self.captured["authorization"] = headers.get("authorization")
+            payload = b'{"choices":[{"message":{"content":"OK"}}]}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + payload
+            )
+            await writer.drain()
+            writer.close()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = self.upstream.sockets[0].getsockname()[1]
+        route = ModelRoute(
+            model_id="minimax",
+            upstream_name="minimax",
+            upstream_model="MiniMax-M2.7",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=204800,
+            max_tokens=65536,
+            inputs=("text",),
+            url=f"http://127.0.0.1:{port}/chat/completions",
+            api_key="upstream-secret",
+            extra_body={"reasoning_split": True, "thinking": {"type": "adaptive"}},
+        )
+        self.proxy = LlmProxy("127.0.0.1", 0, "loopback-token", (route,))
+        await self.proxy.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+
+    async def test_merges_extra_body_after_model_rewrite(self) -> None:
+        _reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        body = json.dumps({"model": "minimax", "messages": [{"role": "user", "content": "hi"}]}).encode()
+        writer.write(
+            (
+                "POST /v1/chat/completions HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode()
+            + body
+        )
+        await writer.drain()
+        payload = await asyncio.wait_for(_reader.read(4096), timeout=2)
+        writer.close()
+        self.assertIn(b"200 OK", payload)
+        captured = self.captured["body"]
+        self.assertEqual(captured["model"], "MiniMax-M2.7")
+        self.assertIs(captured["reasoning_split"], True)
+        self.assertEqual(captured["thinking"], {"type": "adaptive"})
+        self.assertEqual(self.captured["authorization"], "Bearer upstream-secret")
+
+
 class GrokOAuthProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.captured: dict[str, object] = {}

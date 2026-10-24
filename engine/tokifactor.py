@@ -60,6 +60,9 @@ PICTURE_TOPIC = "tokifactor/picture"
 AVATAR_TOPIC = "tokifactor/avatar"
 CONTROL_TOPIC = "tokifactor/control"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_MESSAGE_IMAGE_BYTES = 16 * 1024 * 1024
+MAX_MESSAGE_ATTACHMENTS = 4
+MAX_ATTACHMENT_NAME_CHARS = 64
 STRUCTURED_FIELDS = (
     "schema",
     "kind",
@@ -78,6 +81,10 @@ STRUCTURED_FIELDS = (
     "timeoutS",
     "details",
     "decision",
+    "attachmentCount",
+    "attachmentIds",
+    "attachmentNames",
+    "attachments",
     "probeId",
     "protocolVersion",
     "agent",
@@ -126,6 +133,21 @@ class TextEnvelope:
     message_id: str = ""
     sent_at: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class ImageEnvelope:
+    sender: str
+    data: bytes
+    sender_id: str = ""
+    message_id: str = ""
+    name: str = ""
+    attachment_index: int = 0
+    attachment_count: int = 1
+    sent_at: int = 0
+    mime: str = ""
+    transfer_id: str = ""
+    expect_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -412,6 +434,12 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
         for key in STRUCTURED_FIELDS
         if key in value and value[key] is not None
     }
+    try:
+        attachment_index = int(value.get("attachmentIndex") or 0)
+        attachment_count = int(value.get("attachmentCount") or 1)
+    except (TypeError, ValueError):
+        attachment_index = 0
+        attachment_count = 1
     return {
         "abort": False,
         "transfer_id": parts[0],
@@ -426,6 +454,9 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
         "metadata": metadata,
         "size": size,
         "caption": str(value.get("caption") or ""),
+        "attachment_index": max(0, attachment_index),
+        "attachment_count": max(1, attachment_count),
+        "text_commit": str(value.get("textCommit") or "").lower() == "true",
     }
 
 
@@ -489,6 +520,87 @@ class TextChunkAssembler:
             message_id=transfer.message_id,
             sent_at=transfer.sent_at,
             metadata=transfer.metadata,
+        )
+
+    def _expire(self) -> None:
+        cutoff = time.monotonic() - INCOMPLETE_TIMEOUT_S
+        for key in [key for key, value in self._transfers.items() if value.last_seen < cutoff]:
+            self._transfers.pop(key, None)
+
+
+class ImageChunkAssembler:
+    def __init__(self, magic_string: str) -> None:
+        self.magic_string = magic_string
+        self._transfers: dict[str, _InboundTransfer] = {}
+
+    def add(self, chunk: dict[str, Any]) -> ImageEnvelope | None:
+        self._expire()
+        transfer_id = str(chunk.get("transfer_id") or "")
+        if not transfer_id:
+            return None
+        if chunk.get("abort"):
+            self._transfers.pop(transfer_id, None)
+            return None
+        index = int(chunk.get("index", 0))
+        total = int(chunk.get("total", 0))
+        if total <= 0 or total > MAX_INBOUND_CHUNKS or index < 0 or index >= total:
+            return None
+        transfer = self._transfers.get(transfer_id)
+        if transfer is None:
+            transfer = _InboundTransfer(
+                total=total,
+                expected_hash=str(chunk.get("hash") or ""),
+                sender=str(chunk.get("sender") or "Unknown"),
+                sender_id=str(chunk.get("sender_id") or ""),
+                message_id=str(chunk.get("message_id") or ""),
+                sent_at=_int_value(chunk.get("sent_at")),
+                metadata=dict(chunk.get("metadata") or {}),
+                size=int(chunk.get("size") or 0),
+            )
+            self._transfers[transfer_id] = transfer
+        if transfer.total != total:
+            self._transfers.pop(transfer_id, None)
+            return None
+        try:
+            encrypted = base64.b64decode(str(chunk.get("encrypted_data") or ""), validate=True)
+            clear = decrypt_bytes(encrypted, self.magic_string)
+        except (ValueError, DecodeError):
+            return None
+        transfer.parts[index] = clear
+        transfer.last_seen = time.monotonic()
+        if len(transfer.parts) < total:
+            return None
+        payload = b"".join(transfer.parts[i] for i in range(total))
+        self._transfers.pop(transfer_id, None)
+        if not payload or len(payload) > MAX_IMAGE_BYTES:
+            return None
+        digest = hashlib.sha256(payload).hexdigest()
+        if digest.lower() != transfer.expected_hash.lower():
+            return None
+        mime = detect_image_mime(payload)
+        if mime is None:
+            return None
+        caption_cipher = str(chunk.get("caption") or "")
+        name = ""
+        if caption_cipher:
+            try:
+                name = decrypt_bytes(
+                    base64.b64decode(caption_cipher, validate=True), self.magic_string
+                ).decode("utf-8", "replace")[:MAX_ATTACHMENT_NAME_CHARS]
+            except (ValueError, DecodeError):
+                name = ""
+        return ImageEnvelope(
+            sender=transfer.sender,
+            data=payload,
+            sender_id=transfer.sender_id,
+            message_id=transfer.message_id or transfer_id,
+            name=name,
+            attachment_index=int(chunk.get("attachment_index") or 0),
+            attachment_count=int(chunk.get("attachment_count") or 1),
+            sent_at=transfer.sent_at,
+            mime=mime,
+            transfer_id=transfer_id,
+            expect_text=bool(chunk.get("text_commit")),
         )
 
     def _expire(self) -> None:
@@ -590,6 +702,10 @@ def encode_picture_payloads(
     avatar_hash: str = "",
     caption: str = "",
     sent_at: int | None = None,
+    message_id: str = "",
+    attachment_index: int = 0,
+    attachment_count: int = 1,
+    text_commit: bool = False,
 ) -> tuple[str, list[str]]:
     if not data:
         raise ValueError("image is empty")
@@ -614,11 +730,16 @@ def encode_picture_payloads(
             ("senderId", sender_id),
             ("avatarHash", avatar_hash),
             ("size", str(len(data))),
+            ("messageId", message_id or transfer_id),
+            ("attachmentIndex", str(max(0, attachment_index))),
+            ("attachmentCount", str(max(1, attachment_count))),
         ]
         if event_at > 0:
             pairs.append(("sentAt", str(event_at)))
         if caption_cipher:
             pairs.append(("caption", caption_cipher))
+        if text_commit:
+            pairs.append(("textCommit", "true"))
         chunk = _encode_object(pairs)
         payloads.append(chunk)
     return transfer_id, payloads

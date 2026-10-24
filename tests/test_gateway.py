@@ -16,6 +16,7 @@ from typing import Any
 from unittest import mock
 
 from engine.akid import (
+    Approval,
     ChannelTurnState,
     GatewayConfig,
     GatewayServer,
@@ -24,13 +25,21 @@ from engine.akid import (
     _normalize_mcp_result,
     unique_capture_path,
 )
+from engine.aki_config import ImageGeneration
 from engine.letta_process import LettaProcess
 from engine.execution_policy import WAIT_OTHER_TOOL
-from engine.live_context import WindowInfo, estimate_tokens
+from engine.live_context import (
+    ChannelImageAttachment,
+    WindowInfo,
+    estimate_tokens,
+    render_channel_policy,
+    render_channel_turn,
+)
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
-from engine.tokifactor import TextEnvelope
+from engine.tokifactor import ImageEnvelope, TextEnvelope
 from engine.member_identity import legacy_member_id
 from tests.fake_mqtt_broker import FakeMqttBroker
+from tests.test_image_generation import FakeMiniMaxImageAPI
 
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_LETTA = ROOT / "tests" / "fake_letta.py"
@@ -70,7 +79,11 @@ class FakeChannel:
         return
 
     async def publish_text(
-        self, text: str, metadata: dict[str, Any] | None = None
+        self,
+        text: str,
+        metadata: dict[str, Any] | None = None,
+        *,
+        message_id: str | None = None,
     ) -> None:
         if metadata:
             kind = str(metadata.get("kind") or "event")
@@ -78,6 +91,34 @@ class FakeChannel:
             self.events.append({"text": text, **metadata})
         else:
             self.published.append(("text", text))
+
+    async def publish_message(
+        self,
+        text: str,
+        images: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        message_id = f"fake-message-{len(self.images) + 1}"
+        results = []
+        for index, image in enumerate(images):
+            result = await self.publish_image(
+                bytes(image["data"]),
+                caption=str(image.get("name") or ""),
+                mime=str(image.get("mime") or ""),
+            )
+            result.update(
+                {
+                    "transfer_id": f"fake-transfer-{len(self.images)}",
+                    "message_id": message_id,
+                    "name": str(image.get("name") or ""),
+                    "attachment_index": index,
+                    "attachment_count": len(images),
+                }
+            )
+            results.append(result)
+        if text.strip() or not results:
+            await self.publish_text(text, metadata, message_id=message_id)
+        return {"message_id": message_id, "images": results}
 
     async def publish_notice(self, text: str) -> None:
         self.published.append(("notice", text))
@@ -278,6 +319,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def start_server(
         self,
         *,
+        profile: str = "aki",
         queue_max: int = 32,
         approval_timeout: float = 2.0,
         sandbox_enabled: bool = False,
@@ -305,6 +347,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         spectacle_bin: str = "spectacle",
         screenshot_output_dir: Path | None = None,
         screenshot_wayland_display: str | None = None,
+        image_generation: ImageGeneration | None = None,
         live_context_enabled: bool = False,
         live_context_budget_tokens: int = 65536,
         zsh_history_path: Path | None = None,
@@ -324,6 +367,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     ) -> GatewayServer:
         config = GatewayConfig(
             socket_path=self.root / "akid.sock",
+            profile=profile,
             agent_id="test-agent",
             conversation_id="default",
             letta_bin="letta",
@@ -356,6 +400,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             spectacle_bin=spectacle_bin,
             screenshot_output_dir=screenshot_output_dir or (self.root / "screenshots"),
             screenshot_wayland_display=screenshot_wayland_display,
+            image_generation=image_generation,
             live_context_enabled=live_context_enabled,
             live_context_budget_tokens=live_context_budget_tokens,
             zsh_history_path=zsh_history_path,
@@ -1229,13 +1274,100 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await server.stop()
 
-    async def test_channel_prompt_says_reply_is_automatic(self) -> None:
-        await self.start_server()
-        assert self.server is not None
-        prompt = self.server._channel_prompt("Acite", "sender-1", "你好")
-        self.assertIn("automatically published", prompt)
-        self.assertIn("do not call any tool", prompt)
-        self.assertIn("[NO_REPLY]", prompt)
+    async def test_channel_prompt_is_minimal_and_policy_lives_in_system_prompt(self) -> None:
+        agent_path = self._write_test_agent("BASE PROMPT\n")
+        server = await self.start_server()
+        prompt = server._channel_prompt("Acite", "sender-1", "你好")
+        self.assertIn("sender: Acite", prompt)
+        self.assertIn("message:\n你好", prompt)
+        self.assertNotIn("automatically published", prompt)
+        self.assertNotIn("<aki-channel-policy", prompt)
+        self.assertNotIn("<aki-channel-turn", prompt)
+        system = self._agent_system(agent_path)
+        self.assertIn("<aki-channel-policy", system)
+        self.assertIn(
+            "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
+            system,
+        )
+        self.assertIn("wake-reminder: 用^排除不需要被提醒的成员", prompt)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
+        )
+
+    async def test_channel_turn_is_written_to_real_system_prompt(self) -> None:
+        agent_path = self._write_test_agent("BASE PROMPT\n")
+        server = await self.start_server(channel=FakeChannel())
+        turn = Turn(
+            turn_id="turn-context",
+            conn=server.channel_conn,
+            message="",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="sender-1",
+            channel_message_seq=7,
+            channel_sender="Acite",
+            channel_text="hello",
+        )
+        await server._refresh_channel_turn(turn)
+        system = self._agent_system(agent_path)
+        self.assertIn('<aki-channel-turn version="1" from_agent="false" new="true">', system)
+        self.assertIn(
+            '<new-message seq="7" sender="Acite" sender_id="sender-1" source="user"',
+            system,
+        )
+        self.assertIn("<text>hello</text>", system)
+        self.assertIn("<wake-reminder>用^排除不需要被提醒的成员", system)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用", system
+        )
+        self.assertIn("<guidance>", system)
+        self.assertIn('remaining="3"', system)
+        self.assertIn("resets=\"user-message\"", system)
+        prompt = server._channel_prompt("Acite", "sender-1", "hello")
+        self.assertNotIn("<aki-channel-turn", prompt)
+        await server._refresh_channel_turn(None)
+        self.assertNotIn("<aki-channel-turn", self._agent_system(agent_path))
+
+    async def test_wake_routing_is_written_to_real_system_prompt(self) -> None:
+        agent_path = self._write_test_agent("BASE PROMPT\n")
+        conversation = (
+            self.root
+            / "backend"
+            / "conversations"
+            / _b64url("default:test-agent")
+        )
+        conversation.mkdir(parents=True)
+        prompt_path = conversation / "system-prompt.json"
+        prompt_path.write_text(
+            json.dumps({"content": "BASE SYSTEM PROMPT\n"}) + "\n",
+            encoding="utf-8",
+        )
+        server = await self.start_server()
+
+        agent_system = self._agent_system(agent_path)
+        self.assertIn("<aki-channel-wake-routing", agent_system)
+        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", agent_system)
+        self.assertIn("强制只唤醒用户，不唤醒任何其他成员。", agent_system)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用。", agent_system
+        )
+        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", agent_system)
+
+        compiled = json.loads(prompt_path.read_text(encoding="utf-8"))["content"]
+        self.assertIn("<aki-channel-wake-routing", compiled)
+        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", compiled)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用。", compiled
+        )
+        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", compiled)
+
+        channel_prompt = server._channel_prompt("Acite", "sender-1", "你好")
+        self.assertNotIn("<wake-routing>", channel_prompt)
+        self.assertNotIn("不希望其他成员注意到这条消息", channel_prompt)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用", channel_prompt
+        )
 
     async def test_agent_channel_message_uses_transcript_not_user_role(self) -> None:
         agent_path = self._write_test_agent()
@@ -1315,30 +1447,40 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "last_seen": time.monotonic(),
         }
 
-        state = ChannelTurnState(text="@Master\n只提醒用户。")
-        server.channel_conn._flush_progress(
-            "turn-user-only", 1, state, force=True, phase="final"
+        state = ChannelTurnState(text="@Master\n提醒所有人。")
+        await server.channel_conn._flush_progress(
+            "turn-user-reminder", 1, state, force=True, phase="final"
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 1)
-        user_event = fake_channel.events_of("turn")[-1]
-        self.assertEqual(user_event["text"], "只提醒用户。")
-        self.assertEqual(user_event["wake"], "user")
-        self.assertNotIn("wakeIds", user_event)
+        reminder_event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(reminder_event["text"], "提醒所有人。")
+        self.assertEqual(reminder_event["wake"], "user")
+        self.assertNotIn("wakeIds", reminder_event)
 
-        state = ChannelTurnState(text="@Fuyu 只提醒 Fuyu。")
-        server.channel_conn._flush_progress(
-            "turn-mentions", 2, state, force=True, phase="final"
+        state = ChannelTurnState(text="@Master\n只提醒你。^Fuyu")
+        await server.channel_conn._flush_progress(
+            "turn-user-reminder-suppressed", 2, state, force=True, phase="final"
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 2)
+        suppressed_event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(suppressed_event["text"], "只提醒你。")
+        self.assertEqual(suppressed_event["wake"], "user")
+        self.assertNotIn("wakeIds", suppressed_event)
+
+        state = ChannelTurnState(text="@Fuyu 只提醒 Fuyu。")
+        await server.channel_conn._flush_progress(
+            "turn-mentions", 3, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 3)
         mention_event = fake_channel.events_of("turn")[-1]
         self.assertEqual(mention_event["wake"], "mentions")
         self.assertEqual(mention_event["wakeIds"], "fuyu")
 
         state = ChannelTurnState(text="提醒所有人。")
-        server.channel_conn._flush_progress(
-            "turn-all", 3, state, force=True, phase="final"
+        await server.channel_conn._flush_progress(
+            "turn-all", 4, state, force=True, phase="final"
         )
-        await wait_until(lambda: len(fake_channel.final_texts()) == 3)
+        await wait_until(lambda: len(fake_channel.final_texts()) == 4)
         self.assertEqual(fake_channel.events_of("turn")[-1]["wake"], "all")
 
     async def test_agent_reply_wake_scope_controls_turns(self) -> None:
@@ -1527,7 +1669,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(server.queue), 1)
         queued = server.queue[0]
         self.assertTrue(queued.origin_is_agent)
-        self.assertNotIn(body, queued.message)
+        self.assertEqual(queued.channel_text, body)
+        self.assertIn(body, queued.message)
+        self.assertIn("new-message: true", queued.message)
+        self.assertIn('<new-message seq="1"', queued.message)
+        self.assertIn('<text>@Aki 这条必须处理</text>', queued.message)
+        self.assertNotIn("<aki-channel-turn", queued.message)
         server.active = None
         server.queue.clear()
 
@@ -1875,7 +2022,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "last_seen": time.monotonic(),
         }
         state = ChannelTurnState(text="大家都看一下。^Aki")
-        server.channel_conn._flush_progress(
+        await server.channel_conn._flush_progress(
             "turn-non-wake", 1, state, force=True, phase="final"
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 1)
@@ -1885,7 +2032,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["wakeIds"], "fuyu")
 
         state = ChannelTurnState(text="@Fuyu 这条给你。^Fuyu")
-        server.channel_conn._flush_progress(
+        await server.channel_conn._flush_progress(
             "turn-non-wake-empty", 2, state, force=True, phase="final"
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 2)
@@ -1894,16 +2041,22 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(event["wake"], "mentions")
         self.assertNotIn("wakeIds", event)
 
-    async def test_channel_prompt_omits_agent_message_body(self) -> None:
+    async def test_channel_prompt_includes_agent_body_and_new_message_identity(self) -> None:
         await self.start_server()
         assert self.server is not None
         body = "AGENT_BODY_SHOULD_STAY_IN_TRANSCRIPT"
         prompt = self.server._channel_prompt(
-            "Fuyu", "fuyu", body, from_agent=True
+            "Fuyu", "fuyu", body, from_agent=True, seq=9
         )
-        self.assertNotIn(body, prompt)
-        self.assertIn("not a user message", prompt)
-        self.assertIn("<aki-channel-transcript>", prompt)
+        self.assertIn(body, prompt)
+        self.assertIn("new-message: true", prompt)
+        self.assertIn('<new-message seq="9"', prompt)
+        self.assertIn('source="agent"', prompt)
+        self.assertIn("wake-reminder: 用^排除不需要被提醒的成员", prompt)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
+        )
+        self.assertNotIn("<aki-channel-turn", prompt)
 
     async def test_legacy_dynamic_execution_lock_block_is_removed(self) -> None:
         agent_path = self._write_test_agent(
@@ -1949,12 +2102,17 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: bool(fake_channel.final_texts()))
         system = self._agent_system(agent_path)
         self.assertNotIn("<aki-execution-lock", system)
-        prompt = server._channel_prompt("alice", "alice-1", "do this")
+        prompt = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message="do this",
+            user_name=server.config.username,
+        )
         self.assertIn(
             f'<execution-ownership responder="{legacy_member_id("Aki")}" self="true">',
             prompt,
         )
-        self.assertIn("唯一负责确认", prompt)
+        self.assertIn("负责确认执行者的唯一成员", prompt)
 
     async def test_single_channel_member_may_acquire_lock_without_mention(self) -> None:
         await self.start_server()
@@ -2102,7 +2260,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         prompt = server._channel_prompt("Master", "master", "hello from a human")
         self.assertIn('kind="user"', prompt)
         self.assertIn("human bio", prompt)
-        self.assertIn(f'responder="{legacy_member_id("Aki")}"', prompt)
+        turn = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message="hello from a human",
+            user_name=server.config.username,
+        )
+        self.assertIn(f'responder="{legacy_member_id("Aki")}"', turn)
 
     async def test_control_profile_updates_are_sparse_and_bounded(self) -> None:
         server = await self.start_server()
@@ -2302,6 +2466,287 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(conversation.read_bytes(), original_conversation)
         self.assertTrue(await server.backend.wait_ready(5.0))
 
+    async def test_channel_image_and_text_share_one_history_entry_and_multimodal_turn(
+        self,
+    ) -> None:
+        fake_channel = FakeChannel()
+        last_input = self.root / "last-input.json"
+        with mock.patch.dict(
+            os.environ, {"FAKE_LETTA_LAST_INPUT": str(last_input)}, clear=False
+        ):
+            server = await self.start_server(channel=fake_channel)
+            await server._on_channel_image(
+                ImageEnvelope(
+                    sender="alice",
+                    sender_id="alice-1",
+                    message_id="mixed-1",
+                    name="图片1",
+                    attachment_index=0,
+                    attachment_count=1,
+                    data=PNG_1X1,
+                    mime="image/png",
+                    transfer_id="transfer-1",
+                )
+            )
+            await server._on_channel_text(
+                "alice",
+                "alice-1",
+                "看看图片1的设计",
+                {"attachmentCount": "1"},
+                message_id="mixed-1",
+            )
+            await wait_until(lambda: bool(fake_channel.final_texts()))
+            await wait_until(lambda: server.active is None and not server.queue)
+
+        entry = next(
+            entry for entry in reversed(server._channel_history)
+            if entry.text == "看看图片1的设计"
+        )
+        self.assertEqual(len(entry.attachments), 1)
+        self.assertEqual(entry.attachments[0].name, "图片1")
+        self.assertTrue(Path(entry.attachments[0].path).is_file())
+        raw = json.loads(last_input.read_text(encoding="utf-8"))
+        self.assertIsInstance(raw, list)
+        self.assertEqual(raw[0]["type"], "text")
+        self.assertIn("图片1", raw[0]["text"])
+        self.assertEqual(raw[1]["type"], "image")
+        self.assertEqual(raw[1]["source"]["media_type"], "image/png")
+        self.assertGreater(len(raw[1]["source"]["data"]), 20)
+        rendered = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message=entry.text,
+            message_seq=entry.seq,
+            message_sender=entry.sender,
+            message_sender_id=entry.sender_id,
+            message_attachments=entry.attachments,
+        )
+        self.assertIn('"name":"图片1"', rendered)
+        self.assertIn('"path":', rendered)
+        self.assertNotIn(raw[1]["source"]["data"], rendered)
+
+    async def test_delayed_text_commit_does_not_prematurely_record_image_only(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        await server._on_channel_image(
+            ImageEnvelope(
+                sender="alice",
+                sender_id="alice-1",
+                message_id="delayed-text-1",
+                name="图片1",
+                attachment_index=0,
+                attachment_count=1,
+                data=PNG_1X1,
+                mime="image/png",
+                transfer_id="delayed-transfer-1",
+                expect_text=True,
+            )
+        )
+        await asyncio.sleep(1.2)
+        self.assertFalse(
+            any(entry.message_id == "delayed-text-1" for entry in server._channel_history),
+            "image-only message was finalized before the text commit arrived",
+        )
+        await server._on_channel_text(
+            "alice",
+            "alice-1",
+            "带图的正文",
+            {"attachmentCount": "1"},
+            message_id="delayed-text-1",
+        )
+        await wait_until(
+            lambda: any(
+                entry.message_id == "delayed-text-1" for entry in server._channel_history
+            )
+        )
+        entry = next(
+            entry for entry in server._channel_history if entry.message_id == "delayed-text-1"
+        )
+        self.assertEqual(entry.text, "带图的正文")
+        self.assertEqual(len(entry.attachments), 1)
+
+    async def test_image_only_channel_message_is_recorded_without_turn(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        await server._on_channel_image(
+            ImageEnvelope(
+                sender="alice",
+                sender_id="alice-1",
+                message_id="image-only-1",
+                name="草图",
+                attachment_index=0,
+                attachment_count=1,
+                data=PNG_1X1,
+                mime="image/png",
+                transfer_id="transfer-only",
+            )
+        )
+        await wait_until(
+            lambda: any(
+                entry.attachments and entry.attachments[0].name == "草图"
+                for entry in server._channel_history
+            ),
+            timeout=3.0,
+        )
+        self.assertIsNone(server.active)
+        self.assertFalse(server.queue)
+        entry = next(
+            entry for entry in server._channel_history if entry.attachments
+        )
+        self.assertEqual(entry.text, "")
+        self.assertTrue(Path(entry.attachments[0].path).is_file())
+
+    async def test_channel_history_persists_attachment_paths_and_names(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        image_path = self.root / "persisted.png"
+        image_path.write_bytes(PNG_1X1)
+        server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="看看图片1",
+            from_agent=False,
+            message_id="persisted-message",
+            attachments=(
+                ChannelImageAttachment(
+                    name="图片1",
+                    path=str(image_path),
+                    mime="image/png",
+                    size=len(PNG_1X1),
+                    index=1,
+                ),
+            ),
+        )
+        server._channel_history = []
+        server._load_channel_history()
+        entry = server._channel_history[-1]
+        self.assertEqual(entry.text, "看看图片1")
+        self.assertEqual(entry.attachments[0].name, "图片1")
+        self.assertEqual(entry.attachments[0].path, str(image_path))
+
+    async def test_agent_image_directive_becomes_attachment_and_preserves_wake(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        fuyu_id = legacy_member_id("Fuyu")
+        server._channel_members[fuyu_id] = {
+            "id": fuyu_id,
+            "name": "Fuyu",
+            "aliases": ("Fuyu", "冬"),
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+        }
+        image_path = self.root / "agent-image.png"
+        image_path.write_bytes(PNG_1X1)
+        cleaned, extracted = await server._extract_agent_channel_images(
+            f"看看这张图。#[{image_path}] @Fuyu 你好"
+        )
+        self.assertEqual(cleaned, "看看这张图。 @Fuyu 你好")
+        self.assertEqual(len(extracted), 1)
+        server.channel_conn._ensure_worker()
+        await server.channel_conn._flush_progress(
+            "turn-agent-image",
+            9,
+            ChannelTurnState(text=f"看看这张图。#[{image_path}] @Fuyu 你好"),
+            force=True,
+            phase="final",
+        )
+        await wait_until(lambda: bool(fake_channel.images))
+        await wait_until(lambda: bool(fake_channel.final_texts()))
+        event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(event["text"], "看看这张图。 @Fuyu 你好")
+        self.assertEqual(event["wake"], "mentions")
+        self.assertEqual(event["wakeIds"], fuyu_id)
+        self.assertEqual(fake_channel.images[0]["caption"], "agent-image.png")
+        entry = server._channel_history[-1]
+        self.assertEqual(entry.attachments[0].name, "agent-image.png")
+        self.assertTrue(Path(entry.attachments[0].path).is_file())
+
+    async def test_agent_image_message_wakes_peer_with_multimodal_turn(self) -> None:
+        fake_channel = FakeChannel()
+        last_input = self.root / "agent-image-input.json"
+        fuyu_id = legacy_member_id("Fuyu")
+        with mock.patch.dict(
+            os.environ, {"FAKE_LETTA_LAST_INPUT": str(last_input)}, clear=False
+        ):
+            server = await self.start_server(channel=fake_channel)
+            server._channel_members[fuyu_id] = {
+                "id": fuyu_id,
+                "name": "Fuyu",
+                "aliases": ("Fuyu", "冬"),
+                "kind": "agent",
+                "last_seen": time.monotonic(),
+            }
+            self_id = server._channel_self_key()
+            await server._on_channel_image(
+                ImageEnvelope(
+                    sender="Fuyu",
+                    sender_id=fuyu_id,
+                    message_id="agent-mixed-1",
+                    name="方案图",
+                    attachment_index=0,
+                    attachment_count=1,
+                    data=PNG_1X1,
+                    mime="image/png",
+                    transfer_id="agent-transfer-1",
+                )
+            )
+            await server._on_channel_text(
+                "Fuyu",
+                fuyu_id,
+                "@Aki 看方案图",
+                {
+                    "schema": "akid.v1",
+                    "kind": "turn",
+                    "phase": "final",
+                    "turnId": "turn-peer-image",
+                    "attachmentCount": "1",
+                    "wake": "mentions",
+                    "wakeIds": self_id,
+                },
+                message_id="agent-mixed-1",
+            )
+            await wait_until(lambda: bool(fake_channel.final_texts()))
+            await wait_until(lambda: server.active is None and not server.queue)
+        raw = json.loads(last_input.read_text(encoding="utf-8"))
+        self.assertIsInstance(raw, list)
+        self.assertTrue(any(part.get("type") == "image" for part in raw))
+        self.assertIn("方案图", raw[0]["text"])
+
+    async def test_ephemeral_rollback_removes_multimodal_base64_messages(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text('{"type":"session"}\n', encoding="utf-8")
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        original_messages = messages.read_bytes()
+        original_conversation = conversation.read_bytes()
+        original_send_user = server.backend.send_user
+
+        async def append_multimodal_and_send(content: object) -> None:
+            with messages.open("ab") as handle:
+                handle.write(
+                    b'{"type":"message","message":{"role":"user","content":['
+                    b'{"type":"text","text":"look"},{"type":"image","source":'
+                    b'{"type":"base64","media_type":"image/png","data":"QUJD"}}]}}\n'
+                )
+            await original_send_user(content)
+
+        with mock.patch.object(
+            server.backend, "send_user", side_effect=append_multimodal_and_send
+        ):
+            await server._on_channel_text(
+                "Fuyu",
+                "fuyu",
+                "ephemeral multimodal",
+                {"schema": "akid.v1", "kind": "turn", "phase": "final"},
+            )
+            await wait_until(
+                lambda: int(server._channel_transcript_status.get("ephemeral_turns", 0))
+                >= 1
+            )
+            await wait_until(lambda: server.active is None and not server.queue)
+        self.assertEqual(messages.read_bytes(), original_messages)
+        self.assertEqual(conversation.read_bytes(), original_conversation)
+
     async def test_channel_control_probe_presence_dedup_and_rate_limit(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
@@ -2421,20 +2866,36 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 },
             )
         )
-        plain = server._channel_prompt("alice", "alice-1", "hello everyone")
-        self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain)
-        self.assertIn("用户不在成员列表中", plain)
-        self.assertIn("<wake-routing>", plain)
-        self.assertIn("@Master", plain)
-        self.assertIn("直接说话即可", plain)
-        self.assertIn("Fuyu", plain)
-        self.assertIn("&lt;untrusted&gt;", plain)
-        other = server._channel_prompt("alice", "alice-1", "@冬 hello")
-        self.assertIn("提到了其他成员，没有点你", other)
-        own = server._channel_prompt("alice", "alice-1", "@秋 hello")
-        self.assertIn("用户提到了你，正在和你对话。", own)
-        self.assertIn("路由标记", own)
-        self.assertNotIn("没有点你", own)
+        plain = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message="hello everyone",
+            user_name=server.config.username,
+        )
+        self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain)
+        policy = render_channel_policy(user_name=server.config.username)
+        self.assertIn("用户不在成员列表中", policy)
+        self.assertNotIn("<wake-routing>", plain)
+        self.assertNotIn("不希望其他成员注意到这条消息", plain)
+        roster = server._channel_prompt("alice", "alice-1", "hello everyone")
+        self.assertIn("Fuyu", roster)
+        self.assertIn("&lt;untrusted&gt;", roster)
+        other = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message="@冬 hello",
+            user_name=server.config.username,
+        )
+        self.assertIn("点名了其他成员，未点名你", other)
+        own = render_channel_turn(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+            message="@秋 hello",
+            user_name=server.config.username,
+        )
+        self.assertIn("用户在消息中点名了你，请直接回复。", own)
+        self.assertIn("它会强制只唤醒用户", own)
+        self.assertNotIn("未点名你", own)
         await server._on_channel_control(
             TextEnvelope(
                 sender="Fuyu",
@@ -2708,12 +3169,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.start_server()
         assert self.server is not None
         self.server._agent_initiation_remaining = 2
-        prompt = self.server._channel_prompt(
-            "Fuyu", "fuyu", "agent message", from_agent=True
+        prompt = render_channel_turn(
+            self_member=self.server._channel_self_member(),
+            members=self.server._channel_member_views(),
+            message="agent message",
+            initiation_remaining=2,
+            initiation_limit=3,
+            from_agent=True,
+            user_name=self.server.config.username,
         )
         self.assertIn('remaining="2"', prompt)
         self.assertIn('limit="3"', prompt)
-        self.assertIn("每产生一次可见回复", prompt)
+        self.assertIn("每产生一次对外可见的回复", prompt)
 
     async def test_channel_status_metadata_is_complete(self) -> None:
         fake_channel = FakeChannel()
@@ -3012,6 +3479,125 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.1)
         self.assertEqual(fake_channel.published, [])
         self.assertEqual(fake_channel.events, [])
+
+    async def test_agent_origin_channel_approval_belongs_to_user(self) -> None:
+        server = await self.start_server(approval_timeout=5.0)
+        fake_channel = FakeChannel()
+        server.channel = fake_channel  # type: ignore[assignment]
+        now = time.monotonic()
+        for member_id, name, kind in (
+            ("fuyu", "Fuyu", "agent"),
+            ("alice", "Alice", "user"),
+        ):
+            server._channel_members[member_id] = {
+                "id": member_id,
+                "name": name,
+                "aliases": (name,),
+                "description": "",
+                "kind": kind,
+                "last_seen": now,
+                "sources": {},
+            }
+        turn = Turn(
+            turn_id="turn-agent-approval",
+            conn=server.channel_conn,
+            message="",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="fuyu",
+            origin_is_agent=True,
+        )
+        future: asyncio.Future[tuple[bool, str | None]] = (
+            asyncio.get_running_loop().create_future()
+        )
+        server.approvals["perm-agent"] = Approval(
+            approval_id="perm-agent",
+            turn=turn,
+            future=future,
+            tool_name="generate_image",
+            tool_call_id="call-agent",
+        )
+
+        await server._handle_channel_command("akid-approve perm-agent", "fuyu")
+        self.assertFalse(future.done())
+        await wait_until(
+            lambda: any(
+                kind == "notice" and "only the user" in text
+                for kind, text in fake_channel.published
+            )
+        )
+
+        await server._handle_channel_command("akid-approve perm-agent", "alice")
+        self.assertTrue(future.done())
+        self.assertEqual(future.result(), (True, "approved via MQTT channel"))
+
+    async def test_agent_origin_channel_approval_reaches_local_client(self) -> None:
+        runtime, sockets = self._wayland_runtime()
+        fake_channel = FakeChannel()
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "XDG_CURRENT_DESKTOP": "GNOME",
+                    "XDG_SESSION_DESKTOP": "GNOME",
+                    "DESKTOP_SESSION": "gnome",
+                    "KDE_FULL_SESSION": "",
+                },
+                clear=False,
+            ):
+                server = await self.start_server(
+                    channel=fake_channel,
+                    grim_bin=str(self._fake_grim()),
+                    spectacle_bin="/definitely/missing/spectacle",
+                    screenshot_output_dir=self.root / "screenshots-agent-approval",
+                    screenshot_wayland_display="wayland-1",
+                    screenshot_require_approval=True,
+                )
+                await wait_until(lambda: server._external_tools_registered)
+                client = await self.client()
+                await client.hello()
+
+                server._enqueue_channel_turn(
+                    "Fuyu",
+                    "fuyu",
+                    "EXTERNAL_SCREENSHOT",
+                    origin_is_agent=True,
+                    lock_authorized=False,
+                    lock_authorization="agent-message",
+                )
+
+                approval = await client.next_event(timeout=8.0)
+                while approval is not None and approval.get("type") != "approval_request":
+                    approval = await client.next_event(timeout=8.0)
+                self.assertIsNotNone(approval)
+                self.assertEqual(
+                    approval["data"]["tool_name"], "desktop_take_screenshot"
+                )
+                self.assertNotIn("requester_id", approval["data"])
+                await client.call(
+                    "aki.approval.respond",
+                    {
+                        "approval_id": approval["data"]["approval_id"],
+                        "decision": "allow",
+                    },
+                )
+                await wait_until(
+                    lambda: any(
+                        "screenshot captured path=" in text
+                        for text in fake_channel.final_texts()
+                    )
+                )
+                self.assertTrue(
+                    any(
+                        event.get("decision") == "allow"
+                        for event in fake_channel.events_of("approval_resolved")
+                    )
+                )
+        finally:
+            for sock in sockets:
+                sock.close()
 
     async def test_channel_cannot_approve_local_turn(self) -> None:
         server = await self.start_server(approval_timeout=5.0)
@@ -3388,6 +3974,70 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             for sock in sockets:
                 sock.close()
 
+    async def test_image_generation_external_tool_requires_approval(self) -> None:
+        api = FakeMiniMaxImageAPI()
+        api.start()
+        output_dir = self.root / "generated-images"
+        try:
+            image = ImageGeneration(
+                enabled=True,
+                upstream_name="minimax",
+                model="image-01",
+                path="/image_generation",
+                base_url=f"http://127.0.0.1:{api.port}/v1",
+                url=f"http://127.0.0.1:{api.port}/v1/image_generation",
+                api_key="test-minimax-key",
+                use_proxy=False,
+                output_dir=str(output_dir),
+                require_approval=True,
+                timeout=5.0,
+                max_bytes=1024 * 1024,
+                aspect_ratio="1:1",
+                prompt_optimizer=True,
+                aigc_watermark=False,
+            )
+            server = await self.start_server(
+                profile="haru",
+                camera_enabled=False,
+                screenshot_enabled=False,
+                image_generation=image,
+            )
+            await wait_until(lambda: server._external_tools_registered)
+            names = [tool["name"] for tool in server._external_tools()]
+            self.assertIn("generate_image", names)
+            health = server._health()
+            self.assertTrue(health["external_tools"]["image_generation"]["available"])
+            self.assertEqual(
+                health["external_tools"]["image_generation"]["model"], "image-01"
+            )
+
+            client = await self.client()
+            await client.hello()
+            turn = await client.call(
+                "aki.chat.send", {"message": "EXTERNAL_IMAGE_GENERATION"}
+            )
+            approval = await client.wait_event(turn["turn_id"], "approval_request")
+            self.assertEqual(approval["data"]["tool_name"], "generate_image")
+            self.assertEqual(approval["data"]["channel"], "image")
+            await client.call(
+                "aki.approval.respond",
+                {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
+            )
+            events = await client.collect_turn(turn["turn_id"])
+            final = next(
+                event for event in events if event["type"] == "assistant_message"
+            )
+            self.assertIn("image generated", final["data"]["content"])
+            self.assertIn("tokifactor_send_image", final["data"]["content"])
+            files = list(output_dir.glob("image-*.png"))
+            self.assertEqual(len(files), 1)
+            self.assertEqual(files[0].read_bytes(), PNG_1X1)
+            self.assertEqual(len(api.requests), 1)
+            self.assertEqual(api.requests[0]["model"], "image-01")
+            self.assertEqual(api.requests[0]["response_format"], "base64")
+        finally:
+            api.stop()
+
     async def test_screenshot_on_kde_uses_spectacle(self) -> None:
         runtime, sockets = self._wayland_runtime()
         try:
@@ -3690,7 +4340,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     screenshot_wayland_display="wayland-1",
                     live_context_timeout=2.0,
                 )
-                server._enqueue_channel_turn("channel hello", "sender")
+                server._enqueue_channel_turn("sender", "sender", "channel hello")
                 await wait_until(lambda: server.active is None and not server.queue)
                 system = self._agent_system(agent_path)
                 self.assertEqual(system.count("<aki-live-context"), 1)

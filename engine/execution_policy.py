@@ -49,6 +49,11 @@ LOCK_ACQUIRE_TOOL = "acquire_execution_lock"
 LOCK_RELEASE_TOOL = "release_execution_lock"
 LOCK_CONTROL_TOOLS = frozenset({LOCK_ACQUIRE_TOOL, LOCK_RELEASE_TOOL})
 
+# Tools with external side effects that the user explicitly chose not to
+# serialize behind the device-wide execution lock. They remain non-read-only
+# for approval and auditing purposes.
+LOCK_EXEMPT_TOOLS = frozenset({"generate_image", "tokifactor_send_image"})
+
 LOCK_REQUIRED_ERROR = (
     "EXECUTION_LOCK_REQUIRED: this tool can modify state or produce external "
     "effects. Call acquire_execution_lock first. Do not retry this tool without "
@@ -83,6 +88,8 @@ def requires_execution_lock(tool_name: str) -> bool:
         # Exclusive tools are profile-private state operations authorized by
         # ownership. They never touch the device-wide execution surface.
         return False
+    if tool_name in LOCK_EXEMPT_TOOLS:
+        return False
     return not is_read_only_tool(tool_name) and not is_lock_control_tool(tool_name)
 
 
@@ -92,6 +99,7 @@ def execution_policy_payload() -> dict[str, Any]:
         "read_only_tools": sorted(READ_ONLY_TOOLS),
         "read_only_mcp_tools": sorted(READ_ONLY_MCP_TOOLS),
         "lock_control_tools": sorted(LOCK_CONTROL_TOOLS),
+        "lock_exempt_tools": sorted(LOCK_EXEMPT_TOOLS),
         "exclusive_tools": sorted(EXCLUSIVE_TOOL_NAMES),
     }
 

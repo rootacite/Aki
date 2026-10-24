@@ -9,6 +9,7 @@ from engine.execution_lock import ExecutionLock
 from engine.execution_policy import (
     EXECUTION_LOCK_TAG,
     clear_execution_lock_policy,
+    execution_policy_payload,
     is_read_only_tool,
     requires_execution_lock,
 )
@@ -46,12 +47,22 @@ class ExecutionPolicyTests(unittest.TestCase):
             "Write",
             "Edit",
             "ApplyPatch",
-            "tokifactor_send_image",
             "mcp__local__nmap_scan",
             "unknown_tool",
         ):
             self.assertFalse(is_read_only_tool(name), name)
             self.assertTrue(requires_execution_lock(name), name)
+        self.assertFalse(is_read_only_tool("generate_image"))
+        self.assertFalse(requires_execution_lock("generate_image"))
+        self.assertIn(
+            "generate_image", execution_policy_payload()["lock_exempt_tools"]
+        )
+        self.assertFalse(is_read_only_tool("tokifactor_send_image"))
+        self.assertFalse(requires_execution_lock("tokifactor_send_image"))
+        self.assertIn(
+            "tokifactor_send_image",
+            execution_policy_payload()["lock_exempt_tools"],
+        )
         self.assertFalse(requires_execution_lock("acquire_execution_lock"))
         self.assertFalse(requires_execution_lock("release_execution_lock"))
 
@@ -62,6 +73,7 @@ class ExecutionPolicyTests(unittest.TestCase):
             self.assertIn("## Execution lock", prompt)
             self.assertIn("Some tools are read-only", prompt)
             self.assertIn("requires the device-wide execution lock", prompt)
+            self.assertIn("`tokifactor_send_image` are explicitly lock-exempt", prompt)
             self.assertIn(
                 "Manual lock release is intentionally unavailable", prompt
             )

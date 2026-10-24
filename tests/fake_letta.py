@@ -10,6 +10,7 @@ import threading
 import time
 
 WRITE_LOCK = threading.Lock()
+LAST_INPUT_PATH = os.environ.get("FAKE_LETTA_LAST_INPUT", "")
 
 
 def emit(message: dict) -> None:
@@ -346,7 +347,6 @@ class FakeLetta:
             marker = "EXTERNAL_IMAGE:"
             path_value = content.split(marker, 1)[1].splitlines()[0].strip()
             tool_call_id = f"image-tool-{number}"
-            self.acquire_execution_lock(number)
             self.request_tool(
                 "tokifactor_send_image",
                 {"path": path_value, "caption": "fake caption"},
@@ -400,6 +400,45 @@ class FakeLetta:
                         "tool_call_id": tool_call_id,
                         "tool_name": "camera_take_photo",
                         "input": {"device": "/dev/video0", "width": 320, "height": 240},
+                    },
+                }
+            )
+            response = self.wait_for_response(f"ext-{tool_call_id}") or {}
+            parts = response.get("content") or []
+            text = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            emitted = f"external tool result: {text}"
+            emit_chunk(
+                {"message_type": "assistant_message", "content": [{"type": "text", "text": emitted}]}
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": emitted,
+                }
+            )
+            return
+        if "EXTERNAL_IMAGE_GENERATION" in content:
+            tool_call_id = f"image-generation-tool-{number}"
+            arguments = {
+                "prompt": "a small spring garden with a paint brush",
+                "aspect_ratio": "1:1",
+            }
+            self.request_tool("generate_image", arguments, tool_call_id)
+            emit(
+                {
+                    "type": "control_request",
+                    "request_id": f"ext-{tool_call_id}",
+                    "request": {
+                        "subtype": "execute_external_tool",
+                        "tool_call_id": tool_call_id,
+                        "tool_name": "generate_image",
+                        "input": arguments,
                     },
                 }
             )
@@ -610,7 +649,14 @@ class FakeLetta:
     def handle(self, message: dict) -> None:
         kind = message.get("type")
         if kind == "user":
-            content = content_text((message.get("message") or {}).get("content"))
+            raw_content = (message.get("message") or {}).get("content")
+            if LAST_INPUT_PATH:
+                try:
+                    with open(LAST_INPUT_PATH, "w", encoding="utf-8") as handle:
+                        json.dump(raw_content, handle, ensure_ascii=False)
+                except OSError:
+                    pass
+            content = content_text(raw_content)
             thread = threading.Thread(target=self.run_turn, args=(content,), daemon=True)
             self.turn_thread = thread
             thread.start()

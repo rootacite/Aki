@@ -302,6 +302,20 @@ class TokifactorWireTests(unittest.TestCase):
         self.assertEqual(hashlib.sha256(data).hexdigest(), digests.pop())
         self.assertEqual(b"".join(pieces), data)
 
+    def test_picture_chunk_declares_pending_text_commit(self) -> None:
+        _, payloads = encode_picture_payloads(
+            PNG_1X1,
+            MAGIC,
+            sender="akid",
+            sender_id="akid",
+            message_id="message-1",
+            text_commit=True,
+        )
+        chunk = parse_text_chunk(payloads[0])
+        self.assertIsNotNone(chunk)
+        assert chunk is not None
+        self.assertTrue(chunk["text_commit"])
+
     def test_picture_abort_shape(self) -> None:
         payload = encode_picture_abort(
             "transfer-1", sender="akid", sender_id="akid", reason="fail"

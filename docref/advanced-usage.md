@@ -13,7 +13,8 @@
   `aki.mqtt.*`、`aki.username.*`、`aki.conversation.reset`。
 - **长驻 Letta 监督。** 等待 `system/init` 后 ready；异常退出按 1/2/4/8/16/30 秒退避重启；
   当前 turn 标记失败，队列保留。
-- **多客户端。** 状态、历史和只读记忆共享；实时事件只发给该 turn 的发起连接。
+- **多客户端。** 状态、历史和只读记忆共享；实时事件通常只发给该 turn 的发起连接，
+  但频道 turn 的审批请求/结果会额外广播给本机客户端，方便用户在任意 GUI 里处理。
 - **审批工作流。** `Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、`Memory`、`ViewImage` 和
   `mcp__tavily__*` 自动放行；`Bash` 在 sandbox 就绪时也默认放行。`Write`/`Edit`/
   `ApplyPatch` 和未知工具需要发起客户端批准，默认 60 秒超时拒绝。
@@ -25,7 +26,7 @@
   GUI 审批卡和系统通知，但不再推荐安装。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
 - **多成员 profiles。** 每个 profile 有独立的 agent、conversation、socket、频道身份、
-  proxy 端口与 userdata；Aki 和 Fuyu 已上线，Natsu 与 Haru 作为 Coming Soon 预留。
+  proxy 端口与 userdata；Aki、Fuyu 和 Haru 已上线，Natsu 作为 Coming Soon 预留。
 - **人格与 userdata。** 每个 profile 使用自己的公开人格模板，支持称呼占位符、MemFS
   渲染、备份和 git 提交，互不覆盖。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
@@ -122,6 +123,33 @@ Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和
 与 Aki 一样属于本项目定制的基座，不使用 Letta 上游默认的
 “You are a Letta Code agent” 提示词。
 
+Haru profile 使用 `userdata3/`、`aki-haru` provider 和 7723 proxy 端口，默认模型句柄
+是 `aki-haru/gemini-3.8-flash`。她的 `[tools]` 段显式把工具收窄为 `Read,Write,Edit,ViewImage,
+Memory,Skill,acquire_execution_lock,wait_other,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
+从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
+bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
+MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
+本机 `cli-proxy-api` 提供的 Gemini 3.8 Flash 文本 API；key 未填写时模型不会暴露给 Letta。
+
+Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算，并通过
+`extra_body` 发送 `{"reasoning_effort": "low"}`。`low` 用于降低创意对话的延迟和过度
+推理；如果后续需要更深的规划，可改为 `medium` 或 `high`。上游是 Aki 共用的本机
+`cli-proxy-api`（`127.0.0.1:8317`），使用 `use_proxy = false` 直连。文生图走独立的
+MiniMax `image-01` API；TTS、视频与 ComfyUI 仍属于后续阶段，Haru 的人格和提示词会明确
+说明这些能力尚未安装。
+
+在新机器上首次创建 Haru 的 profile、agent、conversation、MemFS 和 system prompt：
+
+```bash
+python3 scripts/bootstrap-member.py --profile haru
+```
+
+脚本默认只创建新的 agent/conversation；目标已存在时不做修改。它会调用现有的
+`sync-persona.py` 和 `install-system-prompt.py`。完成后把本机 `cli-proxy-api` 的 key 填进
+`~/.aki/haru.conf` 的 `[upstream.cli-proxy-api] api_key`（通常与 `aki.conf` 相同），把
+MiniMax key 填进 `[upstream.minimax] api_key`，再启动
+`akid-proxy@haru.service` 与 `akid@haru.service`。
+
 ### 上下文压缩阈值
 
 Letta 本地后端默认在 `context_window - 16,384` tokens 时触发 compaction。Aki 提供补丁脚本，
@@ -170,17 +198,23 @@ systemctl --user restart akid-proxy@aki.service
 transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
 `{CORE_MEMORY}` 占位符必须保留。
 
-编译后模型看到的固定顺序是 `base → core memory → tool ownership → identity → transcript →
-live context`：
+编译后模型看到的固定顺序是 `base → core memory → tool ownership → channel policy →
+wake routing → identity → channel turn → transcript → live context`：
 
-1. 稳定基座 prompt（`prompts/aki-system.md` 或 `prompts/fuyu-system.md`），包含身份、记忆机制、
-   工具规则、执行锁规则和模式边界。
+1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
+   `prompts/haru-system.md`），包含身份、记忆机制、工具规则、执行锁规则和模式边界。
 2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
 3. `<aki-tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
    `@Owner` 转述规则，每个 turn 刷新。
-4. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新，始终存在。
-5. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
-6. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
+4. `<aki-channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
+   execution guidance、专属域规则和输出规则。
+5. `<aki-channel-wake-routing>`：`@用户`、`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
+   真实 system prompt，并随 profile username 刷新。
+6. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
+7. `<aki-channel-turn>`：当前频道 turn 的 `wake-reminder`、新消息 sender/seq/正文、guidance、
+   initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
+8. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
+9. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
    始终最后追加。
 
 ### Aki 专属工具与触发器
@@ -312,13 +346,15 @@ akictl reset
 ## 人格与 userdata
 
 四季工坊里每位成员的人格都由仓库中的公开模板定义，再由运行时渲染进各自 agent 的
-MemFS。现在已经上线的是 Aki 和 Fuyu，所以仓库里有两套目录：
+MemFS。现在已经上线的是 Aki、Fuyu 和 Haru，所以仓库里有三套目录：
 
 - `userdata/` — Aki 的人格模板、记忆策略和旧版称呼迁移源。
 - `userdata2/` — Fuyu 的人格模板与记忆策略，由 `~/.aki/fuyu.conf` 的
   `[gateway] userdata = userdata2` 指向。
+- `userdata3/` — Haru 的人格模板、记忆策略和文本/桌面采集能力边界，由
+  `~/.aki/haru.conf` 的 `[gateway] userdata = userdata3` 指向。
 
-两套目录的结构相同，核心文件包括：
+三套目录的结构相同，核心文件包括：
 
 - `persona.md` — 稳定人格与团队定位
 - `memory-policy.md` — 长期记忆写入策略
@@ -385,8 +421,8 @@ description = Aki（秋 / 小秋），温柔治愈系的小女友，也是四季
 wait_for = Aki
 ```
 
-例如 Fuyu 配 `wait_for = Aki`，Natsu 配 `wait_for = Aki,Fuyu`，Haru 配
-`wait_for = Aki,Fuyu,Natsu`；Aki 留空。配置为空时不注册 `wait_other` 工具。
+例如 Fuyu 配 `wait_for = Aki`，Haru 配 `wait_for = Aki,Fuyu`，Natsu 预留
+`wait_for = Aki,Fuyu`；Aki 留空。配置为空时不注册 `wait_other` 工具。
 顺序必须无环，否则两个 profile 会互相等待。
 
 改角色定位时，最好把人格模板、MemFS 和 `[channel] description` 一起更新，避免群里
@@ -484,21 +520,32 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 或文本结束的形式都不会被当成提及。
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
-每条频道消息的上下文都带 `<channel-context>`、完整在线成员列表和三类提示：点名自己、
-点名他人、没有 `@`。每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。
-用户不在智能体成员列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如
-`@Master`）是特殊的用户路由标记。本地 turn 不包含频道 transcript，但仍刷新并保留
-`<aki-channel-identity>` 与 `<aki-live-context>`。
+每条频道 user 消息包含 `[akid MQTT channel message]`、头部 `wake-reminder`、`sender`、
+可选 `seq`、在线成员列表 `<channel-context>` 和原始 `message`。其他智能体触发的 turn
+还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
+initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
+的 `<aki-channel-turn>` 中。
+每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。用户不在智能体成员
+列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如 `@Master`）表示这条回复
+只对用户说、无需打扰其他成员，会强制只唤醒用户。本地 turn 不包含频道 transcript 或 turn
+块，但仍刷新并保留
+`<aki-channel-identity>`、`<aki-channel-wake-routing>` 与 `<aki-live-context>`。
 
-智能体的每条最终回复都要选择唤醒范围：
+智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
+的 `<aki-channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
 
-- 第一行单独写 `@<username>`：只提醒用户，不唤醒任何其他智能体；该标记发布前会被移除。
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
-- 正文中写 `^成员名`：把该成员从唤醒名单中排除，可写多个；标记发布前会被移除。
-- 既不写 `@` 也不写 `^`：唤醒所有其他在线成员，保持原有默认行为。
+- 第一行单独写 `@<username>`：强制只唤醒用户，不唤醒任何其他成员；仅在你只对用户说话、无需打扰其他人时使用。该标记发布前会被移除。
+- 无 `@`、正文中写 `^成员名`：不唤醒被 `^` 排除的成员，其余其他在线成员仍会唤醒；标记发布前会被移除。
+- 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
-`^` 优先于 `@`：同一条回复里同时写 `@Aki` 和 `^Aki` 时不会唤醒 Aki。非唤醒标记只接受
-已知 agent 成员的名字或别名，且不会对用户生效。
+因此，只想让用户看到、不要惊动其他 agent 时，可以在第一行单独写 `@Master`；也可以继续
+使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。`@<username>` 会从发布内容中移除，但回复
+仍会写入频道消息记录。
+
+出现 `@<username>` 时不唤醒任何其他成员；其他情况下 `^` 优先于 `@`：同一条回复里同时写
+`@Aki` 和 `^Aki` 时不会唤醒 Aki。非唤醒标记只接受已知 agent 成员的名字或别名，且不会对
+用户生效。
 
 这些选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
 `<aki-channel-transcript>` 使用。
@@ -553,21 +600,84 @@ external tool，名字保持 `mcp__<server>__<tool>`（例如
 
 ### tokifactor 图片
 
+tokifactor 现在支持一条消息同时包含正文和最多 4 张图片。输入区选图后可以先编辑每张图的
+消息内名称（默认 `图片1`、`图片2`），再连同正文一起发送；正文直接提到名称即可指代。
+单图最大 8 MiB，单条消息总计最大 16 MiB。接收端按 `messageId` 聚合图片和正文，频道历史
+只保存名称与本地路径。带图消息触发智能体时，图片按名称顺序作为当前 turn 的多模态输入；
+历史图片不会重复嵌入，system prompt 只保留 `{"name":"…","path":"…"}`。纯图片只记录、
+不唤醒智能体。由其他智能体唤醒的临时 turn 回滚时，多模态 user 消息和该 turn 的后续消息
+会一起从 conversation 中截断。
+
+Agent 可以用最终正文中的 `#[/absolute/path/to/image]` 内嵌图片；图片会作为同一消息的附件
+发布并从正文移除。不要为这种带正文图片消息调用 `tokifactor_send_image`。
+
 akid 通过 Letta external tool 协议注册独立工具 `tokifactor_send_image`。Agent 可以调用它：
 
 ```json
-{"path": "/tmp/example.png", "caption": "可选说明"}
+{"path": "/tmp/example.png", "caption": "图片名称（可选）"}
 ```
 
 - 只接受 PNG、JPEG、GIF、WebP，最大 8 MiB。
 - 图片路径必须在 `/tmp`、`~/.local/share/tmp` 或用户已注册的可写目录内。
 - 使用 tokifactor `PictureChunk` 协议加密分片发布到 `tokifactor/picture`。
-- 可选 caption 会作为加密文本发布到 `tokifactor/text`。
+- 可选 caption 会加密为这张图片的名称，并作为纯图片消息写入发送者自己的频道历史。
+- 该工具只用于纯图片消息；正文与图片同条发送应使用 `#[/absolute/path]`。
+- `tokifactor_send_image` 是非只读工具，但显式**不占用整机执行锁**，不需要先调用
+  `acquire_execution_lock`。
 - 工具默认自动通过；如需审批，可设置
   `AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL=1` 或启动时加
   `--tokifactor-image-require-approval`。启用后本地客户端或频道
   `akid-approve` 都可以批准。
 - 返回 `transfer_id`、字节数、分片数和 MIME 类型。
+
+### 文生图（MiniMax）
+
+Haru 通过 Letta external tool 注册 `generate_image`，后端调用 MiniMax
+`POST /v1/image_generation`：
+
+```json
+{"prompt": "春日温室里的机械小鸟，暖色逆光，绘本插画", "aspect_ratio": "16:9", "n": 1}
+```
+
+- 默认模型是 `image-01`，支持 `1:1`、`16:9`、`4:3`、`3:2`、`2:3`、`3:4`、`9:16` 和
+  `21:9`；`prompt` 最长 1500 字符，单次最多生成 4 张。
+- 请求固定使用 `response_format=base64`，避免让 akid 再下载一次远端 URL。图片解码后会校验
+  PNG/JPEG/GIF/WebP 文件头和大小，再写入 `/tmp/aki/images/`；目录 `0700`、文件 `0600`。
+- 工具结果只返回本地路径、字节数、MIME、模型和宽高比，不返回 base64 或 API key。Haru
+  需要分享时继续调用 `tokifactor_send_image`，不会把图片塞进模型上下文。
+- `generate_image` 是非只读工具，但显式**不占用整机执行锁**，不需要先调用
+  `acquire_execution_lock`；后续调用 `tokifactor_send_image` 分享图片同样免锁。
+  `require_approval` 默认 `true`，审批事件里的 `tool_name` 是 `generate_image`、
+  `channel` 是 `image`。
+- `generate_image` 是 Haru 的专属工具，和日程工具之于 Aki 一样由
+  `<aki-tool-ownership>` 管理。Aki、Fuyu 和 Natsu 的工具列表不会注册它；它们的 system
+  prompt 会明确写有“图片创作/文生图归 Haru”，并提示用 `@Haru` 转交。
+- API key 不写进 prompt、日志或记忆：在 `~/.aki/haru.conf` 的 `[upstream.minimax] api_key`
+  配置。MiniMax 的 HTTP 错误和 `base_resp.status_code != 0` 都会作为工具错误返回给 Agent。
+
+配置示例：
+
+```ini
+[upstream.minimax]
+base_url = https://api.minimaxi.com/v1
+api_key = <MINIMAX_API_KEY>
+
+[image]
+enabled = true
+upstream = minimax
+model = image-01
+path = /image_generation
+output_dir = /tmp/aki/images
+require_approval = true
+timeout = 180
+max_bytes = 33554432
+aspect_ratio = 1:1
+prompt_optimizer = true
+aigc_watermark = false
+```
+
+`aki.health` / `aki.status` 的 `external_tools.image_generation` 会公开是否启用、模型、输出目录、
+是否需要审批和错误；不会公开 API key。图片生成失败不会伪造路径，也不会自动发布图片。
 
 ### 摄像头
 

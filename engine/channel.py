@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import time
+import uuid
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Mapping
 
@@ -18,7 +19,11 @@ from engine.tokifactor import (
     AVATAR_TOPIC,
     CONTROL_TOPIC,
     DecodeError,
+    ImageChunkAssembler,
+    ImageEnvelope,
     MAX_IMAGE_BYTES,
+    MAX_MESSAGE_ATTACHMENTS,
+    MAX_MESSAGE_IMAGE_BYTES,
     PICTURE_TOPIC,
     TextChunkAssembler,
     TextEnvelope,
@@ -45,6 +50,7 @@ REPLAY_GRACE_SECONDS = 1.0
 TextHandler = Callable[
     [str, str, str, Mapping[str, str], str, int, bool], Awaitable[None]
 ]
+ImageHandler = Callable[[ImageEnvelope, bool], Awaitable[None]]
 ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 
 
@@ -67,6 +73,7 @@ class TokifactorChannel:
         avatar_mime: str = "",
         dedup_path: Path | None = None,
         on_text: TextHandler,
+        on_image: ImageHandler | None = None,
         on_control: ControlHandler | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
@@ -87,6 +94,7 @@ class TokifactorChannel:
         )
         self._avatar_mime = avatar_mime
         self.on_text = on_text
+        self.on_image = on_image
         self.on_control = on_control
         self.on_connected = on_connected
         self.logger = logger or logging.getLogger("akid.channel")
@@ -102,6 +110,7 @@ class TokifactorChannel:
         self._image_lock = asyncio.Lock()
         self._avatar_publish_task: asyncio.Task[None] | None = None
         self._assembler = TextChunkAssembler(magic)
+        self._image_assembler = ImageChunkAssembler(magic)
         self._recent: dict[str, float] = {}
         self.dedup_path = dedup_path
         self._seen_message_ids: list[str] = []
@@ -117,6 +126,9 @@ class TokifactorChannel:
         self._replies_sent = 0
         self._decode_failures = 0
         self._images_sent = 0
+        self._images_received = 0
+        self._seen_image_transfers: list[str] = []
+        self._seen_image_transfer_set: set[str] = set()
         self._last_image_at: float | None = None
         self._avatar_published = False
         self._last_published_avatar_hash: str | None = None
@@ -201,6 +213,12 @@ class TokifactorChannel:
                     self._avatar_last_error = f"avatar subscription failed: {exc}"
                     self.logger.warning(self._avatar_last_error)
                 try:
+                    picture_granted = await client.subscribe(PICTURE_TOPIC, qos=1)
+                    if picture_granted == 0x80:
+                        raise MqttError("broker rejected picture subscription")
+                except MqttError as exc:
+                    self.logger.warning("picture subscription failed: %s", exc)
+                try:
                     control_granted = await client.subscribe(CONTROL_TOPIC, qos=0)
                     if control_granted == 0x80:
                         raise MqttError("broker rejected control subscription")
@@ -252,6 +270,9 @@ class TokifactorChannel:
         if topic == CONTROL_TOPIC:
             await self._handle_control_packet(payload)
             return
+        if topic == PICTURE_TOPIC:
+            await self._handle_picture_packet(payload, replayed)
+            return
         if topic != self.topic:
             return
         try:
@@ -299,6 +320,44 @@ class TokifactorChannel:
             )
         except asyncio.QueueFull:
             self.logger.warning("channel inbox full; dropping message")
+
+    async def _handle_picture_packet(self, payload: bytes, replayed: bool = False) -> None:
+        if self.on_image is None:
+            return
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self._decode_failures += 1
+            return
+        chunk = parse_text_chunk(text)
+        if chunk is None:
+            self._decode_failures += 1
+            return
+        if chunk.get("abort"):
+            self._image_assembler.add(chunk)
+            return
+        if str(chunk.get("sender_id") or "") == self.sender_id:
+            return
+        image = self._image_assembler.add(chunk)
+        if image is None:
+            return
+        if image.transfer_id and image.transfer_id in self._seen_image_transfer_set:
+            return
+        if image.transfer_id:
+            self._seen_image_transfers.append(image.transfer_id)
+            self._seen_image_transfer_set.add(image.transfer_id)
+            if len(self._seen_image_transfers) > DEDUP_MAX_IDS:
+                removed = self._seen_image_transfers[:-DEDUP_MAX_IDS]
+                self._seen_image_transfers = self._seen_image_transfers[-DEDUP_MAX_IDS:]
+                for value in removed:
+                    self._seen_image_transfer_set.discard(value)
+        self._images_received += 1
+        try:
+            await self.on_image(image, replayed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            self.logger.exception("channel image handler failed")
 
     async def _handle_control_packet(self, payload: bytes) -> None:
         if self.on_control is None:
@@ -411,7 +470,11 @@ class TokifactorChannel:
                 self.logger.exception("channel message handler failed")
 
     async def publish_text(
-        self, text: str, metadata: Mapping[str, Any] | None = None
+        self,
+        text: str,
+        metadata: Mapping[str, Any] | None = None,
+        *,
+        message_id: str | None = None,
     ) -> None:
         client = self._client
         if client is None or not self._connected:
@@ -422,6 +485,7 @@ class TokifactorChannel:
             sender=self.sender_name,
             sender_id=self.sender_id,
             avatar_hash=self._avatar_hash,
+            message_id=message_id,
             metadata=metadata,
         )
         async with self._publish_lock:
@@ -505,6 +569,10 @@ class TokifactorChannel:
         *,
         caption: str | None = None,
         mime: str | None = None,
+        message_id: str = "",
+        attachment_index: int = 0,
+        attachment_count: int = 1,
+        expect_text: bool = False,
     ) -> dict:
         client = self._client
         if client is None or not self._connected:
@@ -521,6 +589,10 @@ class TokifactorChannel:
             sender_id=self.sender_id,
             avatar_hash=self._avatar_hash,
             caption=caption or "",
+            message_id=message_id,
+            attachment_index=attachment_index,
+            attachment_count=attachment_count,
+            text_commit=expect_text,
         )
         semaphore = asyncio.Semaphore(8)
 
@@ -549,7 +621,66 @@ class TokifactorChannel:
             "chunks": len(payloads),
             "mime": detected,
             "topic": PICTURE_TOPIC,
+            "message_id": message_id or transfer_id,
+            "name": caption or "",
+            "attachment_index": int(attachment_index),
+            "attachment_count": int(attachment_count),
         }
+
+    async def publish_message(
+        self,
+        text: str,
+        images: list[Mapping[str, Any]] | tuple[Mapping[str, Any], ...] = (),
+        metadata: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Publish one logical message, uploading images before the text commit."""
+        if len(images) > MAX_MESSAGE_ATTACHMENTS:
+            raise ValueError("a channel message may contain at most 4 images")
+        if sum(len(bytes(image.get("data") or b"")) for image in images) > MAX_MESSAGE_IMAGE_BYTES:
+            raise ValueError("channel message images exceed the size limit")
+        message_id = str(uuid.uuid4())
+        results: list[dict[str, Any]] = []
+        total = len(images)
+        for index, image in enumerate(images):
+            result = await self.publish_image(
+                bytes(image["data"]),
+                caption=str(image.get("name") or ""),
+                mime=str(image.get("mime") or "") or None,
+                message_id=message_id,
+                attachment_index=index,
+                attachment_count=total,
+                expect_text=bool(text.strip()),
+            )
+            results.append(result)
+        if text.strip() or not results:
+            commit_metadata = dict(metadata or {})
+            if results:
+                commit_metadata.update(
+                    {
+                        "attachmentCount": str(len(results)),
+                        "attachmentIds": ",".join(str(item["transfer_id"]) for item in results),
+                        "attachmentNames": "\n".join(str(item["name"]) for item in results),
+                        "attachments": json.dumps(
+                            [
+                                {
+                                    "id": str(item["transfer_id"]),
+                                    "name": str(item["name"]),
+                                    "mime": str(item["mime"]),
+                                    "bytes": int(item["bytes"]),
+                                }
+                                for item in results
+                            ],
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    }
+                )
+            await self.publish_text(
+                text,
+                commit_metadata,
+                message_id=message_id,
+            )
+        return {"message_id": message_id, "images": results}
 
     async def _handle_avatar_packet(self, payload: bytes) -> None:
         try:
@@ -639,6 +770,7 @@ class TokifactorChannel:
             "replies_sent": self._replies_sent,
             "decode_failures": self._decode_failures,
             "images_sent": self._images_sent,
+            "images_received": self._images_received,
             "last_image_at": self._last_image_at,
             "session": {
                 "client_id": self.session_client_id,

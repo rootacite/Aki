@@ -663,6 +663,15 @@ PlasmoidItem {
             updateToolResult(data.tool_call_id || "", data.tool_return || "", data.status || "success");
         } else if (type === "approval_request") {
             addApproval(data);
+        } else if (type === "approval_resolved") {
+            var resolvedId = MessageFormat.toStringValue(data.approval_id || "");
+            var resolvedIndex = findModelIndex("approvalId", resolvedId);
+            if (resolvedIndex >= 0) {
+                updateModelItem(resolvedIndex, {
+                    status: data.decision === "allow" ? "allowed" : "denied"
+                });
+            }
+            removePendingApproval(resolvedId);
         } else if (type === "usage") {
             lastUsage = data;
             contextTokens = data.context_tokens || contextTokens;

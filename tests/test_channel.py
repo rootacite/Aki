@@ -17,6 +17,7 @@ from engine.tokifactor import (
     decode_single_payload,
     encode_avatar_want,
     encode_text_payloads,
+    ImageEnvelope,
     parse_avatar_envelope,
     parse_text_chunk,
 )
@@ -53,6 +54,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
             sender_name="akid",
             sender_id="akid",
             on_text=self._on_text,
+            on_image=self._on_image,
             on_control=self._on_control,
         )
         self.peer: MqttClient | None = None
@@ -63,6 +65,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.avatar_messages: list[str] = []
         self.control_messages: list[TextEnvelope] = []
         self.control_payloads: list[TextEnvelope] = []
+        self.images_received: list[ImageEnvelope] = []
 
     async def asyncTearDown(self) -> None:
         await self.channel.stop()
@@ -85,6 +88,9 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def _on_control(self, envelope: TextEnvelope) -> None:
         self.control_messages.append(envelope)
+
+    async def _on_image(self, image: ImageEnvelope, replayed: bool = False) -> None:
+        self.images_received.append(image)
 
     def _peer_message(self, topic: str, payload: bytes, replayed: bool = False) -> None:
         if topic == AVATAR_TOPIC:
@@ -384,6 +390,64 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.health()["images_sent"], 1)
         await asyncio.sleep(0.2)
         self.assertEqual(self.peer_messages, [])
+
+    async def test_mixed_message_uploads_images_before_text_commit(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-mixed-test",
+            on_message=self._peer_message,
+        )
+        await self.peer.connect()
+        await self.peer.subscribe(TOPIC, qos=1)
+        await self.peer.subscribe(PICTURE_TOPIC, qos=1)
+
+        result = await self.channel.publish_message(
+            "look at 图片1",
+            [{"data": PNG_1X1, "mime": "image/png", "name": "图片1"}],
+        )
+        await wait_until(lambda: bool(self.picture_payloads))
+        await wait_until(lambda: bool(self.peer_messages))
+        chunk = parse_text_chunk(self.picture_payloads[0])
+        self.assertIsNotNone(chunk)
+        assert chunk is not None
+        self.assertEqual(chunk["message_id"], result["message_id"])
+        self.assertEqual(chunk["attachment_index"], 0)
+        self.assertEqual(chunk["attachment_count"], 1)
+        self.assertEqual(self.peer_messages[0][2], "look at 图片1")
+        self.assertEqual(self.peer_metadata[0]["attachmentCount"], "1")
+
+    async def test_receives_complete_image_envelope(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-picture-send-test",
+            on_message=lambda *_: None,
+        )
+        await self.peer.connect()
+        from engine.tokifactor import encode_picture_payloads
+
+        _, payloads = encode_picture_payloads(
+            PNG_1X1,
+            MAGIC,
+            sender="alice",
+            sender_id="alice-1",
+            caption="图片1",
+            message_id="mixed-1",
+            attachment_index=0,
+            attachment_count=1,
+        )
+        for payload in payloads:
+            await self.peer.publish(PICTURE_TOPIC, payload.encode("utf-8"), qos=1)
+        await wait_until(lambda: bool(self.images_received))
+        image = self.images_received[0]
+        self.assertEqual(image.message_id, "mixed-1")
+        self.assertEqual(image.name, "图片1")
+        self.assertEqual(image.data, PNG_1X1)
 
     async def test_avatar_have_want_and_message_hash(self) -> None:
         self.channel = TokifactorChannel(

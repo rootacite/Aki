@@ -10,22 +10,30 @@ from unittest import mock
 from engine.akid import build_config_from_env
 from engine.live_context import (
     CHANNEL_IDENTITY_TAG,
+    CHANNEL_POLICY_TAG,
     CHANNEL_TRANSCRIPT_TAG,
+    CHANNEL_TURN_TAG,
+    CHANNEL_WAKE_ROUTING_TAG,
     CHANNEL_WAKE_ALL,
     CHANNEL_WAKE_MENTIONS,
     CHANNEL_WAKE_USER,
     ChannelMember,
     ChannelTranscriptEntry,
+    ChannelImageAttachment,
     HistoryEntry,
     LiveContextSnapshot,
     ProcessInfo,
     ScreenshotInfo,
     WindowInfo,
     apply_channel_identity,
+    apply_channel_policy,
+    apply_channel_turn,
+    apply_channel_wake_routing,
     apply_channel_transcript,
     apply_live_context,
     build_kwin_probe_script,
     clear_channel_identity,
+    clear_channel_turn,
     clear_channel_transcript,
     clear_live_context,
     desktop_environment,
@@ -36,7 +44,11 @@ from engine.live_context import (
     match_channel_mentions,
     match_channel_non_wakes,
     render_channel_identity,
-    render_channel_context,
+    render_channel_policy,
+    render_channel_roster,
+    render_channel_turn,
+    render_channel_wake_reminder,
+    render_channel_wake_routing,
     render_channel_transcript,
     render_live_context,
     route_channel_reply,
@@ -162,41 +174,127 @@ class ChannelContextTests(unittest.TestCase):
 
     def test_guidance_covers_self_other_and_no_mentions(self) -> None:
         self_member = self.members()[0]
-        self_text = render_channel_context(
+        policy = render_channel_policy(user_name="Master")
+        self.assertIn("@名字", policy)
+        self.assertIn("用户不在成员列表中", policy)
+        self.assertIn("直接说话即可", policy)
+        self.assertIn(
+            "只有Master的明确指名才算被指名；被非Master指名不算被指名", policy
+        )
+
+        self_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
-        self.assertIn("用户提到了你，正在和你对话。", self_text)
-        self.assertIn("路由标记", self_text)
-        other_text = render_channel_context(
+        self.assertIn("用户在消息中点名了你，请直接回复。", self_text)
+        self.assertIn("它会强制只唤醒用户", self_text)
+        other_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
-        self.assertIn("提到了其他成员，没有点你", other_text)
-        plain_text = render_channel_context(
+        self.assertIn("点名了其他成员，未点名你", other_text)
+        plain_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="大家好"
         )
-        self.assertIn("这是一条群聊消息；你可以自行决定是否回复。", plain_text)
+        self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain_text)
         self.assertNotIn("没有提到你", plain_text)
-        self.assertIn("@名字", plain_text)
-        self.assertIn("用户不在成员列表中", plain_text)
-        self.assertIn("<wake-routing>", plain_text)
-        self.assertIn("@Master", plain_text)
-        self.assertIn("直接说话即可", plain_text)
         self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
 
+        agent_text = render_channel_turn(
+            self_member=self_member,
+            members=self.members(),
+            message="@秋 帮我改一下这个文件",
+            from_agent=True,
+        )
+        self.assertIn("被非Master指名不算被指名", agent_text)
+        self.assertIn("不要试图获取执行锁", agent_text)
+
+    def test_policy_and_turn_are_system_prompt_blocks(self) -> None:
+        members = self.members()
+        policy = render_channel_policy(user_name="Master")
+        turn = render_channel_turn(
+            self_member=members[0],
+            members=members,
+            message="大家好",
+            wait_labels=("Aki", "Fuyu"),
+        )
+        self.assertTrue(policy.startswith(f"<{CHANNEL_POLICY_TAG}"))
+        self.assertIn(
+            "若判断本轮无需回复，直接输出 [NO_REPLY]",
+            policy,
+        )
+        self.assertTrue(turn.startswith(f"<{CHANNEL_TURN_TAG}"))
+        self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
+
+        system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
+        applied = apply_channel_policy(system, policy)
+        applied = apply_channel_turn(applied, turn)
+        self.assertIn(policy, applied)
+        self.assertIn(turn, applied)
+        self.assertLess(applied.index(policy), applied.index(turn))
+        self.assertLess(applied.index(turn), applied.index(f"<{CHANNEL_TRANSCRIPT_TAG}>"))
+        cleared = clear_channel_turn(applied)
+        self.assertNotIn(turn, cleared)
+        self.assertIn(policy, cleared)
+
+    def test_wake_routing_is_a_system_prompt_block(self) -> None:
+        block = render_channel_wake_routing("Master")
+        self.assertTrue(block.startswith(f"<{CHANNEL_WAKE_ROUTING_TAG}"))
+        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", block)
+        self.assertIn("强制只唤醒用户，不唤醒任何其他成员。", block)
+        self.assertIn(
+            "@Master仅在你只对Master说话，无需打扰其他人时使用。", block
+        )
+        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", block)
+        self.assertIn("无 `@`、无 `^成员名`：唤醒所有其他在线成员。", block)
+        self.assertIn("出现 `@Master` 时不唤醒任何其他成员", block)
+
+        system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
+        applied = apply_channel_wake_routing(system, block)
+        self.assertIn(block, applied)
+        self.assertEqual(apply_channel_wake_routing(applied, block), applied)
+
+        renamed = apply_channel_wake_routing(
+            applied, render_channel_wake_routing("哥哥")
+        )
+        self.assertNotIn("@Master", renamed)
+        self.assertIn("@哥哥", renamed)
+
+    def test_turn_identifies_new_message_and_repeats_wake_reminder(self) -> None:
+        members = self.members()
+        turn = render_channel_turn(
+            self_member=members[0],
+            members=members,
+            message="Aki 的新消息",
+            message_seq=23,
+            message_sender="Aki",
+            message_sender_id="aki",
+            from_agent=True,
+        )
+        self.assertIn(
+            "<wake-reminder>用^排除不需要被提醒的成员（格式：^成员名）。"
+            "@Master仅在你只对Master说话，无需打扰其他人时使用"
+            "（该标记会强制只唤醒用户）。</wake-reminder>",
+            turn,
+        )
+        self.assertIn(
+            '<new-message seq="23" sender="Aki" sender_id="aki" source="agent"',
+            turn,
+        )
+        self.assertIn("<text>Aki 的新消息</text>", turn)
+
     def test_execution_responder_is_single_and_deterministic(self) -> None:
         members = self.members()
-        aki = render_channel_context(
+        aki = render_channel_turn(
             self_member=members[0], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="true">', aki)
-        self.assertIn("唯一负责确认", aki)
-        fuyu = render_channel_context(
+        self.assertIn("负责确认执行者的唯一成员", aki)
+        fuyu = render_channel_turn(
             self_member=members[1], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="false">', fuyu)
         self.assertIn("不要尝试执行", fuyu)
-        mentioned = render_channel_context(
+        mentioned = render_channel_turn(
             self_member=members[1], members=members, message="@Fuyu do this"
         )
         self.assertNotIn("<execution-ownership", mentioned)
@@ -212,21 +310,31 @@ class ChannelContextTests(unittest.TestCase):
 
     def test_single_member_gets_lock_guidance_without_ownership_block(self) -> None:
         member = ChannelMember(id="fuyu", name="Fuyu", aliases=("Fuyu",))
-        text = render_channel_context(
+        text = render_channel_turn(
             self_member=member, members=[member], message="do this"
         )
         self.assertNotIn("<execution-ownership", text)
         self.assertIn("唯一在线成员", text)
-        self.assertIn("acquire_execution_lock", text)
+        self.assertIn(
+            "acquire_execution_lock",
+            render_channel_policy(user_name="Master"),
+        )
 
     def test_reply_wake_routing_uses_profile_user_name(self) -> None:
         members = self.members()
-        user_only = route_channel_reply(
+        reminded = route_channel_reply(
             "@Master\n只对你说。", members, user_name="Master"
         )
-        self.assertEqual(user_only.text, "只对你说。")
-        self.assertEqual(user_only.wake, CHANNEL_WAKE_USER)
-        self.assertEqual(user_only.target_ids, ())
+        self.assertEqual(reminded.text, "只对你说。")
+        self.assertEqual(reminded.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(reminded.target_ids, ())
+
+        targeted_user = route_channel_reply(
+            "@Master\n@Fuyu 这条也只对你说。", members, user_name="Master"
+        )
+        self.assertEqual(targeted_user.text, "@Fuyu 这条也只对你说。")
+        self.assertEqual(targeted_user.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(targeted_user.target_ids, ())
 
         targeted = route_channel_reply(
             "@Fuyu 这个方案有问题。", members, user_name="Master"
@@ -260,11 +368,28 @@ class ChannelContextTests(unittest.TestCase):
         self.assertEqual(override.wake, CHANNEL_WAKE_MENTIONS)
         self.assertEqual(override.target_ids, ())
 
-        user_only = route_channel_reply(
+        suppressed = route_channel_reply(
             "@Master 只提醒你。^Aki", members, user_name="Master"
         )
-        self.assertEqual(user_only.text, "只提醒你。")
-        self.assertEqual(user_only.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(suppressed.text, "只提醒你。")
+        self.assertEqual(suppressed.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(suppressed.target_ids, ())
+
+        everyone_suppressed = route_channel_reply(
+            "@Master 只提醒你。^Aki ^Fuyu", members, user_name="Master"
+        )
+        self.assertEqual(everyone_suppressed.text, "只提醒你。")
+        self.assertEqual(everyone_suppressed.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(everyone_suppressed.target_ids, ())
+
+    def test_wake_reminder_includes_user_only_marker(self) -> None:
+        reminder = render_channel_wake_reminder("哥哥")
+        self.assertIn("用^排除不需要被提醒的成员（格式：^成员名）。", reminder)
+        self.assertIn(
+            "@哥哥仅在你只对哥哥说话，无需打扰其他人时使用"
+            "（该标记会强制只唤醒用户）。",
+            reminder,
+        )
 
     def test_non_wake_marker_requires_agent_alias_and_boundary(self) -> None:
         members = self.members()
@@ -281,7 +406,7 @@ class ChannelContextTests(unittest.TestCase):
 
     def test_agent_initiation_budget_is_exposed_and_zero_blocks_replies(self) -> None:
         members = self.members()
-        blocked = render_channel_context(
+        blocked = render_channel_turn(
             self_member=members[0],
             members=members,
             message="@Fuyu hello",
@@ -292,7 +417,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn('remaining="0"', blocked)
         self.assertIn('limit="3"', blocked)
         self.assertIn("[NO_REPLY]", blocked)
-        self.assertIn("主动启动次数已经用完", blocked)
+        self.assertIn("主动启动次数已耗尽", blocked)
 
     def test_descriptions_are_escaped_limited_and_marked_untrusted(self) -> None:
         members = self.members()
@@ -302,9 +427,7 @@ class ChannelContextTests(unittest.TestCase):
             aliases=("Fuyu",),
             description="<script>bad</script>" + "z" * 400,
         )
-        text = render_channel_context(
-            self_member=members[0], members=members, message="hi"
-        )
+        text = render_channel_roster(self_member=members[0], members=members)
         self.assertIn('untrusted="true"', text)
         self.assertIn("&lt;script&gt;", text)
         self.assertNotIn("<script>", text)
@@ -316,12 +439,13 @@ class ChannelContextTests(unittest.TestCase):
             ChannelMember(id="master", name="Master", kind="user"),
             ChannelMember(id="fuyu", name="Fuyu", kind="agent"),
         ]
-        text = render_channel_context(
+        roster = render_channel_roster(self_member=members[0], members=members)
+        turn = render_channel_turn(
             self_member=members[0], members=members, message="do this"
         )
-        self.assertIn('kind="user"', text)
-        self.assertIn('kind="agent"', text)
-        self.assertIn('responder="aki"', text)
+        self.assertIn('kind="user"', roster)
+        self.assertIn('kind="agent"', roster)
+        self.assertIn('responder="aki"', turn)
         self.assertEqual(
             select_execution_responder(members),
             "aki",
@@ -379,6 +503,41 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertIn("缺少回滚点", block)
         self.assertIn("chain-of-thought, tool calls", block)
         self.assertNotIn('role="user"', block)
+
+    def test_attachments_render_as_name_path_json_without_base64(self) -> None:
+        entry = ChannelTranscriptEntry(
+            seq=3,
+            sender="Master",
+            sender_id="user-1",
+            text="看看图片1",
+            attachments=(
+                ChannelImageAttachment(
+                    name="图片1",
+                    path="/tmp/aki/channel-media/mixed-1/1.png",
+                    mime="image/png",
+                    size=123,
+                    index=1,
+                ),
+            ),
+        )
+        block = render_channel_transcript([entry], new_seq=3)
+        self.assertIn(
+            '<attachments>[{"name":"图片1","path":"/tmp/aki/channel-media/mixed-1/1.png"}]</attachments>',
+            block,
+        )
+        self.assertNotIn("base64", block)
+
+        turn = render_channel_turn(
+            self_member=ChannelMember(id="aki", name="Aki", is_self=True),
+            members=(ChannelMember(id="aki", name="Aki", is_self=True),),
+            message=entry.text,
+            message_seq=3,
+            message_sender="Master",
+            message_sender_id="user-1",
+            message_attachments=entry.attachments,
+        )
+        self.assertIn('"name":"图片1"', turn)
+        self.assertIn('"path":"/tmp/aki/channel-media/mixed-1/1.png"', turn)
 
     def test_budget_keeps_newest_and_drops_oldest(self) -> None:
         entries = [

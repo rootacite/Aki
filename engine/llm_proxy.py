@@ -208,6 +208,8 @@ class LlmProxy:
             writer.write(_status_json(404, "unknown model"))
             return 404, model_id, "-"
         payload["model"] = route.upstream_model
+        if route.extra_body:
+            payload.update(route.extra_body)
         forwarded = json.dumps(payload).encode("utf-8")
         parsed = urlsplit(route.url)
         upstream_host = parsed.hostname or "-"

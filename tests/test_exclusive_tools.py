@@ -14,6 +14,7 @@ from engine.akid import (
     NullConnection,
     Turn,
 )
+from engine.aki_config import ImageGeneration
 from engine.life_ledger import LifeLedger
 from engine.schedule_store import ScheduleStore
 
@@ -71,6 +72,7 @@ def make_server(
     *,
     profile: str = "aki",
     backend: DummyBackend | None = None,
+    image_generation: ImageGeneration | None = None,
 ) -> GatewayServer:
     backend = backend or DummyBackend()
     config = GatewayConfig(
@@ -90,6 +92,7 @@ def make_server(
         camera_enabled=False,
         screenshot_enabled=False,
         live_context_enabled=False,
+        image_generation=image_generation,
     )
     return GatewayServer(config, backend_factory=lambda *_: backend)
 
@@ -113,6 +116,44 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("aki_schedule_create", fuyu_names)
         self.assertNotIn("aki_zero_reply_budget", fuyu_names)
         self.assertNotIn("aki_ledger_add", fuyu_names)
+        image = ImageGeneration(
+            enabled=True,
+            upstream_name="minimax",
+            model="image-01",
+            path="/image_generation",
+            base_url="https://api.minimaxi.com/v1",
+            url="https://api.minimaxi.com/v1/image_generation",
+            api_key="test-key",
+            use_proxy=False,
+            output_dir=str(self.root / "images"),
+            require_approval=False,
+            timeout=30,
+            max_bytes=1024 * 1024,
+            aspect_ratio="1:1",
+            prompt_optimizer=False,
+            aigc_watermark=False,
+        )
+        haru = make_server(
+            self.root / "haru", profile="haru", image_generation=image
+        )
+        aki_configured = make_server(
+            self.root / "aki-configured", profile="aki", image_generation=image
+        )
+        fuyu_configured = make_server(
+            self.root / "fuyu-configured", profile="fuyu", image_generation=image
+        )
+        haru_names = {tool["name"] for tool in haru._external_tools()}
+        self.assertIn("generate_image", haru_names)
+        self.assertNotIn("generate_image", aki_names)
+        self.assertNotIn("generate_image", fuyu_names)
+        self.assertNotIn(
+            "generate_image",
+            {tool["name"] for tool in aki_configured._external_tools()},
+        )
+        self.assertNotIn(
+            "generate_image",
+            {tool["name"] for tool in fuyu_configured._external_tools()},
+        )
 
     async def test_wrong_profile_tool_call_returns_owner_error(self) -> None:
         backend = DummyBackend()
@@ -139,6 +180,32 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TOOL_OWNERSHIP_DENIED", text)
         self.assertIn("Aki", text)
         self.assertIn("@Aki", text)
+
+    async def test_image_generation_is_denied_to_non_haru(self) -> None:
+        backend = DummyBackend()
+        server = make_server(self.root, profile="fuyu", backend=backend)
+        server.active = Turn(
+            turn_id="turn-1",
+            conn=NullConnection(),
+            message="x",
+            include_reasoning=False,
+            client_message_id=None,
+        )
+        await server._handle_external_tool(
+            {
+                "request": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "generate_image",
+                    "input": {"prompt": "a spring garden"},
+                }
+            }
+        )
+        self.assertEqual(len(backend.results), 1)
+        _call_id, text, is_error = backend.results[0]
+        self.assertTrue(is_error)
+        self.assertIn("TOOL_OWNERSHIP_DENIED", text)
+        self.assertIn("Haru", text)
+        self.assertIn("@Haru", text)
 
     async def test_schedule_tool_crud(self) -> None:
         server = make_server(self.root)

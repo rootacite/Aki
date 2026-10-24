@@ -8,10 +8,12 @@ import re
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping
 
+from engine.image_generation import ASPECT_RATIOS, MAX_IMAGES, MAX_PROMPT_CHARS
+
 
 TOOL_OWNERSHIP_TAG = "aki-tool-ownership"
 
-OWNER_LABELS: dict[str, str] = {"aki": "Aki"}
+OWNER_LABELS: dict[str, str] = {"aki": "Aki", "haru": "Haru"}
 
 TOOL_OWNERSHIP_DENIED = "TOOL_OWNERSHIP_DENIED"
 
@@ -241,6 +243,53 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
         parameters=_parameters({}),
         read_only=True,
     ),
+    ExclusiveTool(
+        name="generate_image",
+        owner_profile="haru",
+        label="Generate image",
+        description=(
+            "Generate one or more new images from a text prompt with MiniMax "
+            "text-to-image and save them under /tmp/aki/images. Use this only "
+            "when the user asks for a new picture, illustration, design, or "
+            "visual idea. This is not a screenshot or camera tool. It does not "
+            "require the execution lock, but may require user approval. The "
+            "result contains only absolute local paths, byte counts, and MIME "
+            "types; it never embeds image bytes. Exclusive to Haru. To share a "
+            "returned path in the same channel message as text, write "
+            "`#[/absolute/path]` in the final reply; use tokifactor_send_image "
+            "only for a standalone image-only message. Files under /tmp are ephemeral. "
+            f"Prompts are limited to {MAX_PROMPT_CHARS} characters."
+        ),
+        parameters=_parameters(
+            {
+                "prompt": {
+                    "type": "string",
+                    "description": (
+                        "Detailed visual description: subject, composition, light, "
+                        "colors, materials, mood, and camera or art style."
+                    ),
+                    "maxLength": MAX_PROMPT_CHARS,
+                },
+                "aspect_ratio": {
+                    "type": "string",
+                    "enum": list(ASPECT_RATIOS),
+                    "description": "Output aspect ratio; defaults to the profile setting.",
+                },
+                "n": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_IMAGES,
+                    "description": "Number of images to generate; defaults to 1.",
+                },
+                "prompt_optimizer": {
+                    "type": "boolean",
+                    "description": "Let MiniMax enrich the prompt; defaults to the profile setting.",
+                },
+            },
+            ("prompt",),
+        ),
+        timeout_ms=180_000,
+    ),
 )
 
 OWNERSHIP_BY_NAME: dict[str, ExclusiveTool] = {
@@ -304,6 +353,7 @@ def ownership_denied_reason(name: str) -> str:
 DOMAIN_OWNERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("aki", ("日程与提醒", "回复预算清零", "生活琐事/偏好/身体状况账本")),
     ("fuyu", ("代码编写与审查", "系统运维", "Git 审计")),
+    ("haru", ("图片创作/文生图",)),
 )
 
 
@@ -380,13 +430,26 @@ def render_tool_ownership_prompt(
                 f'<forbidden tool="{_attr(tool.name)}" owner="{_attr(tool.owner_profile)}" '
                 f'owner-label="{_attr(tool.owner_label)}"/>'
             )
+        foreign_domains = [
+            (owner, domains) for owner, domains in DOMAIN_OWNERS if owner != profile
+        ]
+        handoff_hints = "; ".join(
+            f"@{owner_label(owner)} for {domains[0]}"
+            for owner, domains in foreign_domains
+            if owner_label(owner)
+        )
+        handoff_hint = (
+            f" Examples: {_text(handoff_hints)}."
+            if handoff_hints
+            else ""
+        )
         lines.append(
             "<rule>If the user asks for another member's exclusive task: in a shared "
             "channel, when you are explicitly addressed, reply with a short "
-            f"'@{_text(foreign_tools[0].owner_label)} ...' handoff explaining who owns "
+            "handoff to the owning member using that member's @name explaining who owns "
             "it; when no executor is named, output exactly [NO_REPLY] and let the "
-            "owner answer. In a local CLI, do not execute it; tell the user to ask "
-            "the owner in the shared channel.</rule>"
+            f"owner answer.{handoff_hint} In a local CLI, do not execute it; tell the "
+            "user to ask the owner in the shared channel.</rule>"
         )
     foreign_domains = [
         (owner, domains) for owner, domains in DOMAIN_OWNERS if owner != profile

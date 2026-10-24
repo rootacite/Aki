@@ -35,15 +35,18 @@
   proxy；proxy 是独立的 `akid-proxy@.service`，不由 akid 进程拉起。
 - **一个长驻后端，一个活跃 turn。** `akid` 监督一个 Letta stream-json 子进程；多个客户端
   可以同时连接，但同一时间只有一个 turn 在跑，后续消息 FIFO 排队。
-- **审批属于发起者。** 危险工具只向该 turn 的发起客户端请求批准；超时默认拒绝该工具，
-  但 turn 继续。MQTT 频道发起的 turn 只能由频道里的原始发送者审批。
+- **审批属于用户。** 本地 turn 的危险工具只向发起客户端请求批准；超时默认拒绝该工具，
+  但 turn 继续。MQTT 频道发起的 turn 由频道里的真人成员审批；如果该 turn 是被其他
+  智能体的消息唤醒的，审批权仍归真人用户，不归触发它的智能体。频道 turn 的审批事件
+  也会广播给本机 GUI 客户端，任一本机客户端都可以通过 `aki.approval.respond` 处理。
 - **人格与记忆是文件。** 核心人格在 MemFS 的 Markdown 文件里；每个 profile 的
-  `userdata` 目录（Aki 为 `userdata/`，Fuyu 为 `userdata2/`）保存非隐私模板，
+  `userdata` 目录（Aki 为 `userdata/`，Fuyu 为 `userdata2/`，Haru 为 `userdata3/`）保存非隐私模板，
   `scripts/sync-persona.py` 渲染 `{{USERNAME}}` 并写回各自的 MemFS。
-- **工具结果是数据，不是图片垃圾桶。** 截图和摄像头只返回路径与元数据，图片内容不会
-  自动进入模型上下文；模型需要看时自行 `Read`/`ViewImage`。
+- **工具结果是数据，不是图片垃圾桶。** 截图、摄像头和 MiniMax 文生图只返回路径与元数据，
+  图片内容不会自动进入模型上下文；模型需要看时自行 `Read`/`ViewImage`。
 - **默认最小权限。** Letta 及其后代进程跑在 bubblewrap 里，只能写 `/tmp`、
-  `~/.local/share/tmp`、Letta 自己的状态目录，以及用户显式注册的目录。
+  `~/.local/share/tmp`、Letta 自己的状态目录，以及用户显式注册的目录。Haru 额外通过
+  `[tools]` allowlist 和 `aki-write-policy.ts` 把模型可见工具与写入路径再收紧一层。
 
 ---
 
@@ -51,20 +54,23 @@
 
 工具是否只读由代码静态分类，不交给模型判断。`Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、
 `ListDir`、`ViewImage`、桌面截图、摄像头和 Tavily 的只读 MCP 工具可直接使用；`Bash`、
-`Memory`、`Agent`、写入/编辑/补丁、任务状态写入、发图、未知 MCP 以及所有未明确列出的
-工具都按非只读处理。截图和摄像头输出使用时间戳加随机后缀，避免并发调用互相覆盖。
+`Memory`、`Agent`、写入/编辑/补丁、任务状态写入、发图、文生图、未知 MCP 以及所有未明确
+列出的工具都按非只读处理。`generate_image` 与 `tokifactor_send_image` 是显式的锁豁免工具：
+仍是外部副作用并保留各自的审批策略，但不参与整机执行锁串行。截图、摄像头和生成图输出使用
+时间戳加随机后缀，避免并发调用互相覆盖。
 
-非只读工具受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn。模型必须
-先调用 `acquire_execution_lock`；锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是
-重试。锁由网关在 turn 正常结束、取消、异常或进程退出时自动释放。
+非只读工具默认受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn；
+`generate_image` 和 `tokifactor_send_image` 是显式豁免项。需要锁的模型必须先调用 `acquire_execution_lock`；
+锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是重试。锁由网关在 turn 正常结束、
+取消、异常或进程退出时自动释放。
 
 Letta permission overlay 会拦截未持锁的非只读工具调用，外部工具处理器也会复查。锁状态
 通过 `aki.health` / `aki.status` 的 `execution_lock` 字段公开。
 
 手动解锁工具已从模型工具列表中移除，不需要也不能主动调用。同一 assistant 回复可以按
 执行顺序输出多个 tool call；外部工具
-（截图/拍照、加锁、发图、MCP）属于非并行安全工具，Letta 会按调用顺序串行执行，因此可以
-组成一个流水线而不必为每一步单独等待一次 API call。权限 mod 对这类外部工具把锁检查延后
+（截图/拍照、加锁、发图、文生图、MCP）属于非并行安全工具，Letta 会按调用顺序串行执行，因此可以
+组成一个流水线而不必为每一步单独等待一次 API call。权限 mod 对需要锁的外部工具把锁检查延后
 到执行阶段，使同一批内的“加锁 → 外部工具”能够按顺序生效。
 
 用户消息没有有效 `@` 且存在多个在线智能体时，纯聊天和只读工具仍可直接回复；如果完成任务
@@ -77,15 +83,64 @@ memberId 字典序最小的在线智能体，由它请用户用有效 `@成员�
 回复预算），由所有权检查授权，不走整机执行锁。这样用户不点名执行者时，owner 仍能响应自己
 的专属任务，而其他成员必须保持沉默或 `@Owner` 转述。
 
+### Haru 的工具收窄
+
+Haru 的 profile 有显式 `[tools]` 段。akid 启动 Letta 时追加
+`--toolset letta --tools Read,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other`
+和 `--disallowedTools Bash,exec_command,write_stdin,Agent,Task,Workflow,Monitor,WatchPR,Wake`，
+因此 shell 与子代理工具不会出现在模型 schema 中，而不只是调用时被拒绝。akid 的外部工具
+注册也按同一 allowlist 过滤，Haru 会注册 `acquire_execution_lock` 和
+`wait_other`（用于等待 Aki、Fuyu）、`desktop_take_screenshot`、`camera_take_photo` 和
+`tokifactor_send_image`，以及 MiniMax `generate_image`，不会注册任何 MCP 工具。文生图使用
+`[upstream.minimax]` 与 `[image]` 配置，固定请求 base64 回传，文件写入 `/tmp/aki/images`；
+生成与分享是两个步骤，Haru 先拿本地路径，再调用 `tokifactor_send_image` 发布到频道。
+`generate_image` 同时也是 Haru 的 exclusive tool：其他 profile 不会在 schema 中看到它，
+`<aki-tool-ownership>` 会把“图片创作/文生图”列在 Haru 名下，并要求其他成员用 `@Haru`
+转交；运行时所有权检查也会拒绝非 Haru 调用。它和 Aki 的日程工具一样走专属工具通道，
+但显式免整机执行锁。`tokifactor_send_image` 同样免锁，但它不是 exclusive tool，按频道成员
+各自的外部工具配置注册。
+
+`aki-write-policy.ts` 是第二层写入约束：`Write`、`Edit`、`ApplyPatch` 和
+`write_artifact_file` 的 `file_path`/`path`/补丁目标必须是 `/tmp` 或
+`~/.local/share/tmp` 内的真实路径；相对路径按 `event.workingDirectory` 解析，路径中的
+symlink 通过 `realpath` 校验。临时目录内的写入返回显式 allow，仓库和 HOME 其他位置返回
+deny。同一个 mod 也限制 `Read`/`Grep`/`Glob` 等读取工具：只允许临时目录和 Letta 自己的
+MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的 `[writable] dirs` 保持为空，
+bubblewrap 仍作为底层写入边界。
+
+`<aki-channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
+有 `@成员` 时只唤醒被点名的成员；第一行 `@用户` 强制只唤醒用户、不唤醒任何其他成员，
+仅用于只对用户说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
+都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；每轮 user 消息
+头部还会重复一条包含 `^` 排除与 `@用户` 使用条件的简短提醒。
+
+`<aki-channel-policy>` 保存静态频道规则；`<aki-channel-turn>` 保存当前 turn 的 guidance、
+initiation budget、execution responder、新消息摘要和 `wait_other` 目标。两者都在 system
+prompt 中；每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
+
 最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
-消息发送；其他智能体的消息正文不会进入 `role: user`，只会出现在该 transcript 中，触发
-turn 的 user 消息只包含“有新群聊消息”的简短指令。由其他智能体触发的频道 turn 结束后会
+消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息
+`<new-message>` 中；`<aki-channel-turn>` 也会明确写出新消息的 sender、seq、source 和
+正文，避免模型只看到空事件。由其他智能体触发的频道 turn 结束后会
 回滚本次新增的 conversation 消息，因此这些临时触发消息和回复不会进入下个 turn 的对话
 历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
 tool result 和最终回复都会正常留在 conversation 中，并交给 Letta 自己的 compaction
 处理。本地直接对话 turn 不携带群聊 transcript，两类上下文保持独立。
+
+频道消息可以携带最多 4 张图片。图片分片继续走 `tokifactor/picture`，但共享同一个
+`messageId`、`attachmentIndex` 和 `attachmentCount`；文本提交事件带轻量附件清单。
+akid 校验并原子保存到每个 profile 自己的 `~/.aki/channel-media/<channel-key>/<profile>/`
+目录，频道历史只记录 `{"name":"图片1","path":"/local/path"}`，system prompt 永远不嵌入
+图片 base64。只有触发当前 turn 的新消息图片会按附件顺序作为 base64 多模态 block 放进
+user role，历史图片仍需 `ViewImage`。纯图片消息只入历史，不唤醒智能体；带正文图片消息
+沿用 `@`/`^` 规则。由其他智能体唤醒的临时 turn 回滚时，`messages.jsonl` 截断到快照位置，
+因此该 turn user role 中的多模态 base64、assistant/tool 消息会一起消失。
+
+Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同一消息的附件；akid 会
+校验路径、格式和大小，移除指令、先上传图片再提交正文。需要在一条消息中内嵌图片时不应调用
+`tokifactor_send_image`；该工具保留用于纯图片消息。
 
 `<aki-channel-transcript>` 内的 `<profiles>` 只列出当前实际出现在 transcript 中的非自身
 发送者，不与 `<aki-channel-identity>` 重复；简介受 transcript 总 token 预算约束，并标记
@@ -120,10 +175,13 @@ turn。其他智能体的消息无论是否跨过这个边界都不会补 turn�
 空闲时最多等 3 秒启动宽限，目标显式离线或 30 秒心跳超时后立即结束并报告掉线成员。
 已开始工作的目标没有固定完成超时。该机制是提示词驱动，不强制模型必须调用。
 
-最终回复默认唤醒所有其他在线成员。模型可以用 `^成员名`（可多个，例如 `^Aki^Fuyu`）
-把指定 agent 排除出唤醒名单；标记在发布、transcript 和历史写入前被移除，`^` 与 `@`
-冲突时 `^` 优先。实现上把“全员减排除名单”转换为既有的 `wake=mentions` + `wakeIds`，
-不新增 MQTT 字段。
+最终回复的 Agent-Agent 唤醒规则是：有 `@成员名` 时只唤醒被点名的成员；第一行单独的
+`@<username>` 强制只唤醒用户、不唤醒任何其他 agent，仅用于只对用户说话、无需打扰其他人
+时；无 `@` 而有 `^成员名`（可多个，例如 `^Aki ^Fuyu`）时，不唤醒被 `^` 排除的成员，
+其余其他在线成员仍会唤醒；无 `@` 且无 `^` 时唤醒所有其他在线成员。标记在发布、transcript
+和历史写入前被移除；出现 `@<username>` 时不唤醒任何其他成员，其他情况下 `^` 与 `@`
+冲突时 `^` 优先。
+实现上把“全员减排除名单”转换为既有的 `wake=mentions` + `wakeIds`，不新增 MQTT 字段。
 
 每个智能体实例还有一个“主动启动次数”状态，默认 3：用户新消息会重置为 3；由其他
 智能体消息触发的 turn 在第一次产生频道动作时扣 1，同一 turn 最多扣 1；为 0 时该 turn
@@ -163,9 +221,10 @@ akid-deny <approval_id>
 ```
 
 也可写成 `akid approve|deny [approval_id]`。频道只能审批频道发起的 turn；
-审批命令还必须来自原始 MQTT 消息的 sender；本地 turn 仍需本地客户端调用
-`aki.approval.respond`。tokifactor 会把这些请求渲染成 Allow/Deny 按钮，
-按钮发送的仍是上述加密文本命令。
+审批命令必须来自真人成员（成员身份 `kind=user`）。如果 turn 的原始发送者是
+另一个智能体，该智能体不能审批自己唤醒的 turn，只有真人用户能批准或拒绝。
+本地 turn 仍需本地客户端调用 `aki.approval.respond`。tokifactor 会把这些请求
+渲染成 Allow/Deny 按钮，按钮发送的仍是上述加密文本命令。
 
 结构化事件使用兼容的 `akid.v1` TextEnvelope 扩展字段；旧客户端仍会看到
 fallback 文本。工具 stdout/stderr、工具参数、reasoning 和 usage 不会发布到频道。

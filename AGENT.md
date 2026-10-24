@@ -17,6 +17,19 @@
 - 若用户明确要求不要部署，才可以跳过；此时必须在最终回复中说明“未部署”，不能把源码完成
   当成运行状态完成。
 
+### 0.1 强制：测试不得污染真实 conversation
+
+任何自动化测试、集成测试或手工验证都必须使用隔离上下文：临时 `HOME`、`LETTA_HOME`、
+backend 目录、conversation id、端口和频道。不得读取后写入、reset、compact、删除或向真实
+用户的 conversation 发送测试消息。
+
+- 测试前后必须核对真实 `~/.letta` 会话、agent record、MemFS、频道历史及其 mtime/计数，
+  证明生产数据没有被改动。
+- 如果测试已经影响这台机器的真实 conversation（包括新增、修改、删除消息，改写 system
+  prompt，触发 compaction，或污染频道历史），必须先备份现场，再完整回滚到测试前状态。
+- 回滚后要重新核对会话结构、in-context 消息、频道历史和成员上下文，确认没有残留测试内容。
+- 在污染确认与回滚完成之前，不得宣布任务完成；无法确认是否污染时，按“已污染”处理并先核查。
+
 ## 1. 产品定位
 
 Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 AI 智能助手。
@@ -247,6 +260,29 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
 - 设置：每个 profile 使用 `~/.aki/<profile>.conf`；`aki.conf` 是默认 profile。
   Letta 只保存对应 profile 的回环代理地址和回环令牌。
+- 成员：Aki（7721）、Fuyu（7722）、Haru（7723）已上线；Natsu 仍为 Coming Soon。
+  Haru 使用 `userdata3/`、`aki-haru` provider 和 Gemini 3.8 Flash 文本模型（reasoning `low`），
+  `[gateway] username = 哥哥`，并用 `[channel] wait_for = Aki,Fuyu` 固定前序发言顺序。
+- Haru 工具边界：`[tools]` 显式使用 `letta` toolset，并在启动参数中加
+  `--tools`/`--disallowedTools`，使 Bash、shell、子代理从 schema 中消失。
+  `aki-write-policy.ts` 只允许 `Write/Edit/ApplyPatch/write_artifact_file`
+  写入 `/tmp` 与 `~/.local/share/tmp`，并做 realpath 校验；同一 mod 也限制
+  `Read/Grep/Glob` 只能读临时目录和 Letta MemFS/工具归档，不能调查仓库代码。
+  `[tools] allow` 额外包含隐藏工具 `wait_other`；`[writable] dirs` 为空，bubblewrap 作为第二层边界。
+  已注册桌面截图、相机、频道发图、MiniMax 文生图 `generate_image`，并启用桌面实况。
+  文生图走 `[upstream.minimax]` 与 `[image]`，固定 `image-01`、base64 回传和
+  `/tmp/aki/images` 输出；生成结果只返回路径与元数据，分享时再调用
+  `tokifactor_send_image`。`generate_image` 与 `tokifactor_send_image` 都是非只读工具，
+  但显式免执行锁，不需要先调用 `acquire_execution_lock`；生图审批仍由
+  `[image] require_approval` 控制。`generate_image` 还是 Haru 的
+  exclusive tool：其他成员不会注册该工具，会在 `<aki-tool-ownership>` 中看到
+  “图片创作/文生图归 Haru”并以 `@Haru` 转交。MCP、TTS、视频和 ComfyUI 留到后续阶段。
+- 频道图片：Tokifactor 支持正文加最多 4 张图片，单图 8 MiB、单条总计 16 MiB。Aki 把
+  入站图片存入各 profile 的 `~/.aki/channel-media/`，频道历史和 system prompt 只记录
+  `{"name","path"}`；只有当前触发 turn 的新消息图片作为 base64 多模态输入。纯图片只记录
+  不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片，不为此调用
+  `tokifactor_send_image`。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
+  user role 中新增的多模态 base64 和后续消息全部消失。
 - 服务：`akid@<profile>.service` 管网关，`akid-proxy@<profile>.service` 管独立
   loopback LLM proxy；akid 进程本身不监听模型端口。
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
@@ -256,9 +292,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
 - System prompt 固定顺序：`base → core memory → <aki-tool-ownership> →
-  <aki-channel-identity> → <aki-channel-transcript> → <aki-live-context>`。ownership 与
-  identity 每个 turn 刷新；transcript 仅频道/proactive turn 注入，local turn 会清除但保留
-  ownership/identity；live context 始终最后。
+  <aki-channel-policy> → <aki-channel-wake-routing> → <aki-channel-identity> →
+  <aki-channel-turn> → <aki-channel-transcript> → <aki-live-context>`。
+  policy/wake routing 在启动时写入；turn 仅频道 turn 注入，local turn 会清除；transcript
+  仅频道/proactive turn 注入；live context 始终最后。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
   schema 过滤、Letta ownership mod、akid 运行时校验和 `<aki-tool-ownership>` 提示词共同
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。

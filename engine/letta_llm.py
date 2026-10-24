@@ -7,9 +7,17 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from engine.aki_config import AkiConfig, ModelRoute, atomic_write, load_config, set_key
+from engine.aki_config import (
+    AkiConfig,
+    ModelRoute,
+    ToolPolicy,
+    atomic_write,
+    load_config,
+    set_key,
+)
 from engine.execution_policy import (
     LOCK_ACQUIRE_TOOL,
+    LOCK_EXEMPT_TOOLS,
     LOCK_RELEASE_TOOL,
     READ_ONLY_MCP_TOOLS,
     READ_ONLY_TOOLS,
@@ -19,6 +27,7 @@ from engine.tool_ownership import EXCLUSIVE_TOOLS
 DEEPSEEK_HANDLE = "deepseek/deepseek-flash"
 EXECUTION_LOCK_MOD_NAME = "aki-execution-lock.ts"
 TOOL_OWNERSHIP_MOD_NAME = "aki-tool-ownership.ts"
+WRITE_POLICY_MOD_NAME = "aki-write-policy.ts"
 
 
 def render_provider_mod(config: AkiConfig) -> str:
@@ -100,6 +109,14 @@ def _compat(route: ModelRoute) -> dict[str, object] | None:
             "maxTokensField": "max_tokens",
             "supportsStrictMode": False,
         }
+    if route.upstream_name == "minimax" and route.api == "openai-completions":
+        return {
+            "supportsStore": False,
+            "supportsDeveloperRole": False,
+            "supportsReasoningEffort": False,
+            "maxTokensField": "max_tokens",
+            "supportsStrictMode": False,
+        }
     return None
 
 
@@ -165,12 +182,14 @@ def render_execution_lock_mod() -> str:
     readonly = json.dumps(sorted(READ_ONLY_TOOLS))
     readonly_mcp = json.dumps(sorted(READ_ONLY_MCP_TOOLS))
     lock_tools = json.dumps(sorted((LOCK_ACQUIRE_TOOL, LOCK_RELEASE_TOOL)))
+    lock_exempt = json.dumps(sorted(LOCK_EXEMPT_TOOLS))
     external_tools = json.dumps(
         sorted(
             {
                 "tokifactor_send_image",
                 "camera_take_photo",
                 "desktop_take_screenshot",
+                "generate_image",
                 "wait_other",
             }
         )
@@ -183,6 +202,7 @@ def render_execution_lock_mod() -> str:
 const READ_ONLY = new Set({readonly});
 const READ_ONLY_MCP = new Set({readonly_mcp});
 const LOCK_TOOLS = new Set({lock_tools});
+const LOCK_EXEMPT = new Set({lock_exempt});
 const EXTERNAL_TOOLS = new Set({external_tools});
 const EXCLUSIVE_TOOLS = new Set({exclusive_tools});
 
@@ -213,6 +233,7 @@ function isExternalTool(toolName) {{
 
 function denies(toolName, phase) {{
   if (LOCK_TOOLS.has(toolName)) return;
+  if (LOCK_EXEMPT.has(toolName)) return;
   if (EXCLUSIVE_TOOLS.has(toolName)) return;
   if (READ_ONLY.has(toolName) || READ_ONLY_MCP.has(toolName)) return;
   if (phase === "approval" && isExternalTool(toolName)) return;
@@ -241,6 +262,182 @@ def write_execution_lock_mod(letta_home: Path) -> Path:
     path = letta_home / "mods" / EXECUTION_LOCK_MOD_NAME
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic_write(path, render_execution_lock_mod())
+    return path
+
+
+DENIED_WRITE_TOOLS = (
+    "Bash",
+    "exec_command",
+    "write_stdin",
+    "Agent",
+    "Task",
+    "Workflow",
+    "Monitor",
+    "WatchPR",
+    "Wake",
+)
+
+
+def render_write_policy_mod(policy: ToolPolicy, *, profile: str) -> str:
+    roots = json.dumps(list(policy.write_roots), ensure_ascii=False)
+    denied = json.dumps(list(DENIED_WRITE_TOOLS))
+    profile_literal = json.dumps(profile)
+    return f"""import {{ existsSync, realpathSync }} from "node:fs";
+import {{ basename, dirname, isAbsolute, resolve, sep }} from "node:path";
+import {{ homedir }} from "node:os";
+
+const PROFILE = {profile_literal};
+const WRITE_ROOTS = {roots}.map(expandRoot);
+const DENY_TOOLS = new Set({denied});
+const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "write_artifact_file"]);
+const READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "ListDir", "read_artifact_file"]);
+const LETTA_HOME = process.env.LETTA_HOME
+  ? resolve(process.env.LETTA_HOME)
+  : resolve(homedir(), ".letta");
+const READ_ROOTS = [
+  ...WRITE_ROOTS,
+  resolve(LETTA_HOME, "lc-local-backend", "memfs"),
+  resolve(LETTA_HOME, "projects"),
+];
+
+function expandRoot(value) {{
+  if (value === "~") return resolve(homedir());
+  if (value.startsWith("~/")) return resolve(homedir(), value.slice(2));
+  return resolve(value);
+}}
+
+function canonicalPath(raw, workingDirectory) {{
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  let value = raw.trim();
+  if (value === "~") value = homedir();
+  else if (value.startsWith("~/")) value = resolve(homedir(), value.slice(2));
+  let target = isAbsolute(value) ? value : resolve(workingDirectory, value);
+  target = resolve(target);
+  const missing = [];
+  let probe = target;
+  while (!existsSync(probe)) {{
+    const parent = dirname(probe);
+    if (parent === probe) break;
+    missing.unshift(basename(probe));
+    probe = parent;
+  }}
+  try {{
+    probe = realpathSync(probe);
+  }} catch (error) {{
+    return null;
+  }}
+  return resolve(probe, ...missing);
+}}
+
+function within(path, root) {{
+  return path === root || path.startsWith(root + sep);
+}}
+
+function patchTargets(input) {{
+  const paths = [];
+  const patterns = [
+    /\\*\\*\\* (?:Add|Update|Delete) File:\\s*(.+)/g,
+    /\\*\\*\\* Move to:\\s*(.+)/g,
+  ];
+  for (const pattern of patterns) {{
+    for (const match of input.matchAll(pattern)) {{
+      const value = (match[1] || "").trim();
+      if (value) paths.push(value);
+    }}
+  }}
+  return paths;
+}}
+
+function writeTargets(toolName, args) {{
+  if (toolName === "ApplyPatch") {{
+    return patchTargets(typeof args.input === "string" ? args.input : "");
+  }}
+  const value = args.file_path || args.path;
+  return typeof value === "string" && value.trim() ? [value] : [];
+}}
+
+function readTargets(toolName, args) {{
+  const value = args.file_path || args.path || (toolName === "Grep" || toolName === "Glob" ? args.pattern : "");
+  return typeof value === "string" && value.trim() ? [value] : [];
+}}
+
+function deny(reason) {{
+  return {{ decision: "deny", reason }};
+}}
+
+function check(event) {{
+  const toolName = event.toolName;
+  if (DENY_TOOLS.has(toolName)) {{
+    return deny(
+      `HARU_TOOL_DENIED: ${{toolName}} is not part of Haru's toolset. ` +
+      "Hand the task to Fuyu, Aki, or Natsu, or tell the user you cannot do it."
+    );
+  }}
+  const workingDirectory = event.workingDirectory || event.cwd || process.cwd();
+  if (READ_TOOLS.has(toolName)) {{
+    const rawTargets = readTargets(toolName, event.args || {{}});
+    if (rawTargets.length === 0) {{
+      return deny(
+        `HARU_READ_DENIED: ${{toolName}} did not include a path. ` +
+        "Haru only reads temporary artifacts or her own Letta memory files."
+      );
+    }}
+    for (const raw of rawTargets) {{
+      const target = canonicalPath(raw, workingDirectory);
+      if (target === null || !READ_ROOTS.some((root) => within(target, root))) {{
+        return deny(
+          `HARU_READ_DENIED: ${{raw}} is outside Haru's readable roots. ` +
+          "Do not inspect repository or HOME files; hand technical work to Fuyu, Aki, or Natsu."
+        );
+      }}
+    }}
+    return {{
+      decision: "allow",
+      reason: "HARU_READ_ALLOWED: target is a temporary artifact or Letta memory path.",
+    }};
+  }}
+  if (!WRITE_TOOLS.has(toolName)) return;
+  const rawTargets = writeTargets(toolName, event.args || {{}});
+  if (rawTargets.length === 0) {{
+    return deny(
+      `HARU_WRITE_DENIED: ${{toolName}} did not include a file path. ` +
+      "Writes are limited to /tmp and ~/.local/share/tmp."
+    );
+  }}
+  for (const raw of rawTargets) {{
+    const target = canonicalPath(raw, workingDirectory);
+    if (target === null || !WRITE_ROOTS.some((root) => within(target, root))) {{
+      return deny(
+        `HARU_WRITE_DENIED: ${{raw}} is outside Haru's writable roots. ` +
+        "Use /tmp or ~/.local/share/tmp; repository and home writes are blocked."
+      );
+    }}
+  }}
+  return {{
+    decision: "allow",
+    reason: "HARU_WRITE_ALLOWED: target is inside a temporary write root.",
+  }};
+}}
+
+export default function activate(letta) {{
+  if (!letta.capabilities || !letta.capabilities.permissions) return;
+  return letta.permissions.register({{
+    id: "aki-write-policy",
+    description: "Restrict Haru's model-facing reads and writes",
+    isEnabled: () => process.env.AKI_PROFILE === PROFILE && WRITE_ROOTS.length > 0,
+    check,
+  }});
+}}
+"""
+
+
+def write_write_policy_mod(letta_home: Path, config: AkiConfig) -> Path | None:
+    policy = config.tool_policy
+    if not policy.write_roots:
+        return None
+    path = letta_home / "mods" / WRITE_POLICY_MOD_NAME
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    atomic_write(path, render_write_policy_mod(policy, profile=config.profile))
     return path
 
 
@@ -304,6 +501,7 @@ def prepare_letta(config: AkiConfig, *, backend_dir: Path, letta_home: Path) -> 
     write_provider_mod(letta_home, config)
     write_execution_lock_mod(letta_home)
     write_tool_ownership_mod(letta_home)
+    write_write_policy_mod(letta_home, config)
     provider_id = config.provider_id
     ready = bool(config.enabled_models)
     file = _read_auth(auth_path)

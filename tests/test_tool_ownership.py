@@ -15,9 +15,12 @@ from engine.tool_ownership import (
 
 
 class ToolOwnershipTests(unittest.TestCase):
-    def test_only_aki_has_exclusive_tools(self) -> None:
-        names = {tool["name"] for tool in tools_for_profile("aki")}
-        self.assertEqual(names, set(EXCLUSIVE_TOOL_NAMES))
+    def test_exclusive_tools_are_profile_scoped(self) -> None:
+        aki_names = {tool["name"] for tool in tools_for_profile("aki")}
+        haru_names = {tool["name"] for tool in tools_for_profile("haru")}
+        self.assertEqual(haru_names, {"generate_image"})
+        self.assertNotIn("generate_image", aki_names)
+        self.assertTrue(aki_names)
         self.assertEqual(tools_for_profile("fuyu"), [])
 
     def test_authorization_reports_owner(self) -> None:
@@ -31,6 +34,15 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn("TOOL_OWNERSHIP_DENIED", message)
         self.assertIn("Aki", message)
         self.assertIn("@Aki", message)
+        allowed, owner = authorize_exclusive_tool("haru", "generate_image")
+        self.assertTrue(allowed)
+        self.assertEqual(owner, "Haru")
+        allowed, owner = authorize_exclusive_tool("aki", "generate_image")
+        self.assertFalse(allowed)
+        self.assertEqual(owner, "Haru")
+        image_message = ownership_denied_message("generate_image")
+        self.assertIn("Haru", image_message)
+        self.assertIn("@Haru", image_message)
 
     def test_non_owner_prompt_lists_hidden_tools_and_handoff(self) -> None:
         block = render_tool_ownership_prompt("fuyu")
@@ -40,6 +52,9 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn("aki_ledger_add", block)
         self.assertIn("[NO_REPLY]", block)
         self.assertIn("@Aki", block)
+        self.assertIn("generate_image", block)
+        self.assertIn("@Haru", block)
+        self.assertIn("图片创作/文生图", block)
         self.assertIn("never try to recreate", block)
 
     def test_owner_prompt_has_self_budget_guard(self) -> None:
@@ -47,6 +62,14 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn('profile="aki"', block)
         self.assertIn("Never use aki_zero_reply_budget on yourself", block)
         self.assertIn("Fuyu", block)
+
+    def test_haru_owner_prompt_has_image_tool_without_lock(self) -> None:
+        block = render_tool_ownership_prompt("haru")
+        self.assertIn('profile="haru"', block)
+        self.assertIn("generate_image", block)
+        self.assertIn("You own these exclusive tools", block)
+        self.assertIn("do not need the device-wide execution lock", block)
+        self.assertIn("@Aki for 日程与提醒", block)
 
     def test_block_is_idempotent_and_precedes_channel_blocks(self) -> None:
         block = render_tool_ownership_prompt("fuyu")

@@ -21,11 +21,13 @@ PROFILE_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 
 _KNOWN_SECTIONS = {
     "gateway",
+    "tools",
     "mqtt",
     "writable",
     "mcp",
     "camera",
     "screenshot",
+    "image",
     "live",
     "schedule",
     "presence",
@@ -35,6 +37,8 @@ _KNOWN_SECTIONS = {
 }
 _APIS = {"openai-completions", "openai-responses"}
 _AUTH_PROVIDERS = {"", "grok-oauth"}
+_TOOLSETS = {"auto", "letta", "none", "default", "codex"}
+_EXTRA_BODY_RESERVED = {"model", "messages"}
 
 
 class ConfigError(ValueError):
@@ -70,6 +74,31 @@ class Upstream:
 
 
 @dataclass(frozen=True)
+class ImageGeneration:
+    """Optional text-to-image provider configuration for one profile."""
+
+    enabled: bool
+    upstream_name: str
+    model: str
+    path: str
+    base_url: str
+    url: str
+    api_key: str
+    use_proxy: bool
+    output_dir: str
+    require_approval: bool
+    timeout: float
+    max_bytes: int
+    aspect_ratio: str
+    prompt_optimizer: bool
+    aigc_watermark: bool
+
+    @property
+    def available(self) -> bool:
+        return self.enabled and bool(self.api_key.strip())
+
+
+@dataclass(frozen=True)
 class ChannelIdentity:
     """User-facing identity for one akid instance on the shared channel."""
 
@@ -93,10 +122,31 @@ class ModelRoute:
     api_key: str
     use_proxy: bool = True
     auth: str = ""
+    extra_body: dict[str, object] = field(default_factory=dict)
 
     @property
     def enabled(self) -> bool:
         return bool(self.api_key) or self.auth == "grok-oauth"
+
+
+@dataclass(frozen=True)
+class ToolPolicy:
+    """Per-profile tool surface and write roots.
+
+    ``explicit`` is true only when the profile has a ``[tools]`` section.  An
+    implicit policy keeps the historical auto-selected toolset so Aki and Fuyu
+    behave exactly as before.
+    """
+
+    toolset: str = "auto"
+    allow: tuple[str, ...] = ()
+    deny: tuple[str, ...] = ()
+    write_roots: tuple[str, ...] = ()
+    explicit: bool = False
+
+    @property
+    def allow_set(self) -> frozenset[str]:
+        return frozenset(self.allow)
 
 
 @dataclass
@@ -159,6 +209,8 @@ class AkiConfig:
     presence_night_history_days: int = 30
     presence_return_idle_seconds: int = 2700
     presence_return_debounce_seconds: int = 10
+    tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
+    image: ImageGeneration | None = None
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:
@@ -287,6 +339,8 @@ def template_text(
     agent_id: str = DEFAULT_AGENT_ID, *, profile: str = DEFAULT_PROFILE
 ) -> str:
     name = validate_profile_name(profile)
+    if name == "haru":
+        return _haru_template_text(agent_id)
     channel_name = "Aki" if name == DEFAULT_PROFILE else name.replace("-", " ").title()
     channel_aliases = (
         "Aki,aki,秋,小秋,秋（aki）"
@@ -438,6 +492,130 @@ input = text,image
 """
 
 
+def _haru_template_text(agent_id: str) -> str:
+    return f"""[gateway]
+agent_id = {agent_id}
+conversation = default
+userdata = userdata3
+username = 哥哥
+letta_bin = letta
+# 留空则用 $XDG_RUNTIME_DIR/aki/haru.sock
+socket =
+sandbox = true
+
+[channel]
+name = Haru
+id = haru
+aliases = Haru,haru,春,小春,Haru（春）
+description = Haru（春 / 小春），活泼灵动、爱恶作剧的小妹妹，四季工坊的灵感策源地：脑洞奇大、鬼点子多，负责视觉脑暴和把冷场搅热。
+wait_for = Aki,Fuyu
+
+[tools]
+# Haru 的建模能力显式收窄；Bash/子代理从 schema 中移除。
+toolset = letta
+allow = Read,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image
+deny = Bash,exec_command,write_stdin,Agent,Task,Workflow,Monitor,WatchPR,Wake
+write_roots = /tmp,~/.local/share/tmp
+
+[mqtt]
+enabled = true
+host = 192.168.3.1
+port = 1883
+topic = tokifactor/text
+magic = akid-default-channel
+
+[writable]
+# Haru 的模型写入由 [tools] write_roots 与 bubblewrap 双重限制。
+revision = 0
+dirs =
+
+[mcp]
+native_tools = false
+excluded = local
+max_tools = 0
+timeout = 300
+
+[camera]
+enabled = true
+require_approval = true
+device = /dev/video0
+width = 1280
+height = 720
+output_dir = /tmp/aki/camera
+
+[screenshot]
+enabled = true
+require_approval = true
+output_dir = /tmp/aki/screenshots
+wayland_display =
+
+[image]
+enabled = true
+upstream = minimax
+model = image-01
+path = /image_generation
+output_dir = /tmp/aki/images
+require_approval = true
+timeout = 180
+max_bytes = 33554432
+aspect_ratio = 1:1
+prompt_optimizer = true
+aigc_watermark = false
+
+[live]
+enabled = true
+budget_tokens = 65536
+timeout = 3
+
+[schedule]
+enabled = false
+tick_seconds = 15
+missed_grace_seconds = 600
+max_records = 256
+
+[presence]
+enabled = false
+session_id =
+loginctl_bin = loginctl
+poll_seconds = 15
+idle_reset_seconds = 300
+work_warn_seconds = 7200
+work_repeat_seconds = 3600
+night_start = 00:30
+night_end = 05:30
+night_history_days = 30
+return_idle_seconds = 2700
+return_debounce_seconds = 10
+
+[avatar]
+path = assets/small/haru.jpg
+
+[proxy]
+listen = 127.0.0.1:7723
+token =
+upstream_proxy = http://192.168.4.1:7890
+
+[upstream.cli-proxy-api]
+base_url = http://127.0.0.1:8317/v1
+api_key =
+use_proxy = false
+
+[upstream.minimax]
+base_url = https://api.minimaxi.com/v1
+api_key =
+
+[model.gemini-3.8-flash]
+upstream = cli-proxy-api
+upstream_model = gemini-3.8-flash
+api = openai-completions
+path = /chat/completions
+context_window = 1000000
+max_tokens = 65536
+input = text,image
+extra_body = {{"reasoning_effort": "low"}}
+"""
+
+
 def _template_for(path: Path) -> str:
     return template_text(profile=profile_from_config_path(path))
 
@@ -546,6 +724,30 @@ def _list(raw: str) -> tuple[str, ...]:
             if text:
                 items.append(text)
     return tuple(items)
+
+
+def _json_object(
+    parser: configparser.ConfigParser,
+    section: str,
+    key: str,
+    *,
+    reserved: frozenset[str] | set[str] = frozenset(),
+) -> dict[str, object]:
+    raw = parser.get(section, key, fallback="").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except ValueError as exc:
+        raise ConfigError(f"[{section}] {key} must be a JSON object") from exc
+    if not isinstance(value, dict):
+        raise ConfigError(f"[{section}] {key} must be a JSON object")
+    blocked = sorted(reserved.intersection(value))
+    if blocked:
+        raise ConfigError(
+            f"[{section}] {key} must not override {', '.join(blocked)}"
+        )
+    return value
 
 
 def parse_upstream_proxy(value: str) -> str:
@@ -659,7 +861,96 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
                 api_key=upstream.api_key,
                 use_proxy=upstream.use_proxy,
                 auth=upstream.auth,
+                extra_body=_json_object(
+                    parser,
+                    section,
+                    "extra_body",
+                    reserved=_EXTRA_BODY_RESERVED,
+                ),
             )
+        )
+
+    image: ImageGeneration | None = None
+    if parser.has_section("image"):
+        image_upstream_name = _require(parser, "image", "upstream").strip()
+        image_upstream = upstreams.get(image_upstream_name)
+        if image_upstream is None:
+            raise ConfigError(
+                f"[image] upstream {image_upstream_name} is not defined"
+            )
+        image_path = _require(parser, "image", "path").strip()
+        if not image_path.startswith("/"):
+            raise ConfigError("[image] path must start with /")
+        output_dir = _require(parser, "image", "output_dir").strip()
+        if not output_dir.startswith("/") and not output_dir.startswith("~/"):
+            raise ConfigError("[image] output_dir must be absolute or start with ~/")
+        aspect_ratio = (
+            parser.get("image", "aspect_ratio", fallback="").strip() or "1:1"
+        )
+        if aspect_ratio not in (
+            "1:1",
+            "16:9",
+            "4:3",
+            "3:2",
+            "2:3",
+            "3:4",
+            "9:16",
+            "21:9",
+        ):
+            raise ConfigError("[image] aspect_ratio is not supported")
+        try:
+            image_timeout = float(
+                parser.get("image", "timeout", fallback="180").strip() or "180"
+            )
+        except ValueError as exc:
+            raise ConfigError("[image] timeout must be a number") from exc
+        if image_timeout <= 0:
+            raise ConfigError("[image] timeout must be positive")
+        image = ImageGeneration(
+            enabled=_bool(parser, "image", "enabled"),
+            upstream_name=image_upstream_name,
+            model=_require(parser, "image", "model").strip(),
+            path=image_path,
+            base_url=image_upstream.base_url,
+            url=join_url(image_upstream.base_url, image_path),
+            api_key=image_upstream.api_key,
+            use_proxy=image_upstream.use_proxy,
+            output_dir=output_dir,
+            require_approval=_bool(parser, "image", "require_approval"),
+            timeout=image_timeout,
+            max_bytes=_int(
+                parser,
+                "image",
+                "max_bytes",
+                minimum=1,
+                maximum=64 * 1024 * 1024,
+            ),
+            aspect_ratio=aspect_ratio,
+            prompt_optimizer=_bool_or(
+                parser, "image", "prompt_optimizer", False
+            ),
+            aigc_watermark=_bool_or(parser, "image", "aigc_watermark", False),
+        )
+
+    tool_policy = ToolPolicy()
+    if parser.has_section("tools"):
+        toolset = parser.get("tools", "toolset", fallback="auto").strip() or "auto"
+        if toolset not in _TOOLSETS:
+            raise ConfigError(
+                "[tools] toolset must be one of " + ", ".join(sorted(_TOOLSETS))
+            )
+        write_roots = _list(parser.get("tools", "write_roots", fallback=""))
+        for root in write_roots:
+            if not root.startswith("/") and not root.startswith("~/"):
+                raise ConfigError(
+                    "[tools] write_roots entries must be absolute or start with ~/"
+                )
+        tool_policy = ToolPolicy(
+            toolset=toolset,
+            allow=_list(parser.get("tools", "allow", fallback="")),
+            deny=_list(parser.get("tools", "deny", fallback="")),
+            write_roots=write_roots,
+            explicit=True,
         )
 
     resolved_profile = validate_profile_name(profile) if profile else profile_from_config_path(path)
@@ -772,6 +1063,8 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         presence_return_debounce_seconds=_int_or(
             parser, "presence", "return_debounce_seconds", 10, minimum=0
         ),
+        tool_policy=tool_policy,
+        image=image,
     )
 
 

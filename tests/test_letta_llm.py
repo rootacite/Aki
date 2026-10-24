@@ -194,6 +194,12 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertNotIn("mcp__local__", mod)
         self.assertIn("desktop_take_screenshot", mod)
         self.assertIn("camera_take_photo", mod)
+        self.assertIn("generate_image", mod)
+        self.assertIn(
+            'const LOCK_EXEMPT = new Set(["generate_image", "tokifactor_send_image"])',
+            mod,
+        )
+        self.assertIn("LOCK_EXEMPT.has(toolName)", mod)
         self.assertIn("phase === \"approval\" && isExternalTool(toolName)", mod)
         self.assertIn("denies(event.toolName, event.phase)", mod)
         self.assertNotIn("if (LOCK_TOOLS.has(toolName)) return null", mod)
