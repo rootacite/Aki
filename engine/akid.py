@@ -3256,6 +3256,7 @@ class GatewayServer:
             ]
 
         members = self._channel_member_views()
+        scene = ""
         if self._solo_session is not None:
             group_entries = with_attachment_state(
                 list(self._frozen_group_history)
@@ -3283,6 +3284,16 @@ class GatewayServer:
                 members=members,
                 self_id=self._channel_self_key(),
             )
+            scene = self._solo_scene or load_solo_scene(
+                self.config.profile,
+                username=self.config.username,
+                explicit=(
+                    self.config.aki.solo_prompt_file
+                    if self.config.aki is not None
+                    else ""
+                ),
+            )
+            self._solo_scene = scene
         else:
             group_block = render_channel_transcript(
                 with_attachment_state(
@@ -3296,6 +3307,33 @@ class GatewayServer:
                 self_id=self._channel_self_key(),
             )
             solo_block = ""
+
+        def update_system(system: str) -> str:
+            updated = (
+                apply_channel_transcript(system, group_block)
+                if group_block
+                else clear_channel_transcript(system)
+            )
+            if self._solo_session is not None:
+                updated = apply_solo_mode(
+                    updated,
+                    render_solo_mode(
+                        member_name=self.config.channel_name,
+                        user_name=self.config.username,
+                        session_id=self._solo_session.session_id,
+                        scene=scene,
+                    ),
+                )
+                updated = (
+                    apply_solo_transcript(updated, solo_block)
+                    if solo_block
+                    else clear_solo_transcript(updated)
+                )
+            else:
+                updated = clear_solo_mode(updated)
+                updated = clear_solo_transcript(updated)
+            return updated
+
         async with self._channel_transcript_lock:
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
@@ -3304,39 +3342,31 @@ class GatewayServer:
                 system = record.get("system")
                 if not isinstance(system, str) or not system:
                     raise ValueError("agent system prompt is not a string")
-                updated = (
-                    apply_channel_transcript(system, group_block)
-                    if group_block
-                    else clear_channel_transcript(system)
-                )
-                if self._solo_session is not None:
-                    scene = self._solo_scene or load_solo_scene(
-                        self.config.profile,
-                        username=self.config.username,
-                        explicit=(
-                            self.config.aki.solo_prompt_file
-                            if self.config.aki is not None
-                            else ""
-                        ),
-                    )
-                    self._solo_scene = scene
-                    updated = apply_solo_mode(
-                        updated,
-                        render_solo_mode(
-                            member_name=self.config.channel_name,
-                            user_name=self.config.username,
-                            session_id=self._solo_session.session_id,
-                            scene=scene,
-                        ),
-                    )
-                    updated = apply_solo_transcript(
-                        updated, solo_block
-                    ) if solo_block else clear_solo_transcript(updated)
-                else:
-                    updated = clear_solo_mode(updated)
-                    updated = clear_solo_transcript(updated)
+                updated = update_system(system)
                 if updated != system:
                     self._write_agent_record(path, record, updated)
+                prompt_path = self._conversation_dir() / "system-prompt.json"
+                if prompt_path.is_file():
+                    try:
+                        prompt_record = json.loads(prompt_path.read_text(encoding="utf-8"))
+                        if not isinstance(prompt_record, dict):
+                            raise ValueError("conversation prompt is not an object")
+                        content = prompt_record.get("content")
+                        if not isinstance(content, str) or not content:
+                            raise ValueError("conversation prompt has no content")
+                        updated_content = update_system(content)
+                        if updated_content != content:
+                            prompt_record["content"] = updated_content
+                            atomic_write(
+                                prompt_path,
+                                json.dumps(prompt_record, ensure_ascii=False, indent=2)
+                                + "\n",
+                            )
+                    except (OSError, ValueError) as exc:
+                        LOGGER.warning(
+                            "failed to refresh conversation channel transcript: %s",
+                            exc,
+                        )
                 self._channel_transcript_status.update(
                     {
                         "budget_tokens": self.config.channel_transcript_budget_tokens,
@@ -3344,8 +3374,12 @@ class GatewayServer:
                         "last_seq": self._channel_history_seq,
                         "rendered_seq": new_seq,
                         "rendered_entries": len(
-                            group_entries if self._solo_session is not None else self._channel_history
-                        ) if limit is None else len(self._channel_history),
+                            group_entries
+                            if self._solo_session is not None
+                            else self._channel_history
+                        )
+                        if limit is None
+                        else len(self._channel_history),
                         "block_tokens": len(group_block.encode("utf-8"))
                         if group_block
                         else 0,

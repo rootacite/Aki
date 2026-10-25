@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import tempfile
 import unittest
@@ -193,6 +194,26 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             ),
             encoding="utf-8",
         )
+        conversation_key = base64.urlsafe_b64encode(
+            b"default:agent-aki"
+        ).decode().rstrip("=")
+        self.conversation_dir = (
+            self.config.backend_dir / "conversations" / conversation_key
+        )
+        self.conversation_dir.mkdir(parents=True)
+        self.conversation_prompt_path = self.conversation_dir / "system-prompt.json"
+        self.conversation_prompt_path.write_text(
+            json.dumps(
+                {
+                    "content": (
+                        "BASE\n\n"
+                        "<channel-policy>policy</channel-policy>\n"
+                        "<channel-transcript>group old</channel-transcript>\n"
+                    )
+                }
+            ),
+            encoding="utf-8",
+        )
         self.server = GatewayServer(self.config, backend_factory=backend_factory)
         self.channel = FakeChannel()
         self.server.channel = self.channel
@@ -201,6 +222,23 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir.cleanup()
 
     async def test_start_keeps_group_history_and_applies_solo_prompt(self) -> None:
+        self.server.solo_channel_history_path.parent.mkdir(parents=True, exist_ok=True)
+        self.server.solo_channel_history_path.write_text(
+            json.dumps(
+                {
+                    "seq": 1,
+                    "sender": "Master",
+                    "sender_id": "master",
+                    "text": "solo old",
+                    "from_agent": False,
+                    "timestamp": "2026-10-25T00:00:01Z",
+                    "sent_at": 2,
+                    "phase": "final",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         self.server._channel_history = [
             ChannelTranscriptEntry(1, "Master", "master", "group old")
         ]
@@ -237,6 +275,11 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("group old", system)
         self.assertIn('frozen="true"', system)
         self.assertTrue(any(item.get("kind") == "solo_ready" for item in self.channel.controls))
+        conversation_prompt = json.loads(
+            self.conversation_prompt_path.read_text(encoding="utf-8")
+        )["content"]
+        self.assertIn("<solo-mode", conversation_prompt)
+        self.assertIn("<solo-transcript", conversation_prompt)
 
         await self.server._on_channel_control(
             TextEnvelope(
@@ -259,6 +302,12 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertNotIn("<solo-mode", system)
         self.assertIn("<channel-transcript", system)
+        conversation_prompt = json.loads(
+            self.conversation_prompt_path.read_text(encoding="utf-8")
+        )["content"]
+        self.assertNotIn("<solo-mode", conversation_prompt)
+        self.assertNotIn("<solo-transcript", conversation_prompt)
+        self.assertIn("<channel-transcript", conversation_prompt)
 
     async def test_non_target_tracks_solo_target_without_switching(self) -> None:
         await self.server._on_channel_control(
