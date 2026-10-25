@@ -1,0 +1,37 @@
+[
+  {
+    "file": "haru_shock_panic.png",
+    "name": "haru_shock_panic",
+    "desc": "被突然点名、计划翻车或看到离谱操作时使用；双手举起、冷汗直冒，表达夸张的惊吓与慌乱。"
+  },
+  {
+    "file": "haru_mischief_grin.png",
+    "name": "haru_mischief_grin",
+    "desc": "想搞恶作剧、偷偷计划或抓到把柄时使用；托腮坏笑，表达古灵精怪的算计和共犯感。"
+  },
+  {
+    "file": "haru_puzzled_what.png",
+    "name": "haru_puzzled_what",
+    "desc": "没跟上话题、被奇怪要求难住时使用；两侧冒问号，表达茫然、疑惑和“你在说什么”。"
+  },
+  {
+    "file": "haru_tired_sigh.png",
+    "name": "haru_tired_sigh",
+    "desc": "听到蠢话、被折腾累了或不想配合时使用；扶额半闭眼，表达无语、疲惫和嫌弃。"
+  },
+  {
+    "file": "haru_happy_peace.png",
+    "name": "haru_happy_peace",
+    "desc": "开心回应、庆祝或鼓励时使用；双剪刀手和大声笑，表达活泼直接的喜悦。"
+  },
+  {
+    "file": "haru_wink_fingergun.png",
+    "name": "haru_wink_fingergun",
+    "desc": "调皮调侃、得意展示或说“交给我吧”时使用；眨眼比枪带闪光，表达自信又俏皮的嘚瑟。"
+  },
+  {
+    "file": "haru_teary_pout.png",
+    "name": "haru_teary_pout",
+    "desc": "被欺负、想要哄或撒娇失败时使用；红着眼眶握拳，表达委屈巴巴的抗议与求安慰。"
+  }
+]

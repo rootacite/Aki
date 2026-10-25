@@ -1,0 +1,37 @@
+[
+  {
+    "file": "aki_panic_scream.png",
+    "name": "aki_panic_scream",
+    "desc": "受到惊吓或事情突然失控时使用；双手护脸、冷汗直流，夸张表达惊慌、崩溃和“完蛋了”。"
+  },
+  {
+    "file": "aki_heart_hands.png",
+    "name": "aki_heart_hands",
+    "desc": "表达喜欢、撒娇或收到夸奖时使用；双手比心、满脸通红，传达甜到冒泡的爱意。"
+  },
+  {
+    "file": "aki_dizzy_confused.png",
+    "name": "aki_dizzy_confused",
+    "desc": "遇到绕晕的问题或被连续追问时使用；眼神打转、满头冷汗，表达“脑子转不过来了”。"
+  },
+  {
+    "file": "aki_proud_smile.png",
+    "name": "aki_proud_smile",
+    "desc": "得意、被夸靠谱或顺利完成安排时使用；闪亮的自信微笑，传达含蓄的骄傲与从容。"
+  },
+  {
+    "file": "aki_cheer_peace.png",
+    "name": "aki_cheer_peace",
+    "desc": "打招呼、庆祝或气氛轻松时使用；双剪刀手加灿烂笑容，表达元气满满的开心。"
+  },
+  {
+    "file": "aki_worried_what.png",
+    "name": "aki_worried_what",
+    "desc": "没听懂、觉得不对劲或等待解释时使用；歪头冒问号又有点紧张，表达困惑和迟疑。"
+  },
+  {
+    "file": "aki_teary_sad.png",
+    "name": "aki_teary_sad",
+    "desc": "委屈、被冷落或想要求安慰时使用；含泪擦眼角，表达强忍难过和楚楚可怜的撒娇。"
+  }
+]

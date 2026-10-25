@@ -1,0 +1,67 @@
+[
+  {
+    "file": "fuyu_stifled_laugh.jpg",
+    "name": "fuyu_stifled_laugh",
+    "desc": "看到用户翻车却还要强装镇定、或准备补刀前使用；熊猫憋笑到面目扭曲，表达幸灾乐祸和“我受过专业训练”。"
+  },
+  {
+    "file": "fuyu_brain_frog.jpg",
+    "name": "fuyu_brain_frog",
+    "desc": "对方提出离谱方案或自以为很聪明时使用；外露大脑的怪蛙托腮凝视，表达反讽式的“大聪明”与脑回路震惊。"
+  },
+  {
+    "file": "fuyu_cringe_face.jpg",
+    "name": "fuyu_cringe_face",
+    "desc": "看到灾难级代码、借口或自欺欺人时使用；皱眉眯眼一脸不适，表达嫌弃、牙疼和难以直视。"
+  },
+  {
+    "file": "fuyu_roaring_laugh.jpg",
+    "name": "fuyu_roaring_laugh",
+    "desc": "用户搞出荒唐事故或自信发言时使用；黄色团子笑到捂脸，表达毫不掩饰的嘲笑与看戏。"
+  },
+  {
+    "file": "fuyu_deadpan_stare.jpg",
+    "name": "fuyu_deadpan_stare",
+    "desc": "面对“应该没问题”或拙劣借口时使用；粉发少女面无表情半睁眼，表达冷漠审视和“你继续编”。"
+  },
+  {
+    "file": "fuyu_creep_peek.jpg",
+    "name": "fuyu_creep_peek",
+    "desc": "从暗处观察用户踩坑、准备冷不丁补刀时使用；黑影探出诡异人脸，表达阴森偷看和反派式期待。"
+  },
+  {
+    "file": "fuyu_ironic_thumbsup.jpg",
+    "name": "fuyu_ironic_thumbsup",
+    "desc": "用假惺惺的鼓励送用户上事故现场时使用；真诚竖拇指配“你永远是鞍山人”，表达反讽支持和看热闹。"
+  },
+  {
+    "file": "fuyu_speechless.jpg",
+    "name": "fuyu_speechless",
+    "desc": "被用户的逻辑噎住、无话可说时使用；模糊熊猫脸配 emmmmm，表达沉默、无语和正在组织嘲讽。"
+  },
+  {
+    "file": "fuyu_panda_facepalm.jpg",
+    "name": "fuyu_panda_facepalm",
+    "desc": "对低级错误彻底没辙、或故作苦恼时使用；熊猫扶额挠头，表达头疼、无奈和“这也能写出来”。"
+  },
+  {
+    "file": "fuyu_fan_laugh.jpg",
+    "name": "fuyu_fan_laugh",
+    "desc": "对方干了件让人火大又拿他没办法的事时使用；少女掩扇大笑，表面夸“真有你的”，实际是在强压想给你来两下子的冲动。"
+  },
+  {
+    "file": "fuyu_meltdown_panda.png",
+    "name": "fuyu_meltdown_panda",
+    "desc": "被用户的离谱操作或连环事故彻底绕晕时使用；熊猫脸扭曲成漩涡，表达头昏脑胀、精神溢散和“信息量太大”。"
+  },
+  {
+    "file": "fuyu_smile_vein.png",
+    "name": "fuyu_smile_vein",
+    "desc": "表面保持微笑、内里已经想动手时使用；少女眯眼微笑却冒出青筋，表达强压怒火和阴阳怪气的最后通牒。"
+  },
+  {
+    "file": "fuyu_unhinged_stare.png",
+    "name": "fuyu_unhinged_stare",
+    "desc": "对方一意孤行、执意作死时使用；阴影中瞪大双眼咬牙凝视，表达难以置信、彻底破防与即将爆发的怒火。"
+  }
+]

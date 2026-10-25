@@ -357,7 +357,7 @@ def template_text(
     )
     sampling = {
         "aki": 'extra_body = {"temperature": 0.67, "top_p": 0.83}',
-        "fuyu": 'extra_body = {"temperature": 0.52, "top_p": 0.86}',
+        "fuyu": 'extra_body = {"temperature": 0.7, "top_p": 0.86}',
     }.get(name, "")
     return f"""[gateway]
 agent_id = {agent_id}

@@ -22,6 +22,7 @@ from engine.akid import (
     GatewayServer,
     Turn,
     _b64url,
+    _format_channel_message_time,
     _normalize_mcp_result,
     unique_capture_path,
 )
@@ -1277,9 +1278,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_channel_prompt_is_minimal_and_policy_lives_in_system_prompt(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
         server = await self.start_server()
-        prompt = server._channel_prompt("Acite", "sender-1", "你好")
+        sent_at = 1_792_942_663_759
+        prompt = server._channel_prompt(
+            "Acite", "sender-1", "你好", sent_at=sent_at
+        )
         self.assertIn("sender: Acite", prompt)
         self.assertIn("message:\n你好", prompt)
+        self.assertIn(
+            f"message-time: {_format_channel_message_time(sent_at)}", prompt
+        )
         self.assertNotIn("automatically published", prompt)
         self.assertNotIn("<channel-policy", prompt)
         self.assertNotIn("<channel-turn", prompt)
@@ -1289,7 +1296,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
             system,
         )
-        self.assertIn("wake-reminder: 用^排除不需要被提醒的成员", prompt)
+        self.assertIn(
+            "wake-reminder: 当前正在和你说话的是 Master。"
+            "用^排除不需要被提醒的成员",
+            prompt,
+        )
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
         )
@@ -1348,7 +1359,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         agent_system = self._agent_system(agent_path)
         self.assertIn("<channel-wake-routing", agent_system)
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", agent_system)
-        self.assertIn("强制只唤醒用户，不唤醒任何其他成员。", agent_system)
+        self.assertIn("强制只唤醒Master，不唤醒任何其他成员。", agent_system)
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用。", agent_system
         )
@@ -2052,7 +2063,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new-message: true", prompt)
         self.assertIn('<new-message seq="9"', prompt)
         self.assertIn('source="agent"', prompt)
-        self.assertIn("wake-reminder: 用^排除不需要被提醒的成员", prompt)
+        self.assertIn(
+            "wake-reminder: 当前正在和你说话的是 Fuyu。"
+            "用^排除不需要被提醒的成员",
+            prompt,
+        )
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
         )
@@ -2445,6 +2460,87 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             server._channel_transcript_status.get("ephemeral_turns", 0), 0
         )
         self.assertTrue(await server.backend.wait_ready(5.0))
+
+    async def test_user_channel_turn_strips_roster_after_completion(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text('{"type":"session"}\n', encoding="utf-8")
+        conversation.write_text(
+            json.dumps(
+                {
+                    "id": "default",
+                    "agent_id": "test-agent",
+                    "updated_at": "2026-01-01T00:00:00.000Z",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        prompts: list[str] = []
+        original_send_user = server.backend.send_user
+
+        async def append_and_send(content: str) -> None:
+            prompt = content if isinstance(content, str) else ""
+            prompts.append(prompt)
+            self.assertIn("<channel-context>", prompt)
+            row = {
+                "type": "message",
+                "id": f"entry-{len(prompts)}",
+                "timestamp": "2026-01-01T00:00:00.000Z",
+                "message": {
+                    "id": f"ui-msg-{len(prompts)}",
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                },
+            }
+            with messages.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                )
+            await original_send_user(content)
+
+        with mock.patch.object(
+            server.backend,
+            "send_user",
+            side_effect=append_and_send,
+        ):
+            await server._on_channel_text("alice", "alice-1", "first turn")
+            await wait_until(lambda: len(fake_channel.final_texts()) >= 1)
+            await wait_until(lambda: server.active is None and not server.queue)
+            await server._on_channel_text("alice", "alice-1", "second turn")
+            await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
+            await wait_until(lambda: server.active is None and not server.queue)
+
+        self.assertEqual(len(prompts), 2)
+        rows = [
+            json.loads(line)
+            for line in messages.read_text(encoding="utf-8").splitlines()[1:]
+        ]
+        self.assertEqual(len(rows), 2)
+        for row in rows:
+            text = row["message"]["content"][0]["text"]
+            self.assertNotIn("<channel-context>", text)
+            self.assertIn("当前正在和你说话的是 Master。", text)
+        self.assertIn("message:\nfirst turn", rows[0]["message"]["content"][0]["text"])
+        self.assertIn("message:\nsecond turn", rows[1]["message"]["content"][0]["text"])
+        record = json.loads(conversation.read_text(encoding="utf-8"))
+        self.assertNotEqual(record["updated_at"], "2026-01-01T00:00:00.000Z")
+        journal = server.channel_prompt_journal_path
+        self.assertTrue(journal.is_file())
+        self.assertEqual(
+            len(
+                [
+                    json.loads(line)
+                    for line in journal.read_text(encoding="utf-8").splitlines()
+                ]
+            ),
+            2,
+        )
 
     async def test_agent_channel_turn_uses_ephemeral_conversation_snapshot(self) -> None:
         fake_channel = FakeChannel()
@@ -2896,7 +2992,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain)
         policy = render_channel_policy(user_name=server.config.username)
-        self.assertIn("用户不在成员列表中", policy)
+        self.assertIn("Master不在成员列表中", policy)
         self.assertNotIn("<wake-routing>", plain)
         self.assertNotIn("不希望其他成员注意到这条消息", plain)
         roster = server._channel_prompt("alice", "alice-1", "hello everyone")
@@ -2915,8 +3011,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             message="@秋 hello",
             user_name=server.config.username,
         )
-        self.assertIn("用户在消息中点名了你，请直接回复。", own)
-        self.assertIn("它会强制只唤醒用户", own)
+        self.assertIn("Master在消息中点名了你，请直接回复。", own)
+        self.assertIn("它会强制只唤醒Master", own)
         self.assertNotIn("未点名你", own)
         await server._on_channel_control(
             TextEnvelope(
@@ -3340,6 +3436,68 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             any(
                 event.get("phase") == "no_reply"
+                for event in fake_channel.events_of("turn")
+            )
+        )
+
+    async def test_embedded_no_reply_marker_suppresses_entire_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        conn = server.channel_conn
+        stamp = "2026-01-01T00:00:00Z"
+        await conn.send(make_event("turn-no-reply", 1, "turn_started", {}, stamp))
+        await conn.send(
+            make_event(
+                "turn-no-reply",
+                2,
+                "assistant_message",
+                {"content": "等秋先说完。[NO_REPLY]"},
+                stamp,
+            )
+        )
+        await conn.send(make_event("turn-no-reply", 3, "turn_end", {}, stamp))
+        await wait_until(
+            lambda: any(
+                event.get("phase") == "no_reply"
+                for event in fake_channel.events_of("turn")
+            )
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(fake_channel.final_texts(), [])
+        self.assertFalse(
+            any(
+                event.get("phase") in ("progress", "final")
+                for event in fake_channel.events_of("turn")
+            )
+        )
+
+    async def test_embedded_no_reply_marker_in_delta_suppresses_flush(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        conn = server.channel_conn
+        stamp = "2026-01-01T00:00:00Z"
+        await conn.send(make_event("turn-no-reply-delta", 1, "turn_started", {}, stamp))
+        await conn.send(
+            make_event(
+                "turn-no-reply-delta",
+                2,
+                "assistant_delta",
+                {"text": "等秋先说完。【NO_REPLY】"},
+                stamp,
+            )
+        )
+        await conn.send(make_event("turn-no-reply-delta", 3, "turn_end", {}, stamp))
+        await wait_until(
+            lambda: any(
+                event.get("phase") == "no_reply"
+                for event in fake_channel.events_of("turn")
+            )
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(fake_channel.final_texts(), [])
+        self.assertFalse(
+            any(
+                event.get("phase") in ("progress", "final")
                 for event in fake_channel.events_of("turn")
             )
         )

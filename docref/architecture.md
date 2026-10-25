@@ -109,14 +109,22 @@ MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的
 bubblewrap 仍作为底层写入边界。
 
 `<channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
-有 `@成员` 时只唤醒被点名的成员；第一行 `@用户` 强制只唤醒用户、不唤醒任何其他成员，
-仅用于只对用户说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
+有 `@成员` 时只唤醒被点名的成员；第一行 `@<username>` 强制只唤醒该 username、不唤醒任何其他成员，
+仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
 都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；每轮 user 消息
-头部还会重复一条包含 `^` 排除与 `@用户` 使用条件的简短提醒。
+头部还会重复一条包含 `^` 排除与 `@<username>` 使用条件的简短提醒。
 
 `<channel-policy>` 保存静态频道规则；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 目标。两者都在 system
 prompt 中；每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
+这条 `wake-reminder` 还会通过 `当前正在和你说话的是 ${{USERNAME}}` 模板写明当前说话者：
+用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。当前 turn 仍能看到
+user prompt 里的完整 `<channel-context>` 成员表；turn 正常结束后，akid 只从已持久化的
+user message 中删除该成员表，保留 message-time、sender、seq、正文和附件。随后它原子重写
+`messages.jsonl`，并把 `conversation.json.updated_at` 改成严格不同的值，使 Letta 在对
+下一个 turn 调用 `findConversation` 时淘汰 resident messages 并从磁盘重载。原始 prompt
+先写入 `~/.aki/channel-prompt-journal/<profile>.jsonl` 以便按 turn 恢复；compaction、
+边界失效或无法唯一匹配时只记录错误，不修改文件。
 
 最近频道文本会单独写入频道 turn 的系统提示词 `<channel-transcript>`，默认最多 64K
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
@@ -176,7 +184,7 @@ turn。其他智能体的消息无论是否跨过这个边界都不会补 turn�
 已开始工作的目标没有固定完成超时。该机制是提示词驱动，不强制模型必须调用。
 
 最终回复的 Agent-Agent 唤醒规则是：有 `@成员名` 时只唤醒被点名的成员；第一行单独的
-`@<username>` 强制只唤醒用户、不唤醒任何其他 agent，仅用于只对用户说话、无需打扰其他人
+`@<username>` 强制只唤醒该 username、不唤醒任何其他 agent，仅用于只对该 username 说话、无需打扰其他人
 时；无 `@` 而有 `^成员名`（可多个，例如 `^Aki ^Fuyu`）时，不唤醒被 `^` 排除的成员，
 其余其他在线成员仍会唤醒；无 `@` 且无 `^` 时唤醒所有其他在线成员。标记在发布、transcript
 和历史写入前被移除；出现 `@<username>` 时不唤醒任何其他成员，其他情况下 `^` 与 `@`
@@ -205,7 +213,8 @@ broker 在重连后补发的积压消息只写入频道 transcript 和去重状�
 tokifactor 的持久会话补收，akid 不重复转发，避免产生重复消息或伪造发送者。
 
 收到频道消息后，akid 会把它作为新的 Agent turn 处理，并在提示词中要求 Agent
-自行判断是否需要回复；不需要回复时 Agent 输出 `[NO_REPLY]`，网关会抑制发布。
+自行判断是否需要回复；不需要回复时 Agent 输出 `[NO_REPLY]`。只要整段回复中包含该标记
+（大小写、空格、连字符、全角方括号/圆括号等变体均可），网关会抑制整轮发布，不发正文。
 需要回复时会发布阶段里程碑：处理状态、assistant 文本阶段、工具开始/结束和最终
 Markdown 回复；客户端按 `turnId` 原位更新，不会等整轮结束后才出现第一条回复。
 `[NO_REPLY]` 会让客户端移除该 turn 的临时卡片。

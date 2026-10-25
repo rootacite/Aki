@@ -277,12 +277,35 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `[image] require_approval` 控制。`generate_image` 还是 Haru 的
   exclusive tool：其他成员不会注册该工具，会在 `<tool-ownership>` 中看到
   “图片创作/文生图归 Haru”并以 `@Haru` 转交。MCP、TTS、视频和 ComfyUI 留到后续阶段。
+- 频道 turn 时间：每条 user role 频道 prompt 的前缀包含
+  `message-time: YYYY-MM-DD HH:mm`，使用消息 `sent_at` 转换到本机时区。历史上下文可由
+  `scripts/migrate-channel-turn-times.py` 迁移：默认 dry-run；`--apply` 前会备份各 profile
+  的 conversation 文件，优先匹配频道记录，旧记录缺时间时仅在能唯一对应时补写。
+- 频道成员表：当前 turn 的 user prompt 仍包含 `<channel-context>` 成员表，正文写入
+  `wake-reminder` 的说话者。用户发言使用 `${{USERNAME}}` 占位符替换为 profile 的
+  `[gateway] username`，智能体发言使用成员名，不再追加类型标签。turn 正常结束后 akid 只从该条已
+  持久化的 user message 删除成员表，保留 message-time、sender、seq、正文和附件，并把
+  `conversation.json.updated_at` 改为严格不同的时间，让 Letta 淘汰 resident window 后从
+  `messages.jsonl` 重载。原始 prompt、message id 和 turn id 写入
+  `~/.aki/channel-prompt-journal/<profile>.jsonl`；`scripts/restore-channel-prompts.py`
+  可按 turn 恢复。历史 prompt 由 `scripts/migrate-channel-prompts.py` 迁移，默认 dry-run，
+  `--apply` 先完整备份并停止/重启对应 `akid@<profile>.service`。
+- `[NO_REPLY]` 采用包含式判定：大小写、空格、连字符和全角括号变体均识别；只要最终正文
+  中包含该标记，整轮不发布正文。`wait_other` 的工具与 turn 提示同时要求模型不要在回复中
+  强调等待了谁。
 - 频道图片：Tokifactor 支持正文加最多 4 张图片，单图 8 MiB、单条总计 16 MiB。Aki 把
   入站图片存入各 profile 的 `~/.aki/channel-media/`，频道历史和 system prompt 只记录
   `{"name","path"}`；只有当前触发 turn 的新消息图片作为 base64 多模态输入。纯图片只记录
   不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片，不为此调用
   `tokifactor_send_image`。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
   user role 中新增的多模态 base64 和后续消息全部消失。
+- 内联表情：每个 profile 可从 `assets/emoji/<profile>/index.json` 获得自己的表情目录。
+  akid 只把经过校验的 `name`/`desc` 注入 `<channel-policy>` 内的 `<emoji-catalog>`，
+  不把图片、路径或 base64 放进 prompt。对模型公开的唯一规范格式是
+  `#[name:desc]`；标签随普通正文进入频道历史、transcript 和独处记录，不触发工具、
+  执行锁或多模态输入。Tokifactor 用 `scripts/sync-emoji-assets.py` 把素材缩放到最长边
+  512px 后生成 Compose Resources 与 `catalog.json`；前端只按 `name` 匹配，并保留对缺失
+  或错误 desc 的容错。前端在标签处切段，表情单独渲染为无气泡透明消息。
 - 独处模式：`akictl solo <成员>` 通过群 control 握手。目标成员切换到由群 magic 与
   memberId 派生的 solo magic，但保持 MQTT session/client id 与订阅不变；其他成员继续
   正常运行。目标成员的群 transcript 在独处期间冻结保留，独处 transcript 单独注入

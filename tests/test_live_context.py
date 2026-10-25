@@ -176,7 +176,7 @@ class ChannelContextTests(unittest.TestCase):
         self_member = self.members()[0]
         policy = render_channel_policy(user_name="Master")
         self.assertIn("@名字", policy)
-        self.assertIn("用户不在成员列表中", policy)
+        self.assertIn("Master不在成员列表中", policy)
         self.assertIn("直接说话即可", policy)
         self.assertIn(
             "只有Master的明确指名才算被指名；被非Master指名不算被指名", policy
@@ -185,8 +185,8 @@ class ChannelContextTests(unittest.TestCase):
         self_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
-        self.assertIn("用户在消息中点名了你，请直接回复。", self_text)
-        self.assertIn("它会强制只唤醒用户", self_text)
+        self.assertIn("Master在消息中点名了你，请直接回复。", self_text)
+        self.assertIn("它会强制只唤醒Master", self_text)
         other_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
@@ -224,6 +224,7 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertTrue(turn.startswith(f"<{CHANNEL_TURN_TAG}"))
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
+        self.assertIn("使用该工具时不要在回复中强调等了谁", turn)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_policy(system, policy)
@@ -240,7 +241,7 @@ class ChannelContextTests(unittest.TestCase):
         block = render_channel_wake_routing("Master")
         self.assertTrue(block.startswith(f"<{CHANNEL_WAKE_ROUTING_TAG}"))
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", block)
-        self.assertIn("强制只唤醒用户，不唤醒任何其他成员。", block)
+        self.assertIn("强制只唤醒Master，不唤醒任何其他成员。", block)
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用。", block
         )
@@ -273,7 +274,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn(
             "<wake-reminder>用^排除不需要被提醒的成员（格式：^成员名）。"
             "@Master仅在你只对Master说话，无需打扰其他人时使用"
-            "（该标记会强制只唤醒用户）。</wake-reminder>",
+            "（该标记会强制只唤醒Master）。</wake-reminder>",
             turn,
         )
         self.assertIn(
@@ -387,7 +388,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn("用^排除不需要被提醒的成员（格式：^成员名）。", reminder)
         self.assertIn(
             "@哥哥仅在你只对哥哥说话，无需打扰其他人时使用"
-            "（该标记会强制只唤醒用户）。",
+            "（该标记会强制只唤醒哥哥）。",
             reminder,
         )
 

@@ -37,7 +37,7 @@ class AkiConfigTests(unittest.TestCase):
     def test_profile_templates_carry_sampling_params(self) -> None:
         expected = {
             "aki": {"temperature": 0.67, "top_p": 0.83},
-            "fuyu": {"temperature": 0.52, "top_p": 0.86},
+            "fuyu": {"temperature": 0.7, "top_p": 0.86},
             "haru": {
                 "reasoning_effort": "low",
                 "temperature": 0.88,

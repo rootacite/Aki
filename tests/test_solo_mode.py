@@ -128,7 +128,7 @@ class SoloModeTests(unittest.TestCase):
             session_id="solo-lock",
             scene="封闭控制台。",
         )
-        self.assertIn("不需要用户 @ 指派", block)
+        self.assertIn("不需要Master @ 指派", block)
         self.assertIn("直接获取整机执行锁", block)
         turn = render_channel_turn(
             self_member=members[0],
@@ -138,7 +138,7 @@ class SoloModeTests(unittest.TestCase):
             solo=True,
         )
         self.assertIn("直接获取整机执行锁", turn)
-        self.assertIn("不需要用户先 @ 指派", turn)
+        self.assertIn("不需要Master先 @ 指派", turn)
 
     def test_old_framework_tags_are_migrated(self) -> None:
         old = (

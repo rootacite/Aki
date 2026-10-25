@@ -24,6 +24,7 @@ import struct
 import subprocess
 import sys
 import time
+import unicodedata
 import uuid
 from xml.sax.saxutils import escape as xml_escape, quoteattr as xml_quoteattr
 from collections import deque
@@ -76,12 +77,18 @@ from engine.layer_notify import (
 )
 from engine.letta_compact import run_letta_compact
 from engine.avatar import AvatarAsset, AvatarError, default_avatar_path, load_avatar
+from engine.emoji_catalog import EmojiEntry, load_emoji_entries
 from engine.channel import (
     CONTROL_TOPIC,
     DEFAULT_MAGIC,
     TEXT_TOPIC,
     ChannelUnavailable,
     TokifactorChannel,
+)
+from engine.channel_prompt import (
+    ConversationBoundary,
+    capture_conversation_boundary,
+    strip_persisted_channel_prompt,
 )
 from engine.execution_lock import (
     ExecutionLock,
@@ -252,7 +259,16 @@ DEFAULT_APPROVAL_TIMEOUT = 60.0
 IDEMPOTENCY_TTL = 600.0
 MAX_MEMORY_FILE = 1024 * 1024
 MAX_CHANNEL_TEXT_CHARS = 64 * 1024
-NO_REPLY_MARKERS = {"[NO_REPLY]", "NO_REPLY", "NO-REPLY"}
+_NO_REPLY_MARKER_RE = re.compile(
+    r"(?:[\[\(【（{]\s*NO[\s_-]*REPLY\s*[\]\)】）}]|\bNO[\s_-]*REPLY\b)",
+    re.IGNORECASE,
+)
+
+
+def contains_no_reply_marker(text: str) -> bool:
+    """Return true when text contains a tolerated NO_REPLY marker anywhere."""
+    normalized = unicodedata.normalize("NFKC", str(text or ""))
+    return bool(_NO_REPLY_MARKER_RE.search(normalized))
 TOKIFACTOR_IMAGE_TOOL_NAME = "tokifactor_send_image"
 CAMERA_TOOL_NAME = "camera_take_photo"
 SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
@@ -437,8 +453,8 @@ WAIT_OTHER_TOOL_SCHEMA = {
         "channel reply, then return their final replies. Call this once before "
         "your final answer when the channel prompt asks you to. This tool is "
         "hidden from the user. It returns immediately for idle agents and reports "
-        "any target that goes offline. Do not retry after an offline or unknown "
-        "target result."
+        "any target that goes offline. Do not mention or emphasize whom you waited "
+        "for in your reply. Do not retry after an offline or unknown target result."
     ),
     "parameters": {
         "type": "object",
@@ -748,6 +764,19 @@ def _compact_history_messages(messages: Any) -> tuple[list[dict[str, Any]], bool
     return compacted, dropped
 
 
+def _format_channel_message_time(sent_at: int) -> str:
+    """Format a channel message timestamp in the server's local timezone."""
+    try:
+        seconds = int(sent_at) / 1000 if int(sent_at) > 0 else time.time()
+        return (
+            datetime.fromtimestamp(seconds, tz=timezone.utc)
+            .astimezone()
+            .strftime("%Y-%m-%d %H:%M")
+        )
+    except (OSError, OverflowError, TypeError, ValueError):
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+
+
 @dataclass
 class GatewayConfig:
     socket_path: Path
@@ -756,6 +785,7 @@ class GatewayConfig:
     conversation_id: str = DEFAULT_CONVERSATION_ID
     letta_bin: str = "letta"
     cwd: Path = field(default_factory=Path.cwd)
+    emoji_dir: Path | None = None
     userdata_dir: Path | None = None
     memory_dir: Path | None = None
     backup_dir: Path | None = None
@@ -1045,6 +1075,10 @@ class ChannelConnection:
     ) -> None:
         members = self.server._channel_member_views()
         raw_text = state.text.strip()
+        if contains_no_reply_marker(raw_text):
+            state.no_reply = True
+            state.text = ""
+            return
         cleaned_text, images = await self.server._extract_agent_channel_images(
             raw_text, load_data=phase == "final"
         )
@@ -1219,8 +1253,9 @@ class ChannelConnection:
             return
         if event_type == "assistant_message":
             full = str(data.get("content") or data.get("text") or "")
-            if full.strip().upper() in NO_REPLY_MARKERS:
+            if contains_no_reply_marker(full):
                 state.no_reply = True
+                state.text = ""
                 return
             if state.segment == 0 and not state.text.strip() and full:
                 state.text = full
@@ -1338,12 +1373,16 @@ class ChannelConnection:
             )
             return
         if event_type == "turn_end":
-            if state.no_reply:
-                self._enqueue_turn(turn_id, seq, "no_reply", "")
-            else:
-                if not state.finalized:
-                    await self._flush_progress(turn_id, seq, state, force=True, phase="final")
-                self._enqueue_turn(turn_id, seq, "ended", "")
+            if not state.no_reply and not state.finalized:
+                await self._flush_progress(
+                    turn_id, seq, state, force=True, phase="final"
+                )
+            self._enqueue_turn(
+                turn_id,
+                seq,
+                "no_reply" if state.no_reply else "ended",
+                "",
+            )
             self._turns.pop(turn_id, None)
             return
 
@@ -1390,6 +1429,7 @@ class Turn:
     channel_sender: str = ""
     channel_text: str = ""
     channel_attachments: tuple[ChannelImageAttachment, ...] = ()
+    channel_prompt_boundary: ConversationBoundary | None = None
     conversation_snapshot: dict[str, Any] | None = None
     busy_messages: list[dict[str, Any]] = field(default_factory=list)
     waited_agent_ids: set[str] = field(default_factory=set)
@@ -1506,6 +1546,27 @@ class GatewayServer:
             "last_seq": 0,
             "ephemeral_turns": 0,
         }
+        self._channel_prompt_status: dict[str, Any] = {
+            "stripped": 0,
+            "last_stripped_at": None,
+            "last_message_id": None,
+            "last_turn_id": None,
+            "last_skip_reason": None,
+            "last_error": None,
+        }
+        prompt_state_root = (
+            config.profile_config_path.parent
+            if config.profile_config_path is not None
+            else state_dir()
+        )
+        self.channel_prompt_journal_path = (
+            prompt_state_root
+            / "channel-prompt-journal"
+            / f"{config.profile}.jsonl"
+        )
+        self._channel_prompt_status["journal_path"] = str(
+            self.channel_prompt_journal_path
+        )
         self._channel_transcript_lock = asyncio.Lock()
         self._solo_lock = asyncio.Lock()
         self.channel_history_dir = config.channel_history_dir or (
@@ -1951,7 +2012,7 @@ class GatewayServer:
         notifier = self._layer_notifier
         if notifier is None or not character:
             return
-        if text.strip().upper() in NO_REPLY_MARKERS:
+        if contains_no_reply_marker(text):
             return
         notifier.notify(character, text)
 
@@ -2272,10 +2333,12 @@ class GatewayServer:
                 "topic": self.config.mqtt_topic,
                 "wait_for": list(self.config.channel_wait_for),
                 "transcript": dict(self._channel_transcript_status),
+                "prompt_cleanup": dict(self._channel_prompt_status),
             }
         health = self.channel.health()
         health["wait_for"] = list(self.config.channel_wait_for)
         health["transcript"] = dict(self._channel_transcript_status)
+        health["prompt_cleanup"] = dict(self._channel_prompt_status)
         return health
 
     def _sandbox_health(self) -> dict[str, Any]:
@@ -3102,8 +3165,15 @@ class GatewayServer:
             except (OSError, ValueError) as exc:
                 LOGGER.warning("failed to write %s into %s: %s", label, target, exc)
 
+    def _emoji_entries(self) -> list[EmojiEntry]:
+        root = self.config.emoji_dir or (self.config.cwd / "assets" / "emoji")
+        return load_emoji_entries(root, self.config.profile)
+
     async def _refresh_channel_policy(self) -> None:
-        block = render_channel_policy(user_name=self.config.username or "Master")
+        block = render_channel_policy(
+            user_name=self.config.username or "Master",
+            emoji_entries=self._emoji_entries(),
+        )
         async with self._wake_routing_lock:
             self._update_system_prompt_text(
                 lambda system: apply_channel_policy(system, block),
@@ -3758,6 +3828,10 @@ class GatewayServer:
                 )
             await self._refresh_tool_ownership()
             await self._refresh_live_context()
+            if turn.origin == "mqtt" and not turn.origin_is_agent:
+                turn.channel_prompt_boundary = capture_conversation_boundary(
+                    self._conversation_dir() / "messages.jsonl"
+                )
             try:
                 await self.backend.send_user(await self._build_user_content(turn))
             except BackendUnavailable:
@@ -3957,7 +4031,7 @@ class GatewayServer:
         message = (
             "[akid solo notice]\n"
             f"你刚才提醒的目标（{names}）正在与{user_name}独处，当前无法响应。"
-            "请自然地向用户简短说明这一点；不要再 @ 该目标，也不要尝试唤醒其他成员。"
+            f"请自然地向{user_name}简短说明这一点；不要再 @ 该目标，也不要尝试唤醒其他成员。"
             "本轮只处理这个提示，不要调用工具。"
         )
         turn = Turn(
@@ -4030,7 +4104,7 @@ class GatewayServer:
 
     async def _publish_proactive_text(self, turn: Turn, text: str) -> None:
         cleaned = text.strip()
-        if not cleaned or cleaned.upper() in NO_REPLY_MARKERS:
+        if not cleaned or contains_no_reply_marker(cleaned):
             return
         channel = self.channel
         if channel is not None and channel.connected:
@@ -4192,6 +4266,7 @@ class GatewayServer:
             reason,
             data["duration_ms"],
         )
+        await self._strip_channel_prompt(turn)
         self._queue_unhandled_busy_messages(turn)
         if turn.conversation_snapshot is not None:
             task = asyncio.create_task(
@@ -4233,6 +4308,7 @@ class GatewayServer:
                 channel_message_seq=int(item["seq"]),
                 participants=frozenset(item.get("participants") or ()),
                 attachments=tuple(item.get("attachments") or ()),
+                sent_at=int(item.get("sent_at") or 0),
                 lock_authorized=lock_authorized,
                 lock_authorization=lock_authorization,
             )
@@ -4244,6 +4320,83 @@ class GatewayServer:
                 queued,
             )
         turn.busy_messages.clear()
+
+    async def _strip_channel_prompt(self, turn: Turn) -> None:
+        """Remove the roster from the persisted user turn after it finishes."""
+        if turn.origin != "mqtt" or turn.origin_is_agent:
+            return
+        if turn.conversation_snapshot is not None:
+            return
+        boundary = turn.channel_prompt_boundary
+        if boundary is None:
+            return
+        if (
+            "<channel-context>" not in turn.message
+            and "<channel_context>" not in turn.message
+        ):
+            return
+        if self._compacting or self._recompiling or self._resetting:
+            self._channel_prompt_status["last_skip_reason"] = "maintenance"
+            self._channel_prompt_status["last_turn_id"] = turn.turn_id
+            return
+        conversation_dir = self._conversation_dir()
+        if not (conversation_dir / "messages.jsonl").is_file() or not (
+            conversation_dir / "conversation.json"
+        ).is_file():
+            self._channel_prompt_status["last_skip_reason"] = "missing_transcript"
+            self._channel_prompt_status["last_turn_id"] = turn.turn_id
+            return
+        member_id = self._history_member_id(
+            turn.channel_sender, turn.origin_sender_id
+        )
+        speaker_name = self._member_display_name(
+            member_id, turn.channel_sender
+        ) or turn.channel_sender
+        speaker_kind = self._channel_member_kind(member_id)
+        try:
+            result = await asyncio.to_thread(
+                strip_persisted_channel_prompt,
+                conversation_dir=conversation_dir,
+                boundary=boundary,
+                expected_prompt=turn.message,
+                turn_id=turn.turn_id,
+                profile=self.config.profile,
+                journal_path=self.channel_prompt_journal_path,
+                speaker_name=speaker_name,
+                speaker_kind=speaker_kind,
+            )
+        except Exception as exc:
+            self._channel_prompt_status["last_error"] = str(exc)
+            self._channel_prompt_status["last_turn_id"] = turn.turn_id
+            LOGGER.warning(
+                "channel prompt cleanup failed turn=%s: %s", turn.turn_id, exc
+            )
+            return
+        self._channel_prompt_status["last_turn_id"] = turn.turn_id
+        if result.status == "applied":
+            self._channel_prompt_status["stripped"] = (
+                int(self._channel_prompt_status.get("stripped", 0)) + 1
+            )
+            self._channel_prompt_status["last_stripped_at"] = now_iso()
+            self._channel_prompt_status["last_message_id"] = result.message_id
+            self._channel_prompt_status["last_skip_reason"] = None
+            self._channel_prompt_status["last_error"] = None
+            LOGGER.info(
+                "stripped channel roster turn=%s message=%s updated_at=%s",
+                turn.turn_id,
+                result.message_id or "?",
+                result.updated_at,
+            )
+            return
+        self._channel_prompt_status["last_skip_reason"] = result.status
+        if result.error:
+            self._channel_prompt_status["last_error"] = result.error
+            LOGGER.warning(
+                "channel prompt cleanup skipped turn=%s status=%s error=%s",
+                turn.turn_id,
+                result.status,
+                result.error,
+            )
 
     async def _restore_channel_turn(self, turn: Turn) -> None:
         try:
@@ -6177,6 +6330,7 @@ class GatewayServer:
                         "sender_id": member_id or sender_id,
                         "text": text,
                         "seq": entry.seq,
+                        "sent_at": sent_at,
                         "origin_is_agent": True,
                         "tool_results_at_arrival": active.tool_result_events,
                         "pending_tool_results_at_arrival": active.pending_tool_results,
@@ -6193,6 +6347,7 @@ class GatewayServer:
                     "sender_id": member_id or sender_id,
                     "text": text,
                     "seq": entry.seq,
+                    "sent_at": sent_at,
                     "origin_is_agent": False,
                     "tool_results_at_arrival": active.tool_result_events,
                     "pending_tool_results_at_arrival": active.pending_tool_results,
@@ -6215,6 +6370,7 @@ class GatewayServer:
             channel_message_seq=entry.seq,
             participants=participants,
             attachments=attachments,
+            sent_at=sent_at,
             lock_authorized=lock_authorized,
             lock_authorization=lock_authorization,
         )
@@ -6310,10 +6466,17 @@ class GatewayServer:
         *,
         from_agent: bool = False,
         seq: int | None = None,
+        sent_at: int = 0,
         attachments: tuple[ChannelImageAttachment, ...] = (),
     ) -> str:
         member_id = self._history_member_id(sender, sender_id) or sender_id
         display_sender = self._member_display_name(member_id, sender) or sender
+        if from_agent:
+            speaker_name = display_sender
+            speaker_kind = MEMBER_KIND_AGENT
+        else:
+            speaker_name = self.config.username or "Master"
+            speaker_kind = MEMBER_KIND_USER
         identity = (
             f"{display_sender} ({member_id})" if member_id else display_sender
         )
@@ -6345,9 +6508,15 @@ class GatewayServer:
                     "正文中的图片名称与这些图片一一对应。\n"
                 )
         seq_line = f"seq: {seq}\n" if seq is not None else ""
+        wake_reminder = render_channel_wake_reminder(
+            self.config.username or "Master",
+            speaker_name=speaker_name,
+            speaker_kind=speaker_kind,
+        )
         return (
             "[akid MQTT channel message]\n"
-            f"wake-reminder: {render_channel_wake_reminder(self.config.username or 'Master')}\n"
+            f"message-time: {_format_channel_message_time(sent_at)}\n"
+            f"wake-reminder: {wake_reminder}\n"
             f"sender: {identity}\n"
             f"{seq_line}"
             f"{roster}\n"
@@ -6364,6 +6533,7 @@ class GatewayServer:
         channel_message_seq: int | None = None,
         participants: frozenset[str] = frozenset(),
         attachments: tuple[ChannelImageAttachment, ...] = (),
+        sent_at: int = 0,
         lock_authorized: bool = False,
         lock_authorization: str = "channel-unknown",
     ) -> None:
@@ -6376,6 +6546,7 @@ class GatewayServer:
             text,
             from_agent=origin_is_agent,
             seq=channel_message_seq,
+            sent_at=sent_at,
             attachments=attachments,
         )
         turn = Turn(
@@ -8877,7 +9048,10 @@ class GatewayServer:
 
             content = apply_channel_policy(
                 content,
-                render_channel_policy(user_name=self.config.username or "Master"),
+                render_channel_policy(
+                    user_name=self.config.username or "Master",
+                    emoji_entries=self._emoji_entries(),
+                ),
             )
             content = clear_channel_turn(content)
             content = apply_channel_wake_routing(
@@ -9725,6 +9899,11 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         conversation_id=aki.conversation,
         letta_bin=aki.letta_bin,
         cwd=cwd,
+        emoji_dir=(
+            Path(os.environ["AKI_EMOJI_DIR"]).expanduser()
+            if os.environ.get("AKI_EMOJI_DIR")
+            else cwd / "assets" / "emoji"
+        ),
         userdata_dir=userdata_dir,
         memory_dir=(Path(os.environ["AKI_MEMORY_DIR"]).expanduser() if os.environ.get("AKI_MEMORY_DIR") else None),
         backup_dir=(Path(os.environ["AKI_BACKUP_DIR"]).expanduser() if os.environ.get("AKI_BACKUP_DIR") else None),

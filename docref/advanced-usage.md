@@ -52,7 +52,7 @@ python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/
 默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
 
 各成员的采样参数固定在该 profile 的 `[model.*] extra_body` 中，由本地代理合并进每次上游请求：
-Aki `temperature=0.67` / `top_p=0.83`，Fuyu `0.52` / `0.86`，Haru `0.88` / `0.92`。
+Aki `temperature=0.67` / `top_p=0.83`，Fuyu `0.7` / `0.86`，Haru `0.88` / `0.92`。
 新增模型路由时也要带上对应成员的 `extra_body`；`extra_body` 不能覆盖 `model` 等路由字段。
 
 ### Profiles
@@ -532,13 +532,31 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
 每条频道 user 消息包含 `[akid MQTT channel message]`、头部 `wake-reminder`、`sender`、
-可选 `seq`、在线成员列表 `<channel-context>` 和原始 `message`。其他智能体触发的 turn
+可选 `seq`、在线成员列表 `<channel-context>` 和原始 `message`。`wake-reminder` 会写明
+当前说话者：用户发言把 `${{USERNAME}}` 替换为 profile 的 `[gateway] username`，智能体
+发言使用成员名，不追加类型标签。当前 turn 结束后，持久化 user message 中的 `<channel-context>` 会被
+删除，并更新 `conversation.json.updated_at` 强制 Letta 重载；原始 prompt 可在
+`~/.aki/channel-prompt-journal/<profile>.jsonl` 中找到。其他智能体触发的 turn
 还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
 的 `<channel-turn>` 中。
-每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。用户不在智能体成员
+
+历史频道 prompt 的成员表迁移与运行时回滚：
+
+```bash
+python3 scripts/migrate-channel-prompts.py            # dry-run
+python3 scripts/migrate-channel-prompts.py --apply    # backup + stop/restart akid@<profile>
+python3 scripts/restore-channel-prompts.py --turn-id turn-...          # dry-run restore
+python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore one journaled turn
+```
+
+迁移脚本会完整备份 `messages.jsonl`、`conversation.json`、`system-prompt.json` 和
+`manifest.json`，并按成员表、频道历史、身份注册表的顺序推断说话者类型；无法匹配时报告，
+不会猜测。
+
+每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。profile username 不在智能体成员
 列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如 `@Master`）表示这条回复
-只对用户说、无需打扰其他成员，会强制只唤醒用户。本地 turn 不包含频道 transcript 或 turn
+只对该 username 说、无需打扰其他成员，会强制只唤醒该 username。本地 turn 不包含频道 transcript 或 turn
 块，但仍刷新并保留
 `<channel-identity>`、`<channel-wake-routing>` 与 `<live-context>`。
 
@@ -546,7 +564,7 @@ initiation budget、execution responder、新消息摘要和 `wait_other` 提示
 的 `<channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
-- 第一行单独写 `@<username>`：强制只唤醒用户，不唤醒任何其他成员；仅在你只对用户说话、无需打扰其他人时使用。该标记发布前会被移除。
+- 第一行单独写 `@<username>`：强制只唤醒该 username，不唤醒任何其他成员；仅在你只对该 username 说话、无需打扰其他人时使用。该标记发布前会被移除。
 - 无 `@`、正文中写 `^成员名`：不唤醒被 `^` 排除的成员，其余其他在线成员仍会唤醒；标记发布前会被移除。
 - 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
@@ -574,6 +592,18 @@ initiation budget、execution responder、新消息摘要和 `wait_other` 提示
 等待完成后没有固定完成超时；只要对方 akid 在线，就会一直等到它结束当前 turn。
 `wait_other` 的 `tool_call` / `tool_result` 不写入频道，也不出现在 tokifactor 的工具卡片中。
 这个机制依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
+工具提示要求模型不要在回复中强调等了谁，也不要写“等某某先说完”之类的过程旁白。
+
+频道 user role 的 prompt 前缀包含 `message-time: YYYY-MM-DD HH:mm`，取消息发送时间并按
+本机时区显示。迁移已有上下文可先运行：
+
+```bash
+python3 scripts/migrate-channel-turn-times.py
+python3 scripts/migrate-channel-turn-times.py --apply
+```
+
+第一条命令只输出计划；`--apply` 会先备份各 profile 的 `messages.jsonl`、`conversation.json`
+和 `system-prompt.json`，然后补写能唯一对应到频道记录或 turn 时间的历史 user prompt。
 
 ### 独处模式
 
@@ -641,6 +671,32 @@ tokifactor 现在支持一条消息同时包含正文和最多 4 张图片。输
 历史图片不会重复嵌入，system prompt 只保留 `{"name":"…","path":"…"}`。纯图片只记录、
 不唤醒智能体。由其他智能体唤醒的临时 turn 回滚时，多模态 user 消息和该 turn 的后续消息
 会一起从 conversation 中截断。
+
+### 内联表情
+
+每个成员可以在 `assets/emoji/<profile>/index.json` 维护自己的表情目录。akid 在
+`<channel-policy>` 中注入当前成员专用的 `<emoji-catalog>`，模型看到的规范格式只有：
+
+```text
+#[name:desc]
+```
+
+`name` 必须来自目录，`desc` 是给看不到图片的其他成员阅读的简短语义。标签是普通正文的
+一部分，会原样进入群聊历史、transcript 和独处记录；不会生成图片附件、多模态输入或执行锁。
+修改索引后重启对应 `akid` 或运行 `akictl recompile` 刷新 system prompt。
+
+Tokifactor 的素材副本由 Aki 仓库生成：
+
+```bash
+python3 scripts/sync-emoji-assets.py --tokifactor ../tokifactor
+```
+
+脚本会把图片最长边缩放到 512px（PNG 保留透明通道），写入
+`shared/src/commonMain/composeResources/files/emoji/` 并生成统一的 `catalog.json`。
+前端按 `name` 匹配素材；模型仍只会被告知 `#[name:desc]`，但前端对 `#[name]`、空 desc
+或写错 desc 做私有容错。标签处会把正文切段，表情本身渲染为独立的透明消息。
+Tokifactor 输入框左侧的表情按钮会按成员分组展示全部表情包；用户选择后直接发送规范
+`#[name:desc]` 文本，因此智能体和其他客户端都能理解，同时用户自己的消息也渲染为表情。
 
 Agent 可以用最终正文中的 `#[/absolute/path/to/image]` 内嵌图片；图片会作为同一消息的附件
 发布并从正文移除。不要为这种带正文图片消息调用 `tokifactor_send_image`。
