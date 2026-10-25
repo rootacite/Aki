@@ -669,7 +669,8 @@ def render_channel_turn(
     if solo:
         lines.append(
             f"<guidance>这是独处模式。只有{_text(user_name, single_line=True)}能看到你的回复；"
-            "不要 @ 其他成员，也不要调用 wait_other。直接自然回应。</guidance>"
+            "不要 @ 其他成员，也不要调用 wait_other。直接自然回应。"
+            "需要非只读操作时可以直接获取整机执行锁，不需要用户先 @ 指派。</guidance>"
         )
     else:
         lines.extend(
@@ -1096,7 +1097,9 @@ def render_solo_mode(
             "<rule>不要写 @成员 或 ^成员，不要调用 wait_other；任何 @ 都不会唤醒其他成员。</rule>",
             "<rule>群聊记录冻结在进入独处前，不代表独处期间发生的事。</rule>",
             "<rule>独处内容私密；退出后不要向其他成员转述、引用或主动重播。</rule>",
-            "<rule>基础人格、安全边界、工具权限和执行锁规则继续有效。</rule>",
+            "<rule>独处时执行锁授权由本块覆盖：你不需要用户 @ 指派，可以直接获取整机执行锁，"
+            "执行本轮所需的非只读工具。</rule>",
+            "<rule>基础人格、安全边界和工具权限继续有效；独处不改变审批、沙箱或工具可用性。</rule>",
             "</rules>",
             f"</{SOLO_MODE_TAG}>",
         ]

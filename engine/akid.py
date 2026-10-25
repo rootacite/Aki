@@ -5812,6 +5812,8 @@ class GatewayServer:
     def _channel_lock_authorization(
         self, text: str, *, from_agent: bool
     ) -> tuple[bool, str]:
+        if self._solo_session is not None:
+            return True, "solo-mode"
         if from_agent:
             return False, "agent-message"
         mentions = self._channel_message_mentions(text)

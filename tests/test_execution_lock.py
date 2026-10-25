@@ -82,6 +82,14 @@ class ExecutionPolicyTests(unittest.TestCase):
             self.assertIn("one assistant response", prompt)
             self.assertNotIn(f"<{EXECUTION_LOCK_TAG}", prompt)
 
+    def test_base_prompts_waive_mention_requirement_in_solo(self) -> None:
+        root = Path(__file__).resolve().parent.parent
+        for name in ("aki-system.md", "fuyu-system.md", "haru-system.md"):
+            with self.subTest(name=name):
+                prompt = (root / "prompts" / name).read_text(encoding="utf-8")
+                self.assertIn("Solo mode is the exception", prompt)
+                self.assertIn("does not need to @mention you", prompt)
+
     def test_legacy_dynamic_lock_block_is_removed(self) -> None:
         legacy = f"BASE\n\n<{EXECUTION_LOCK_TAG}>old</{EXECUTION_LOCK_TAG}>\n"
         cleared = clear_execution_lock_policy(legacy)

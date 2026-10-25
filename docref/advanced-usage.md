@@ -594,6 +594,10 @@ system prompt 额外包含 `<solo-mode>` 与 `<solo-transcript>`，后者使用
 `@` 会被移除。其他成员如果在此期间 `@` 独处目标，不会产生目标 turn；发起方会收到
 一次临时系统提示 turn。
 
+独处模式下，目标成员不需要用户先用 `@` 指派执行者，就可以直接获取整机执行锁；
+网关会把该 turn 的授权来源标记为 `solo-mode`，`<solo-mode>` 与独处 turn guidance
+也会明确告诉模型这一例外。其他安全边界、审批和工具权限不变。
+
 > 执行锁和 control 主题的详细协议见 [架构与开发](architecture.md)。
 
 ---

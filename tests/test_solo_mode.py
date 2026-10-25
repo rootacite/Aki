@@ -16,6 +16,7 @@ from engine.live_context import (
     apply_solo_mode,
     apply_solo_transcript,
     render_channel_transcript,
+    render_channel_turn,
     render_solo_mode,
     render_solo_transcript,
     strip_channel_mentions,
@@ -118,6 +119,26 @@ class SoloModeTests(unittest.TestCase):
         self.assertIn("独处私密消息", system)
         self.assertLess(system.index("群聊旧消息"), system.index("独处私密消息"))
         self.assertNotIn("<aki-channel-transcript", system)
+
+    def test_solo_prompt_authorizes_execution_lock_without_mention(self) -> None:
+        members = [ChannelMember(id="fuyu", name="Fuyu", aliases=("Fuyu",))]
+        block = render_solo_mode(
+            member_name="Fuyu",
+            user_name="Master",
+            session_id="solo-lock",
+            scene="封闭控制台。",
+        )
+        self.assertIn("不需要用户 @ 指派", block)
+        self.assertIn("直接获取整机执行锁", block)
+        turn = render_channel_turn(
+            self_member=members[0],
+            members=members,
+            message="继续",
+            user_name="Master",
+            solo=True,
+        )
+        self.assertIn("直接获取整机执行锁", turn)
+        self.assertIn("不需要用户先 @ 指派", turn)
 
     def test_old_framework_tags_are_migrated(self) -> None:
         old = (

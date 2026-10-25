@@ -2122,6 +2122,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             (True, "single-online-member"),
         )
 
+    async def test_solo_mode_authorizes_execution_lock_without_mention(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        from engine.solo_mode import SoloSession
+
+        self.server._solo_session = SoloSession(
+            session_id="solo-lock",
+            target_id=self.server._channel_self_key(),
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-25T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.assertEqual(
+            self.server._channel_lock_authorization("do this", from_agent=False),
+            (True, "solo-mode"),
+        )
+        self.assertEqual(
+            self.server._channel_lock_authorization("do this", from_agent=True),
+            (True, "solo-mode"),
+        )
+
     async def test_execution_lock_tools_acquire_and_auto_release(self) -> None:
         await self.start_server()
         assert self.server is not None

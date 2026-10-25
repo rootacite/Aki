@@ -85,6 +85,7 @@ class ChannelMemberDiscoveryTests(unittest.IsolatedAsyncioTestCase):
             identity_registry_path=base / "identities.json",
             mqtt_state=base / "mqtt.conf",
             writable_state=base / "writable.conf",
+            solo_state=base / "solo.json",
             live_context_enabled=False,
             screenshot_enabled=False,
             camera_enabled=False,
