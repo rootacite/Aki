@@ -20,7 +20,13 @@ from engine.live_context import (
     render_solo_transcript,
     strip_channel_mentions,
 )
-from engine.solo_mode import derive_solo_magic, load_solo_scene
+from engine.solo_mode import (
+    SOLO_ACTIVE,
+    SOLO_END,
+    SOLO_START,
+    derive_solo_magic,
+    load_solo_scene,
+)
 from engine.tokifactor import TextEnvelope
 
 
@@ -146,6 +152,17 @@ class SoloModeTests(unittest.TestCase):
         self.assertEqual(args.solo_command, "aki")
         self.assertTrue(args.json)
         self.assertEqual(args.timeout, 3.0)
+
+    def test_akictl_solo_status_uses_latest_retained_event(self) -> None:
+        start = {"kind": SOLO_START, "soloId": "solo-1"}
+        active = {"kind": SOLO_ACTIVE, "soloId": "solo-1"}
+        ended = {"kind": SOLO_END, "soloId": "solo-1"}
+
+        self.assertEqual(akictl._latest_solo_event([start]), start)
+        self.assertEqual(akictl._latest_solo_event([start, active]), active)
+        self.assertEqual(akictl._latest_solo_event([active, ended]), ended)
+        self.assertEqual(akictl._latest_solo_event([ended, start]), start)
+        self.assertIsNone(akictl._latest_solo_event([]))
 
 
 class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):

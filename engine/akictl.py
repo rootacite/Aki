@@ -35,6 +35,7 @@ from engine.client import (
 from engine.letta_compact import COMPACT_MODES
 from engine.member_identity import legacy_member_id
 from engine.protocol import RpcError
+from engine.solo_mode import SOLO_ACTIVE, SOLO_END, SOLO_START
 
 COMMANDS = {
     "chat",
@@ -967,6 +968,14 @@ def _clear_solo_control_state() -> None:
         pass
 
 
+def _latest_solo_event(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the newest retained event that determines the solo state."""
+    for item in reversed(events):
+        if item.get("kind") in (SOLO_START, SOLO_ACTIVE, SOLO_END):
+            return item
+    return None
+
+
 async def _solo_broker_call(
     config,
     *,
@@ -976,7 +985,7 @@ async def _solo_broker_call(
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     from engine.mqtt_client import MqttClient
-    from engine.solo_mode import SOLO_END, SOLO_READY, SOLO_START, derive_solo_magic
+    from engine.solo_mode import SOLO_READY, derive_solo_magic
     from engine.tokifactor import (
         CONTROL_TOPIC,
         decode_single_payload,
@@ -1029,24 +1038,16 @@ async def _solo_broker_call(
             deadline = time.monotonic() + min(timeout, 1.5)
             while time.monotonic() < deadline:
                 await asyncio.sleep(0.05)
-            active = next(
-                (item for item in reversed(events) if item.get("kind") == SOLO_START),
-                None,
-            )
-            ended = next(
-                (item for item in reversed(events) if item.get("kind") == SOLO_END),
-                None,
-            )
-            if ended and (
-                active is None
-                or str(ended.get("soloId") or "") == str(active.get("soloId") or "")
-            ):
-                active = None
-            if active is None:
-                local = _read_solo_control_state()
-                if local is not None:
-                    return {"active": True, "session": local, "source": "local"}
-            return {"active": active is not None, "session": active}
+            latest = _latest_solo_event(events)
+            if latest is not None:
+                if latest.get("kind") == SOLO_END:
+                    _clear_solo_control_state()
+                    return {"active": False, "session": None, "source": "broker"}
+                return {"active": True, "session": latest, "source": "broker"}
+            local = _read_solo_control_state()
+            if local is not None:
+                return {"active": True, "session": local, "source": "local"}
+            return {"active": False, "session": None, "source": "broker"}
 
         if action == "start" and target is not None:
             started_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -1107,23 +1108,15 @@ async def _solo_broker_call(
             deadline = time.monotonic() + min(timeout, 1.5)
             while time.monotonic() < deadline and not events:
                 await asyncio.sleep(0.05)
-            active = next(
-                (item for item in reversed(events) if item.get("kind") == SOLO_START),
-                None,
-            )
-            ended = next(
-                (item for item in reversed(events) if item.get("kind") == SOLO_END),
-                None,
-            )
+            latest = _latest_solo_event(events)
+            if latest is not None and latest.get("kind") == SOLO_END:
+                _clear_solo_control_state()
+                return {"active": False, "session": None}
+            active = latest
             local = _read_solo_control_state()
             if not active and target is None and local is not None:
                 active = local
             if not active and target is None:
-                return {"active": False, "session": None}
-            if active and (
-                ended
-                and str(ended.get("soloId") or "") == str(active.get("soloId") or "")
-            ):
                 return {"active": False, "session": None}
             target_id = (
                 str(active.get("soloTargetId") or active.get("target_id") or "")
