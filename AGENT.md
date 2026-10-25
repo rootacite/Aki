@@ -268,7 +268,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `aki-write-policy.ts` 只允许 `Write/Edit/ApplyPatch/write_artifact_file`
   写入 `/tmp` 与 `~/.local/share/tmp`，并做 realpath 校验；同一 mod 也限制
   `Read/Grep/Glob` 只能读临时目录和 Letta MemFS/工具归档，不能调查仓库代码。
-  `[tools] allow` 额外包含隐藏工具 `wait_other`；`[writable] dirs` 为空，bubblewrap 作为第二层边界。
+  `[tools] allow` 额外包含隐藏工具 `wait_other`、`wait_user`；`[writable] dirs` 为空，bubblewrap 作为第二层边界。
   已注册桌面截图、相机、频道发图、MiniMax 文生图 `generate_image`，并启用桌面实况。
   文生图走 `[upstream.minimax]` 与 `[image]`，固定 `image-01`、base64 回传和
   `/tmp/aki/images` 输出；生成结果只返回路径与元数据，分享时再调用
@@ -293,6 +293,14 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - `[NO_REPLY]` 采用包含式判定：大小写、空格、连字符和全角括号变体均识别；只要最终正文
   中包含该标记，整轮不发布正文。`wait_other` 的工具与 turn 提示同时要求模型不要在回复中
   强调等待了谁。
+- `wait_user(timeout_s)` 是频道隐藏工具：仅真人触发的 turn 可调用，只等待同一位触发者的
+  下一条消息，超时参数限定 1–25 秒；返回后已消费消息不会重复补 turn，模型可再次调用。
+  工具事件不写入频道，提示词禁止模型解释或提及等待。
+- 等待期间会广播 `waitingUser=true`（presence/status 与 QoS1 `kind=wait_user` 事件）。
+  有等待者时，无 `@` 的用户新消息只投递给等待者；working 成员仍可收到补充，但不额外唤醒
+  空闲且非等待成员。有 `@` 时仍按点名路由。
+- Tokifactor 的“还没说完”分段编辑只在本机暂存文字/表情，确认后用 `\n\n` 拼成单条普通
+  协议消息发送；确认前不产生 MQTT 流量。用户消息中的 `\n\n` 在前端渲染为多个气泡。
 - 频道图片：Tokifactor 支持正文加最多 4 张图片，单图 8 MiB、单条总计 16 MiB。Aki 把
   入站图片存入各 profile 的 `~/.aki/channel-media/`，频道历史和 system prompt 只记录
   `{"name","path"}`；只有当前触发 turn 的新消息图片作为 base64 多模态输入。纯图片只记录

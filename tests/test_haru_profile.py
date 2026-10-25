@@ -88,6 +88,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertIn("Write", config.tool_policy.allow)
         self.assertIn("acquire_execution_lock", config.tool_policy.allow)
         self.assertIn("wait_other", config.tool_policy.allow)
+        self.assertIn("wait_user", config.tool_policy.allow)
         self.assertIn("desktop_take_screenshot", config.tool_policy.allow)
         self.assertIn("camera_take_photo", config.tool_policy.allow)
         self.assertIn("tokifactor_send_image", config.tool_policy.allow)

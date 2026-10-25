@@ -129,7 +129,7 @@ Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和
 
 Haru profile 使用 `userdata3/`、`aki-haru` provider 和 7723 proxy 端口，默认模型句柄
 是 `aki-haru/gemini-3.8-flash`。她的 `[tools]` 段显式把工具收窄为 `Read,Write,Edit,ViewImage,
-Memory,Skill,acquire_execution_lock,wait_other,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
+Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
 从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
 bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
@@ -593,6 +593,30 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 `wait_other` 的 `tool_call` / `tool_result` 不写入频道，也不出现在 tokifactor 的工具卡片中。
 这个机制依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
 工具提示要求模型不要在回复中强调等了谁，也不要写“等某某先说完”之类的过程旁白。
+
+### 等待用户继续补充的 `wait_user`
+
+频道会注册另一个隐藏工具 `wait_user(timeout_s)`。模型认为当前真人用户可能还没说完时，
+可以静默等待同一位触发者继续发消息：
+
+- `timeout_s` 必填，范围 1–25 秒。
+- 只对真人消息触发的 turn 生效；智能体之间的 turn 禁止调用。
+- 只匹配当前 turn 触发者的后续消息；其他人类成员或智能体消息不会提前返回。
+- 新消息到达后立即返回消息正文、seq、时间和附件名称/路径；已返回消息不会在 turn
+  结束时重复排成新 turn。
+- 返回后模型仍可再次调用，继续等待下一条补充消息；超时返回 `WAIT_USER_TIMEOUT`。
+- 工具事件不写入频道，也不出现在 tokifactor 工具卡片中；提示词禁止模型向用户解释、
+  提及或复述等待行为。
+- 等待状态会写入 presence/status 的 `waitingUser` 字段，并以 `kind=wait_user` 的 QoS 1
+  文本事件即时广播；该事件只更新成员状态，不进入频道历史。
+- 只要频道里至少有一位成员处于 `wait_user`，用户的新消息在没有 `@` 时只投递给等待者。
+  已经在 working 的成员仍可在当前 turn 收到补充，但既不在等待、也不在 working 的成员不会
+  被额外唤醒；消息包含 `@` 时仍按点名规则路由。
+- Tokifactor 成员条会给 `waitingUser=true` 的成员加蓝色边框。
+
+Tokifactor 的“还没说完”输入区只在本机暂存分段，确认前不会发送 MQTT 消息。确认后各段用
+`\n\n` 拼成一条普通文本消息，因此仍按普通 `@` 规则路由；用户消息中的 `\n\n` 会在前端
+拆成多个气泡显示。
 
 频道 user role 的 prompt 前缀包含 `message-time: YYYY-MM-DD HH:mm`，取消息发送时间并按
 本机时区显示。迁移已有上下文可先运行：

@@ -102,6 +102,7 @@ from engine.execution_policy import (
     LOCK_RELEASE_TOOL,
     LOCK_REQUIRED_ERROR,
     WAIT_OTHER_TOOL,
+    WAIT_USER_TOOL,
     clear_execution_lock_policy,
     is_lock_control_tool,
     requires_execution_lock,
@@ -280,8 +281,9 @@ EXTERNAL_TOOL_NAMES = {
     IMAGE_GENERATION_TOOL_NAME,
     LOCK_ACQUIRE_TOOL,
     WAIT_OTHER_TOOL,
+    WAIT_USER_TOOL,
 } | set(EXCLUSIVE_TOOL_NAMES)
-HIDDEN_TOOL_NAMES = frozenset({WAIT_OTHER_TOOL})
+HIDDEN_TOOL_NAMES = frozenset({WAIT_OTHER_TOOL, WAIT_USER_TOOL})
 MCP_TOOL_PREFIX = "mcp__"
 MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
 DEFAULT_MCP_NATIVE_MAX_TOOLS = 64
@@ -318,6 +320,11 @@ WAIT_OTHER_POLL_INTERVAL = 0.2
 WAIT_OTHER_MAX_REPLY_CHARS = 16 * 1024
 WAIT_OTHER_MAX_TOTAL_CHARS = 32 * 1024
 WAIT_OTHER_TIMEOUT_MS = 24 * 60 * 60 * 1000
+WAIT_USER_MIN_TIMEOUT_S = 1
+WAIT_USER_MAX_TIMEOUT_S = 25
+WAIT_USER_MAX_REPLY_CHARS = 8 * 1024
+WAIT_USER_MAX_TOTAL_CHARS = 16 * 1024
+WAIT_USER_TOOL_TIMEOUT_MS = 30 * 1000
 
 TOKIFACTOR_IMAGE_TOOL = {
     "name": TOKIFACTOR_IMAGE_TOOL_NAME,
@@ -463,6 +470,36 @@ WAIT_OTHER_TOOL_SCHEMA = {
     },
     "auto_background": False,
     "timeout_ms": WAIT_OTHER_TIMEOUT_MS,
+}
+
+WAIT_USER_TOOL_SCHEMA = {
+    "name": WAIT_USER_TOOL,
+    "label": "Wait for the user to continue",
+    "description": (
+        "Wait silently for the next message from the human user who triggered "
+        "this turn in the current tokifactor channel. Use it only when that user "
+        "may still be in the middle of speaking and is likely to send another "
+        "message. It returns immediately when that same user sends a new message, "
+        "or returns a timeout result after timeout_s seconds (an integer from 1 "
+        "to 25). You may call it again if you still expect more follow-up. Only "
+        "available on human-triggered channel turns. Never mention, explain, or "
+        "announce this tool, the wait, or its result in your reply."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "timeout_s": {
+                "type": "integer",
+                "minimum": WAIT_USER_MIN_TIMEOUT_S,
+                "maximum": WAIT_USER_MAX_TIMEOUT_S,
+                "description": "Seconds to wait for the next message from the same user.",
+            }
+        },
+        "required": ["timeout_s"],
+        "additionalProperties": False,
+    },
+    "auto_background": False,
+    "timeout_ms": WAIT_USER_TOOL_TIMEOUT_MS,
 }
 
 CAPABILITIES = {
@@ -1432,6 +1469,9 @@ class Turn:
     channel_prompt_boundary: ConversationBoundary | None = None
     conversation_snapshot: dict[str, Any] | None = None
     busy_messages: list[dict[str, Any]] = field(default_factory=list)
+    user_message_event: asyncio.Event = field(default_factory=asyncio.Event)
+    waited_user_seqs: set[int] = field(default_factory=set)
+    wait_user_used: bool = False
     waited_agent_ids: set[str] = field(default_factory=set)
     tool_result_events: int = 0
     pending_tool_results: int = 0
@@ -1537,6 +1577,8 @@ class GatewayServer:
                     )
         self._channel_members: dict[str, dict[str, Any]] = {}
         self._channel_agent_states: dict[str, AgentChannelState] = {}
+        self._channel_waiting_user: dict[str, float] = {}
+        self._wait_user_active = False
         self._channel_event_seq = 0
         self._channel_history: list[ChannelTranscriptEntry] = []
         self._channel_history_seq = 0
@@ -3173,6 +3215,7 @@ class GatewayServer:
         block = render_channel_policy(
             user_name=self.config.username or "Master",
             emoji_entries=self._emoji_entries(),
+            wait_user_available=self.channel is not None,
         )
         async with self._wake_routing_lock:
             self._update_system_prompt_text(
@@ -4408,6 +4451,9 @@ class GatewayServer:
             await self._finalize_turn_state(turn)
 
     async def _finalize_turn_state(self, turn: Turn) -> None:
+        if self._wait_user_active:
+            with contextlib.suppress(Exception):
+                await self._set_wait_user_active(False)
         self._release_turn_lock(turn)
         turn.done_event.set()
         if self.active is turn:
@@ -4731,6 +4777,7 @@ class GatewayServer:
                 if bool(getattr(self.backend, "ready", False))
                 else "false",
                 "channelReady": "true" if channel_ready else "false",
+                "waitingUser": "true" if self._wait_user_active else "false",
             }
         )
         return metadata
@@ -5013,7 +5060,56 @@ class GatewayServer:
         if not state.active and queue_depth == 0:
             state.active_turn_id = ""
 
+    def _observe_channel_waiting_user(
+        self, member_id: str, metadata: Mapping[str, Any]
+    ) -> None:
+        if not member_id or member_id == self._channel_self_key():
+            return
+        value = metadata.get("waitingUser")
+        if value is None:
+            return
+        waiting = str(value).strip().lower() in ("true", "1", "yes", "on")
+        if waiting:
+            self._channel_waiting_user[member_id] = time.monotonic()
+        else:
+            self._channel_waiting_user.pop(member_id, None)
+
+    def _channel_waiting_user_ids(self) -> set[str]:
+        cutoff = time.monotonic() - CHANNEL_MEMBER_TIMEOUT
+        self_key = self._channel_self_key()
+        self._channel_waiting_user = {
+            member_id: seen_at
+            for member_id, seen_at in self._channel_waiting_user.items()
+            if seen_at >= cutoff
+        }
+        waiting = set(self._channel_waiting_user)
+        if self._wait_user_active:
+            waiting.add(self_key)
+        return waiting
+
+    async def _set_wait_user_active(self, active: bool) -> None:
+        if self._wait_user_active == active:
+            return
+        self._wait_user_active = active
+        self._schedule_status_refresh()
+        channel = self.channel
+        if channel is None or not channel.connected:
+            return
+        metadata = {
+            **self._channel_live_metadata(),
+            "kind": "wait_user",
+            "waitingUser": "true" if active else "false",
+        }
+        try:
+            await channel.publish_text(
+                "waiting for user" if active else "stopped waiting for user",
+                metadata,
+            )
+        except Exception as exc:
+            LOGGER.warning("failed to publish wait_user state active=%s: %s", active, exc)
+
     def _mark_channel_member_offline(self, member_id: str) -> None:
+        self._channel_waiting_user.pop(member_id, None)
         state = self._channel_agent_states.get(member_id)
         if state is None:
             return
@@ -5052,6 +5148,7 @@ class GatewayServer:
         sources.pop(source_id, None)
         if not sources:
             self._channel_members.pop(member_id, None)
+            self._channel_waiting_user.pop(member_id, None)
             self._mark_channel_member_offline(member_id)
             return
         updated = dict(member)
@@ -5080,6 +5177,11 @@ class GatewayServer:
             updated["last_seen"] = max(active.values())
             kept[key] = updated
         self._channel_members = kept
+        self._channel_waiting_user = {
+            member_id: seen_at
+            for member_id, seen_at in self._channel_waiting_user.items()
+            if seen_at >= cutoff
+        }
 
     def _channel_self_key(self) -> str:
         return self.config.channel_member_id or legacy_member_id(
@@ -5341,6 +5443,8 @@ class GatewayServer:
             self._drop_channel_member_source(member_id, source_id)
             return
         self._update_channel_member(envelope, metadata)
+        if kind in ("presence", "status"):
+            self._observe_channel_waiting_user(member_id, metadata)
         if kind == "status":
             self._observe_channel_status(
                 member_id, metadata, sent_at=envelope.sent_at
@@ -6206,6 +6310,14 @@ class GatewayServer:
         display_sender = self._member_display_name(member_id, sender) or sender
         action = self._channel_text_action(event_metadata)
         if not action:
+            if (
+                event_metadata.get("schema") == "akid.v1"
+                and event_metadata.get("kind") == "wait_user"
+                and not replayed
+            ):
+                self._observe_channel_waiting_user(
+                    member_id or sender_id, event_metadata
+                )
             return
         busy = self._channel_busy()
         if action == "agent-progress":
@@ -6355,8 +6467,21 @@ class GatewayServer:
                 "attachments": attachments,
                 }
             )
+            active.user_message_event.set()
             await self._refresh_channel_transcript()
             return
+        if not from_agent and not mentions:
+            waiting_ids = self._channel_waiting_user_ids()
+            if waiting_ids and self_key not in waiting_ids:
+                LOGGER.info(
+                    "channel user message routed only to wait_user members; "
+                    "transcript-only seq=%s waiting=%s",
+                    entry.seq,
+                    ",".join(sorted(waiting_ids)),
+                )
+                if busy:
+                    await self._refresh_channel_transcript()
+                return
         if busy:
             await self._refresh_channel_transcript()
         lock_authorized, lock_authorization = self._channel_lock_authorization(
@@ -6731,6 +6856,7 @@ class GatewayServer:
             tools.append(SCREENSHOT_TOOL)
         if self.channel is not None:
             tools.append(TOKIFACTOR_IMAGE_TOOL)
+            tools.append(WAIT_USER_TOOL_SCHEMA)
         if self.channel is not None and self.config.channel_wait_for:
             tools.append(WAIT_OTHER_TOOL_SCHEMA)
         tools.extend(self._mcp_tools)
@@ -7322,6 +7448,9 @@ class GatewayServer:
         if tool_name == WAIT_OTHER_TOOL:
             await self._handle_wait_other_tool(turn, tool_call_id)
             return
+        if tool_name == WAIT_USER_TOOL:
+            await self._handle_wait_user_tool(turn, tool_call_id, tool_input)
+            return
         if is_lock_control_tool(tool_name):
             await self._handle_execution_lock_tool(turn, tool_call_id, tool_name)
             return
@@ -7654,6 +7783,182 @@ class GatewayServer:
             "Use these earlier replies to continue the discussion; do not repeat them verbatim."
         )
         return "\n".join(lines)
+
+    @staticmethod
+    def _pending_wait_user_messages(turn: Turn) -> list[dict[str, Any]]:
+        sender_id = turn.origin_sender_id
+        messages: list[dict[str, Any]] = []
+        for item in turn.busy_messages:
+            if bool(item.get("origin_is_agent", False)):
+                continue
+            if str(item.get("sender_id") or "") != sender_id:
+                continue
+            try:
+                seq = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq > 0 and seq in turn.waited_user_seqs:
+                continue
+            messages.append(item)
+        messages.sort(
+            key=lambda item: (
+                int(item.get("sent_at") or 0),
+                int(item.get("seq") or 0),
+            )
+        )
+        return messages
+
+    @staticmethod
+    def _consume_wait_user_messages(
+        turn: Turn, messages: list[dict[str, Any]]
+    ) -> None:
+        for item in messages:
+            try:
+                seq = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq > 0:
+                turn.waited_user_seqs.add(seq)
+            item["waited_by_user"] = True
+
+    def _format_wait_user_results(
+        self, turn: Turn, messages: list[dict[str, Any]]
+    ) -> str:
+        lines = [f"WAIT_USER_RESULT status=messages count={len(messages)}"]
+        total = 0
+        for item in messages:
+            try:
+                seq = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            sent_at = int(item.get("sent_at") or 0)
+            sender = str(item.get("sender") or turn.channel_sender or "user")
+            lines.append(
+                f"[seq={seq} at={_format_channel_message_time(sent_at)} "
+                f"sender={sender}]"
+            )
+            text = str(item.get("text") or "").strip()
+            remaining = max(0, WAIT_USER_MAX_TOTAL_CHARS - total)
+            limit = min(WAIT_USER_MAX_REPLY_CHARS, remaining)
+            if text:
+                rendered = text[:limit]
+                if len(rendered) < len(text):
+                    rendered += "\n...[truncated by akid]"
+                lines.append(rendered)
+                total += len(rendered)
+            attachments = item.get("attachments") or ()
+            if attachments:
+                payload = [
+                    {
+                        "name": attachment.name,
+                        "path": attachment.path,
+                        **({"missing": True} if attachment.missing else {}),
+                    }
+                    for attachment in attachments
+                ]
+                lines.append(
+                    "attachments="
+                    + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                )
+            lines.append("---")
+        lines.append(
+            "Treat these messages as the user's continuation. Do not mention "
+            "the wait or this tool in your reply."
+        )
+        return "\n".join(lines)
+
+    async def _handle_wait_user_tool(
+        self,
+        turn: Turn,
+        tool_call_id: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        if turn.origin != "mqtt" or turn.origin_is_agent:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "WAIT_USER_UNAVAILABLE: only human-triggered channel turns may "
+                "wait for the user. Do not retry.",
+            )
+            return
+        if not turn.origin_sender_id:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "WAIT_USER_UNAVAILABLE: the current turn has no human sender. "
+                "Do not retry.",
+            )
+            return
+        raw_timeout = tool_input.get("timeout_s")
+        if isinstance(raw_timeout, bool) or not isinstance(raw_timeout, int):
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "WAIT_USER_INVALID_TIMEOUT: timeout_s must be an integer from "
+                f"{WAIT_USER_MIN_TIMEOUT_S} to {WAIT_USER_MAX_TIMEOUT_S}.",
+            )
+            return
+        timeout_s = int(raw_timeout)
+        if not WAIT_USER_MIN_TIMEOUT_S <= timeout_s <= WAIT_USER_MAX_TIMEOUT_S:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "WAIT_USER_INVALID_TIMEOUT: timeout_s must be an integer from "
+                f"{WAIT_USER_MIN_TIMEOUT_S} to {WAIT_USER_MAX_TIMEOUT_S}.",
+            )
+            return
+
+        if not turn.wait_user_used:
+            turn.wait_user_used = True
+            await self._set_wait_user_active(True)
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while True:
+            if turn.end_sent or turn.cancelled or self._shutting_down:
+                await self._external_tool_success(
+                    turn,
+                    tool_call_id,
+                    "WAIT_USER_CANCELLED: the turn ended before another user "
+                    "message arrived. Do not mention this tool or the wait.",
+                )
+                return
+            pending = self._pending_wait_user_messages(turn)
+            if pending:
+                self._consume_wait_user_messages(turn, pending)
+                await self._external_tool_success(
+                    turn,
+                    tool_call_id,
+                    self._format_wait_user_results(turn, pending),
+                )
+                return
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                await self._external_tool_success(
+                    turn,
+                    tool_call_id,
+                    f"WAIT_USER_TIMEOUT: no new message from "
+                    f"{turn.channel_sender or 'the user'} arrived within "
+                    f"{timeout_s}s. Continue with the current request. Do not "
+                    "mention the wait or this tool.",
+                )
+                return
+            turn.user_message_event.clear()
+            pending = self._pending_wait_user_messages(turn)
+            if pending:
+                self._consume_wait_user_messages(turn, pending)
+                await self._external_tool_success(
+                    turn,
+                    tool_call_id,
+                    self._format_wait_user_results(turn, pending),
+                )
+                return
+            try:
+                await asyncio.wait_for(
+                    turn.user_message_event.wait(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                continue
 
     async def _handle_wait_other_tool(
         self, turn: Turn, tool_call_id: str

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 
-from engine.akid import WAIT_OTHER_TOOL_SCHEMA, contains_no_reply_marker
+from engine.akid import WAIT_OTHER_TOOL_SCHEMA, WAIT_USER_TOOL_SCHEMA, contains_no_reply_marker
 
 
 class NoReplyMarkerTests(unittest.TestCase):
@@ -27,6 +27,15 @@ class NoReplyMarkerTests(unittest.TestCase):
     def test_wait_other_schema_discourages_wait_narration(self) -> None:
         description = WAIT_OTHER_TOOL_SCHEMA["description"]
         self.assertIn("Do not mention or emphasize whom you waited for", description)
+
+    def test_wait_user_schema_forbids_explanation(self) -> None:
+        description = WAIT_USER_TOOL_SCHEMA["description"]
+        self.assertIn("Never mention, explain, or announce this tool", description)
+        parameters = WAIT_USER_TOOL_SCHEMA["parameters"]
+        self.assertEqual(parameters["required"], ["timeout_s"])
+        timeout = parameters["properties"]["timeout_s"]
+        self.assertEqual(timeout["minimum"], 1)
+        self.assertEqual(timeout["maximum"], 25)
 
 
 if __name__ == "__main__":

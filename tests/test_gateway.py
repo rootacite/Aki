@@ -21,6 +21,7 @@ from engine.akid import (
     GatewayConfig,
     GatewayServer,
     Turn,
+    WAIT_USER_TOOL,
     _b64url,
     _format_channel_message_time,
     _normalize_mcp_result,
@@ -28,7 +29,7 @@ from engine.akid import (
 )
 from engine.aki_config import ImageGeneration
 from engine.letta_process import LettaProcess
-from engine.execution_policy import WAIT_OTHER_TOOL
+from engine.execution_policy import WAIT_OTHER_TOOL, WAIT_USER_TOOL as POLICY_WAIT_USER_TOOL
 from engine.live_context import (
     ChannelImageAttachment,
     WindowInfo,
@@ -1969,6 +1970,283 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         server._queue_unhandled_busy_messages(turn)
         self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_wait_user_is_registered_with_channel_and_hidden(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        names = {str(tool.get("name") or "") for tool in server._external_tools()}
+        self.assertIn(WAIT_USER_TOOL, names)
+        self.assertEqual(WAIT_USER_TOOL, POLICY_WAIT_USER_TOOL)
+        turn = Turn(
+            turn_id="hidden-wait-user",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            state="running",
+        )
+        server.active = turn
+        await server._emit_tool_call_once(turn, "wait-user-call", WAIT_USER_TOOL, {})
+        await server._emit_tool_result_once(
+            turn, "wait-user-call", {"status": "success", "tool_return": "hidden"}
+        )
+        await asyncio.sleep(0.05)
+        self.assertEqual(fake_channel.events, [])
+        self.assertEqual(turn.tool_names["wait-user-call"], WAIT_USER_TOOL)
+        server.active = None
+
+    async def test_wait_user_is_not_registered_without_channel(self) -> None:
+        server = await self.start_server()
+        names = {str(tool.get("name") or "") for tool in server._external_tools()}
+        self.assertNotIn(WAIT_USER_TOOL, names)
+
+    async def test_wait_user_returns_same_sender_and_does_not_requeue(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        sender_id = server._member_key({}, "Master", "master")
+        turn = Turn(
+            turn_id="wait-user-same-sender",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id=sender_id,
+            channel_sender="Master",
+            state="running",
+        )
+        server.active = turn
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            task = asyncio.create_task(
+                server._handle_wait_user_tool(turn, "wait-user", {"timeout_s": 1})
+            )
+            await asyncio.sleep(0.02)
+            await server._on_channel_text("Master", "master", "补充一句", {})
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("WAIT_USER_RESULT", captured[0])
+        self.assertIn("补充一句", captured[0])
+        self.assertTrue(turn.waited_user_seqs)
+        turn.tool_result_events += 1
+        server._queue_unhandled_busy_messages(turn)
+        self.assertEqual(server.queue, [])
+        server.active = None
+
+    async def test_wait_user_ignores_other_senders_and_agent_messages(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        sender_id = server._member_key({}, "Master", "master")
+        turn = Turn(
+            turn_id="wait-user-filter",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id=sender_id,
+            channel_sender="Master",
+            state="running",
+        )
+        server.active = turn
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            task = asyncio.create_task(
+                server._handle_wait_user_tool(turn, "wait-user", {"timeout_s": 1})
+            )
+            await asyncio.sleep(0.02)
+            await server._on_channel_text("Other", "other", "别人的话", {})
+            await server._on_channel_text(
+                "Fuyu",
+                "fuyu",
+                "智能体的话",
+                {"schema": "akid.v1", "kind": "turn", "phase": "final"},
+            )
+            await asyncio.sleep(0.05)
+            self.assertFalse(task.done())
+            await server._on_channel_text("Master", "master", "同一用户", {})
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertEqual(len(captured), 1)
+        self.assertIn("同一用户", captured[0])
+        self.assertNotIn("别人的话", captured[0])
+        self.assertNotIn("智能体的话", captured[0])
+        server.active = None
+
+    async def test_wait_user_timeout_and_repeat_call(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        sender_id = server._member_key({}, "Master", "master")
+        turn = Turn(
+            turn_id="wait-user-repeat",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id=sender_id,
+            channel_sender="Master",
+            state="running",
+        )
+        server.active = turn
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            await asyncio.wait_for(
+                server._handle_wait_user_tool(turn, "wait-user-timeout", {"timeout_s": 1}),
+                timeout=2.0,
+            )
+            self.assertIn("WAIT_USER_TIMEOUT", captured[-1])
+            task = asyncio.create_task(
+                server._handle_wait_user_tool(turn, "wait-user-again", {"timeout_s": 1})
+            )
+            await asyncio.sleep(0.02)
+            await server._on_channel_text("Master", "master", "第二次补充", {})
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertIn("第二次补充", captured[-1])
+        server.active = None
+
+    async def test_wait_user_rejects_agent_turn_and_bad_timeout(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        turn = Turn(
+            turn_id="wait-user-agent-turn",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_is_agent=True,
+            origin_sender_id="fuyu",
+            channel_sender="Fuyu",
+            state="running",
+        )
+        server.active = turn
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            await server._handle_wait_user_tool(turn, "wait-agent", {"timeout_s": 1})
+            self.assertIn("WAIT_USER_UNAVAILABLE", captured[-1])
+            human = Turn(
+                turn_id="wait-user-bad-timeout",
+                conn=server.channel_conn,
+                message="working",
+                include_reasoning=False,
+                client_message_id=None,
+                origin="mqtt",
+                origin_sender_id="master",
+                state="running",
+            )
+            await server._handle_wait_user_tool(human, "wait-bad", {"timeout_s": 0})
+            self.assertIn("WAIT_USER_INVALID_TIMEOUT", captured[-1])
+            await server._handle_wait_user_tool(human, "wait-bad", {"timeout_s": 26})
+            self.assertIn("WAIT_USER_INVALID_TIMEOUT", captured[-1])
+        server.active = None
+
+    async def test_wait_user_broadcasts_and_clears_waiting_state(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        await server._set_wait_user_active(True)
+        self.assertTrue(server._wait_user_active)
+        self.assertIn(server._channel_self_key(), server._channel_waiting_user_ids())
+        self.assertIn("true", server._channel_live_metadata()["waitingUser"])
+        waiting_events = [
+            event for event in fake_channel.events if event.get("kind") == "wait_user"
+        ]
+        self.assertEqual(waiting_events[-1]["waitingUser"], "true")
+
+        await server._set_wait_user_active(False)
+        self.assertFalse(server._wait_user_active)
+        self.assertNotIn(server._channel_self_key(), server._channel_waiting_user_ids())
+        waiting_events = [
+            event for event in fake_channel.events if event.get("kind") == "wait_user"
+        ]
+        self.assertEqual(waiting_events[-1]["waitingUser"], "false")
+
+    async def test_wait_user_state_event_updates_remote_waiter(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        fuyu_id = server._member_key({}, "Fuyu", "fuyu")
+        history_before = len(server._channel_history)
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "waiting for user",
+            {
+                "schema": "akid.v1",
+                "kind": "wait_user",
+                "protocolVersion": str(1),
+                "waitingUser": "true",
+            },
+        )
+        self.assertIn(fuyu_id, server._channel_waiting_user_ids())
+        self.assertEqual(len(server._channel_history), history_before)
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "stopped waiting for user",
+            {
+                "schema": "akid.v1",
+                "kind": "wait_user",
+                "protocolVersion": str(1),
+                "waitingUser": "false",
+            },
+        )
+        self.assertNotIn(fuyu_id, server._channel_waiting_user_ids())
+
+    async def test_user_message_without_mention_only_wakes_waiting_members(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        fuyu_id = server._member_key({}, "Fuyu", "fuyu")
+        server._channel_waiting_user[fuyu_id] = time.monotonic()
+        with mock.patch.object(server, "_enqueue_channel_turn") as enqueue:
+            await server._on_channel_text("Master", "master", "普通补充", {})
+            enqueue.assert_not_called()
+            await server._on_channel_text("Master", "master", "@Aki 点名补充", {})
+            enqueue.assert_called_once()
+
+    async def test_working_member_is_not_extra_woken_by_wait_user_routing(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        fuyu_id = server._member_key({}, "Fuyu", "fuyu")
+        server._channel_waiting_user[fuyu_id] = time.monotonic()
+        turn = Turn(
+            turn_id="working-before-waiter-rule",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            state="running",
+        )
+        server.active = turn
+        with mock.patch.object(server, "_enqueue_channel_turn") as enqueue:
+            await server._on_channel_text("Master", "master", "继续补充", {})
+            enqueue.assert_not_called()
+        self.assertTrue(any(item.get("text") == "继续补充" for item in turn.busy_messages))
         server.active = None
 
     async def test_empty_turn_end_events_update_wait_completion_state(self) -> None:

@@ -551,6 +551,7 @@ class HaruLettaIntegrationTests(unittest.TestCase):
                     [
                         "acquire_execution_lock",
                         "tokifactor_send_image",
+                        "wait_user",
                         "wait_other",
                     ],
                 )

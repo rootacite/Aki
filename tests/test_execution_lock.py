@@ -36,6 +36,7 @@ class ExecutionPolicyTests(unittest.TestCase):
             "ViewImage",
             "desktop_take_screenshot",
             "camera_take_photo",
+            "wait_user",
             "mcp__tavily__tavily_search",
         ):
             self.assertTrue(is_read_only_tool(name), name)

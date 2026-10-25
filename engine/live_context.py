@@ -589,6 +589,7 @@ def render_channel_policy(
     *,
     user_name: str = "Master",
     emoji_entries: Iterable[EmojiEntry] = (),
+    wait_user_available: bool = True,
 ) -> str:
     name = _text(user_name, single_line=True)
     lines = [
@@ -622,6 +623,14 @@ def render_channel_policy(
         "若希望在一条频道消息中内嵌图片，不要调用 tokifactor_send_image，直接在最终正文写 "
         "`#[/absolute/path/to/image]`；该指令会变成图片附件并从正文移除。</image-rules>",
     ]
+    if wait_user_available:
+        lines.append(
+            "<wait-user>隐藏工具 `wait_user(timeout_s)` 只用于当前真人用户可能还没说完、可能马上再发消息时。"
+            "它只等待触发本 turn 的同一位真人继续发言，timeout_s 必须是 1 到 25 的整数；"
+            "收到新消息后立即返回，若你仍认为对方没说完可以再次调用。"
+            "不要向用户解释、提及或复述这个工具、等待过程或它的结果。"
+            "由智能体触发的 turn 禁止调用。</wait-user>"
+        )
     entries = list(emoji_entries)
     if entries:
         lines.extend(
@@ -733,6 +742,17 @@ def render_channel_turn(
             f"{_text(user_name, single_line=True)}未指定非只读操作的执行者；"
             f"仅由 responder 负责引导{_text(user_name, single_line=True)}点名，其他成员"
             "不得执行非只读操作。</execution-ownership>"
+        )
+    if from_agent:
+        lines.append(
+            "<wait-user>本轮由智能体触发，禁止调用 `wait_user`。</wait-user>"
+        )
+    else:
+        lines.append(
+            f"<wait-user>如果{_text(user_name, single_line=True)}这句话看起来可能还没说完、"
+            "可能马上继续发消息，可调用 `wait_user` 并设置 1 到 25 秒的超时。"
+            "它只等待同一位真人用户的下一条消息，返回后仍可再次调用。"
+            "不要向用户解释、提及或复述这个工具、等待过程或它的结果。</wait-user>"
         )
     if wait_labels and not solo:
         lines.append(

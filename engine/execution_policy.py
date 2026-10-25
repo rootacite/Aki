@@ -10,6 +10,7 @@ from engine.tool_ownership import EXCLUSIVE_TOOL_NAMES, is_exclusive_tool
 
 EXECUTION_LOCK_TAG = "execution-lock"
 WAIT_OTHER_TOOL = "wait_other"
+WAIT_USER_TOOL = "wait_user"
 
 READ_ONLY_TOOLS = frozenset(
     {
@@ -28,6 +29,7 @@ READ_ONLY_TOOLS = frozenset(
         "desktop_take_screenshot",
         "camera_take_photo",
         WAIT_OTHER_TOOL,
+        WAIT_USER_TOOL,
         "aki_schedule_list",
         "aki_ledger_list",
     }

@@ -147,6 +147,7 @@ class TokifactorWireTests(unittest.TestCase):
             "sandboxReady": "true",
             "queueDepth": "2",
             "activeTurn": "true",
+            "waitingUser": "true",
             "pendingApprovals": "1",
             "uptimeS": "60",
             "memoryTokens": "42",

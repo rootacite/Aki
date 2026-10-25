@@ -181,6 +181,12 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn(
             "只有Master的明确指名才算被指名；被非Master指名不算被指名", policy
         )
+        self.assertIn("wait_user(timeout_s)", policy)
+        self.assertIn("不要向用户解释", policy)
+        self.assertNotIn(
+            "wait_user(timeout_s)",
+            render_channel_policy(user_name="Master", wait_user_available=False),
+        )
 
         self_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@秋 你好"
@@ -198,6 +204,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertNotIn("没有提到你", plain_text)
         self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
+        self.assertIn("可调用 `wait_user`", plain_text)
 
         agent_text = render_channel_turn(
             self_member=self_member,
@@ -207,6 +214,7 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertIn("被非Master指名不算被指名", agent_text)
         self.assertIn("不要试图获取执行锁", agent_text)
+        self.assertIn("禁止调用 `wait_user`", agent_text)
 
     def test_policy_and_turn_are_system_prompt_blocks(self) -> None:
         members = self.members()

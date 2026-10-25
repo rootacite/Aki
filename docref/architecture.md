@@ -86,11 +86,12 @@ memberId 字典序最小的在线智能体，由它请用户用有效 `@成员�
 ### Haru 的工具收窄
 
 Haru 的 profile 有显式 `[tools]` 段。akid 启动 Letta 时追加
-`--toolset letta --tools Read,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other`
+`--toolset letta --tools Read,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,wait_user`
 和 `--disallowedTools Bash,exec_command,write_stdin,Agent,Task,Workflow,Monitor,WatchPR,Wake`，
 因此 shell 与子代理工具不会出现在模型 schema 中，而不只是调用时被拒绝。akid 的外部工具
 注册也按同一 allowlist 过滤，Haru 会注册 `acquire_execution_lock` 和
-`wait_other`（用于等待 Aki、Fuyu）、`desktop_take_screenshot`、`camera_take_photo` 和
+`wait_other`（用于等待 Aki、Fuyu）、`wait_user`（等待当前真人用户继续补充）、
+`desktop_take_screenshot`、`camera_take_photo` 和
 `tokifactor_send_image`，以及 MiniMax `generate_image`，不会注册任何 MCP 工具。文生图使用
 `[upstream.minimax]` 与 `[image]` 配置，固定请求 base64 回传，文件写入 `/tmp/aki/images`；
 生成与分享是两个步骤，Haru 先拿本地路径，再调用 `tokifactor_send_image` 发布到频道。
@@ -115,7 +116,7 @@ bubblewrap 仍作为底层写入边界。
 头部还会重复一条包含 `^` 排除与 `@<username>` 使用条件的简短提醒。
 
 `<channel-policy>` 保存静态频道规则；`<channel-turn>` 保存当前 turn 的 guidance、
-initiation budget、execution responder、新消息摘要和 `wait_other` 目标。两者都在 system
+initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。两者都在 system
 prompt 中；每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
 这条 `wake-reminder` 还会通过 `当前正在和你说话的是 ${{USERNAME}}` 模板写明当前说话者：
 用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。当前 turn 仍能看到
@@ -182,6 +183,17 @@ turn。其他智能体的消息无论是否跨过这个边界都不会补 turn�
 这些前序成员当前的 `turn_end`，把最终回复作为工具结果返回。工具事件不写入频道；目标
 空闲时最多等 3 秒启动宽限，目标显式离线或 30 秒心跳超时后立即结束并报告掉线成员。
 已开始工作的目标没有固定完成超时。该机制是提示词驱动，不强制模型必须调用。
+
+频道还会注册隐藏 external tool `wait_user(timeout_s)`。它只允许由真人消息触发的 turn 调用，
+只等待该 turn 触发者的下一条真人消息；`timeout_s` 必须是 1–25 的整数。新消息到达后立即
+返回正文、序号、时间和附件清单，已返回的消息不会在 turn 结束时重复补 turn；模型仍觉得对方
+没说完时可以在同一 turn 中再次调用。超时返回 `WAIT_USER_TIMEOUT`。智能体触发的 turn 调用
+会得到错误。该工具的 call/result 不写入频道，提示词要求模型不要解释、提及或复述等待行为。
+`wait_user` 期间 akid 会把 `waitingUser=true` 写入 presence/status，并在开始/结束时通过
+QoS 1 文本事件（`kind=wait_user`）即时广播；该事件不进入频道历史。其他成员据此维护等待名单。
+用户新消息没有 `@` 且频道存在等待者时，只为等待者发起/继续 turn；已经在 working 的成员仍可
+通过活跃 turn 收到补充，但不会额外唤醒既不在等待、也不在 working 的成员。有 `@` 时仍按点名
+路由。Tokifactor 用同一状态在成员条上显示蓝色等待边框。
 
 最终回复的 Agent-Agent 唤醒规则是：有 `@成员名` 时只唤醒被点名的成员；第一行单独的
 `@<username>` 强制只唤醒该 username、不唤醒任何其他 agent，仅用于只对该 username 说话、无需打扰其他人
