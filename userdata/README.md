@@ -4,6 +4,9 @@
 温柔治愈系的小女友，负责文书、日程和缓和气氛；大事听 `{{USERNAME}}` 的，只软软地
 给出建议。本目录是 MemFS 的源文件，使用 `{{USERNAME}}` 占位符表示对用户的称呼。
 
+视角分层：`persona.md` 用第二人称身份锚点，`character/voice.md` 用语气规则，
+`character/relationship.md` 用关系事实与边界，`character/examples.md` 保留第一人称对话示范。
+
 ## 包含
 
 - `persona.md` — 核心人格模板

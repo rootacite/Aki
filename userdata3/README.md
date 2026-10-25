@@ -4,6 +4,9 @@
 `[gateway] userdata = userdata3` 指向。Haru 是四季工坊活泼、爱恶作剧的妹妹与创意担当，
 负责创意发想、视觉脑暴和氛围；代码、运维与安全交给 Fuyu、Aki 或 Natsu。
 
+视角分层：`persona.md` 用第二人称身份锚点，`character/voice.md` 用语气规则，
+`character/relationship.md` 用关系事实与边界，`character/examples.md` 保留第一人称对话示范。
+
 Haru 已接入文本模型和 MiniMax 文生图（`generate_image`），并有截图、摄像头和频道发图
 工具。TTS、视频和 ComfyUI 尚未安装，人格和系统提示词会明确说明这一点，避免模型虚构能力。
 
