@@ -61,4 +61,24 @@ Window {
         id: bubbleStack
         anchors.fill: parent
     }
+
+    PresencePanel {
+        id: presencePanel
+        anchors.right: parent.right
+        anchors.rightMargin: 24
+        anchors.verticalCenter: parent.verticalCenter
+        presence: bubbleServer.presence
+        z: 1
+    }
+
+    Connections {
+        target: presencePanel
+        function onInputRegionDirty() { presenceRegionRefresh.restart() }
+    }
+
+    Timer {
+        id: presenceRegionRefresh
+        interval: 0
+        onTriggered: inputRegionController.refresh()
+    }
 }

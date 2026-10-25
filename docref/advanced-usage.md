@@ -245,6 +245,13 @@ Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，�
 设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
 `~/.aki/aki.conf` 的 `[schedule]` 和 `[presence]` 段。
 
+aki-layer 右侧垂直中部会显示一张用户状态卡，数据直接来自同一 presence monitor：当前被判定为
+活跃还是非活跃、连续活跃了多长时间、连续多久没有键盘/鼠标输入，以及空闲是否已达到
+`return_idle_seconds`（默认 45 分钟）的离开阈值。akid 每轮采样后通过 `aki-layer.sock`
+推送快照，前端在采样间隔内本地走秒；快照过期后会显示“状态已过期”，避免把旧状态当成当前
+状态。卡片 7 秒没有指针悬停时会自动向右收起，只留下显示状态和无输入计时的窄边条；悬停或
+点击边条即可重新展开。
+
 执行锁规则只存在于基座 prompt，不再生成 `<execution-lock>` 动态块。动态块按标签原地
 更新；即使 transcript 在 turn 之间单独刷新，也不会跑到 live context 后面。
 

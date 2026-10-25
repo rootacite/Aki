@@ -372,7 +372,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 ### 13.1 透明桌面画布层
 
 - `aki-layer/` 是 Qt Quick + LayerShellQt 的透明全屏画布，使用 Layer shell `overlay`
-  层：位于普通应用窗口之上的最高层。表面默认为全透明，只在右上角显示通知气泡。
+  层：位于普通应用窗口之上的最高层。表面默认为全透明，在右上角显示通知气泡，并在右侧
+  垂直中部显示用户活跃状态卡。
 - Layer shell 的透明 surface 默认仍会接收整个输出的输入；`aki-layer` 用
   `QWindow::setMask()`（QtWayland 映射为 `wl_surface.set_input_region`）把输入区域限制
   在各气泡矩形内，气泡之外点击会透传给桌面图标和下层窗口。
@@ -392,13 +393,19 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   Natsu 红色网格/几何。
 - `aki-layer` 在 `$XDG_RUNTIME_DIR/aki-layer.sock` 提供本地控制通道：每行文本生成一个
   气泡（纯文本默认 Aki，或使用 `{"character":"Fuyu","text":"..."}`），返回
-  `queued <id>`，气泡结束后广播 `dismissed <id>`。
+  `queued <id>`，气泡结束后广播 `dismissed <id>`。`{"kind":"presence","presence":...}`
+  更新右侧状态卡，返回 `ok presence`，不会生成气泡。
 - akid 后端自动把“最终消息”写入该通道，不提供模型工具：本地 turn 完成后推送 Aki 气泡；
   频道 turn 的最终回复在成功发布后推送；其他成员的 `akid.v1` 最终消息按发送者映射到
   Aki/Fuyu/Haru/Natsu 主题。最终消息先按 tokifactor 的 `splitAgentParagraphs` 规则拆分：
   空行分段、连续空行合并、围栏代码块内部不拆、代码块前后文本各自成段；每个自然段生成一个
   气泡，再按 80 字符折叠空白预览。进度、工具、审批、控制消息以及重放的积压消息不通知。
   `aki.health` / `aki.status` 的 `layer.notifier` 暴露发送计数和错误。
+- 用户活跃状态卡由 `qml/PresencePanel.qml` 实现：显示 akid 判定的活跃/非活跃、连续活跃
+  时长、连续未输入时长和是否达到离开阈值。akid 每次 presence 采样后推送快照；前端在两次
+  采样之间本地计时，超过采样周期或 45 秒未更新时把状态标记为已过期。卡片 7 秒无悬停后向右
+  收起成窄边条，边条仍显示状态与未输入计时；悬停或点击展开。收起时只保留边条的输入区域，
+  展开时使用卡片的最终矩形，不阻断其余桌面点击。
 - `AKI_LAYER_NOTIFY_ENABLED=0` 可关闭后端推送；`AKI_LAYER_PREVIEW_CHARS` 控制预览长度；
   `AKI_LAYER_SOCKET` 同时覆盖画布控制 socket 和后端通知目标。
 

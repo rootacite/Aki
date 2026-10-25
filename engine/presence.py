@@ -539,6 +539,7 @@ class PresenceMonitor:
         self._state["return_suppressed"] = True
         self.last_error: str | None = None
         self.last_sample: ActivitySample | None = None
+        self.last_sample_valid: bool | None = None
         self.last_triggers: list[PresenceTrigger] = []
 
     @property
@@ -615,6 +616,7 @@ class PresenceMonitor:
     ) -> list[PresenceTrigger]:
         """Update state for one sample and return newly due trigger facts."""
         self.last_sample = sample
+        self.last_sample_valid = sample.valid
         self.last_triggers = []
         if not sample.valid:
             self.last_error = sample.error or "invalid activity sample"
@@ -747,6 +749,7 @@ class PresenceMonitor:
     async def run(
         self,
         on_triggers: Callable[[list[PresenceTrigger]], Awaitable[None]],
+        on_sample: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         while not self._stop.is_set():
             try:
@@ -756,8 +759,16 @@ class PresenceMonitor:
                 raise
             except Exception as exc:
                 self.last_error = f"presence sample failed: {exc}"
+                self.last_sample_valid = False
                 self.logger.exception("presence sample failed")
                 triggers = []
+            if on_sample is not None:
+                try:
+                    await on_sample()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self.logger.exception("presence status delivery failed")
             if triggers:
                 try:
                     await on_triggers(triggers)
@@ -773,12 +784,13 @@ class PresenceMonitor:
     def start(
         self,
         on_triggers: Callable[[list[PresenceTrigger]], Awaitable[None]],
+        on_sample: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         if self._task is not None:
             return
         self._stop.clear()
         self._task = asyncio.create_task(
-            self.run(on_triggers), name="akid-presence"
+            self.run(on_triggers, on_sample), name="akid-presence"
         )
 
     async def stop(self) -> None:
@@ -821,6 +833,62 @@ class PresenceMonitor:
             with contextlib.suppress(Exception):
                 result["provider"] = provider_status()
         return result
+
+    def layer_status(self, *, now: float | None = None) -> dict[str, Any]:
+        """Return the compact presence facts shown by the aki-layer overlay."""
+        clock = time.time() if now is None else float(now)
+        state = self._state
+        sample = self.last_sample
+        last_input_at = self._last_input_at()
+        raw_active = state.get("last_active")
+        active = raw_active if isinstance(raw_active, bool) else None
+        active_seconds = (
+            int(float(state.get("active_seconds") or 0)) if active else 0
+        )
+        sampled_at = state.get("last_sample_at")
+        sampled_at_ms = (
+            int(float(sampled_at) * 1000) if sampled_at is not None else None
+        )
+        idle_started = state.get("last_idle_started_at")
+        idle_seconds = 0
+        if active is False and idle_started is not None:
+            idle_seconds = max(0, int(clock - float(idle_started)))
+        away = bool(
+            active is False and idle_seconds >= self.return_idle_seconds
+        )
+        last_input_at_ms = (
+            int(last_input_at * 1000) if last_input_at is not None else None
+        )
+        no_input_seconds = (
+            max(0, int(clock - last_input_at))
+            if last_input_at is not None
+            else None
+        )
+        return {
+            "active": active,
+            "activeSeconds": active_seconds,
+            "activeSinceMs": (
+                int((clock - active_seconds) * 1000) if active else None
+            ),
+            "idleSeconds": idle_seconds,
+            "away": away,
+            "returnIdleSeconds": self.return_idle_seconds,
+            "pollSeconds": self.poll_seconds,
+            "lastInputAtMs": last_input_at_ms,
+            "noInputSeconds": no_input_seconds,
+            "sampledAtMs": sampled_at_ms,
+            "valid": self.last_sample_valid,
+        }
+
+    def _last_input_at(self) -> float | None:
+        candidates = (self.provider, getattr(self.provider, "input_probe", None))
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            value = getattr(candidate, "last_activity_at", None)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                return float(value)
+        return None
 
 
 def _date_key(value: str) -> Any:

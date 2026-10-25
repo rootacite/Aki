@@ -2058,6 +2058,12 @@ class GatewayServer:
             return
         notifier.notify(character, text)
 
+    async def _publish_layer_presence(self) -> None:
+        notifier = self._layer_notifier
+        if notifier is None:
+            return
+        notifier.notify_presence(self.presence_monitor.layer_status())
+
     def _layer_own_character(self) -> str:
         return character_for_profile(self.config.profile, self.config.channel_name)
 
@@ -3905,7 +3911,9 @@ class GatewayServer:
             )
             LOGGER.info("schedule scheduler started path=%s", self.schedule_state)
         if self.config.presence_enabled:
-            self.presence_monitor.start(self._on_presence_triggers)
+            self.presence_monitor.start(
+                self._on_presence_triggers, self._publish_layer_presence
+            )
             LOGGER.info("presence monitor started path=%s", self.presence_state)
 
     async def _stop_proactive_services(self) -> None:

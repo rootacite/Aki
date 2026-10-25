@@ -1,5 +1,6 @@
 #include "bubblecontrolserver.h"
 
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -48,6 +49,11 @@ QString BubbleControlServer::socketPath() const
     return m_socketPath;
 }
 
+QVariantMap BubbleControlServer::presence() const
+{
+    return m_presence;
+}
+
 void BubbleControlServer::notifyBubbleDismissed(const QString &bubbleId)
 {
     QByteArray line = QByteArrayLiteral("dismissed");
@@ -89,6 +95,19 @@ void BubbleControlServer::readClient(QLocalSocket *client)
             const QJsonDocument document = QJsonDocument::fromJson(line, &parseError);
             if (parseError.error == QJsonParseError::NoError && document.isObject()) {
                 const QJsonObject object = document.object();
+                if (object.value(QStringLiteral("kind")).toString()
+                    == QStringLiteral("presence")) {
+                    m_presence = object.value(QStringLiteral("presence"))
+                                     .toObject()
+                                     .toVariantMap();
+                    m_presence.insert(
+                        QStringLiteral("receivedAtMs"),
+                        QDateTime::currentMSecsSinceEpoch());
+                    emit presenceChanged();
+                    client->write(QByteArrayLiteral("ok presence\n"));
+                    client->flush();
+                    continue;
+                }
                 text = object.value(QStringLiteral("text")).toString().trimmed();
                 character = object.value(QStringLiteral("character")).toString().trimmed();
             }

@@ -141,3 +141,42 @@ class LayerNotifierTests(unittest.IsolatedAsyncioTestCase):
                 await notifier.stop()
                 server.close()
                 await server.wait_closed()
+
+    async def test_sends_presence_snapshot_to_control_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            socket_path = Path(tempdir) / "aki-layer.sock"
+            received: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+            async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+                line = await reader.readline()
+                received.put_nowait(json.loads(line))
+                writer.write(b"ok presence\n")
+                await writer.drain()
+                writer.close()
+                await writer.wait_closed()
+
+            server = await asyncio.start_unix_server(handle, path=str(socket_path))
+            notifier = LayerNotifier(socket_path, warn_interval=3600)
+            notifier.start()
+            try:
+                self.assertTrue(
+                    notifier.notify_presence(
+                        {
+                            "active": True,
+                            "activeSeconds": 42,
+                            "away": False,
+                            "valid": True,
+                        }
+                    )
+                )
+                payload = await asyncio.wait_for(received.get(), 2.0)
+                self.assertEqual(payload["kind"], "presence")
+                presence = payload["presence"]
+                self.assertTrue(presence["active"])
+                self.assertEqual(presence["activeSeconds"], 42)
+                self.assertFalse(presence["away"])
+                await wait_for(lambda: notifier.status()["sent"] == 1)
+            finally:
+                await notifier.stop()
+                server.close()
+                await server.wait_closed()

@@ -25,6 +25,7 @@ qt_add_resources(aki-layer aki-layer-qml
     PREFIX "/"
     FILES
         qml/Main.qml
+        qml/PresencePanel.qml
         qml/BubbleStack.qml
         qml/NotificationBubble.qml
         qml/AutumnLeaves.qml

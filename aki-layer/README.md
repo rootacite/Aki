@@ -3,7 +3,8 @@
 Transparent full-screen canvas for Aki, implemented with Qt Quick and
 LayerShellQt. It uses the layer-shell `overlay` layer, the highest layer
 available, so it stays above normal application windows. The surface itself is
-fully transparent; only notification bubbles in the top-right corner are visible.
+fully transparent; notification bubbles appear in the top-right corner, and a
+compact akid presence card sits at the right-center edge.
 
 The full-screen surface is not allowed to swallow desktop input. `aki-layer`
 uses `QWindow::setMask()` (QtWayland maps this to
@@ -21,6 +22,13 @@ The frontend also includes notification bubbles in the top-right corner:
   button, and the drawer keeps at most 50 entries.
 - Every bubble shows its arrival time (`HH:mm`, or `MM-DD HH:mm` for older
   missed messages).
+- The right-center presence card is refreshed after every akid presence sample.
+  It shows active/inactive, continuous active time, continuous no-input time, and
+  the away decision. The elapsed times tick locally between samples; if updates
+  stop, the card visibly marks the snapshot as expired instead of presenting it
+  as current. After seven seconds without pointer hover the card slides out to
+  the right, leaving a narrow tab with the status and no-input counter. Hovering
+  or clicking the tab expands it again.
 - Multiple bubbles stack downward.
 - Hovering any bubble pauses every bubble's countdown and raises each remaining
   lifetime to at least 5 seconds.
@@ -50,6 +58,15 @@ plain line defaults to Aki; use JSON for another character:
 ```json
 {"character": "Fuyu", "text": "代码我看过了。"}
 ```
+
+Presence snapshots use a separate JSON envelope:
+
+```json
+{"kind": "presence", "presence": {"active": true, "activeSeconds": 812, "activeSinceMs": 1790000000000, "lastInputAtMs": 1790000000000, "noInputSeconds": 14, "away": false, "returnIdleSeconds": 2700, "pollSeconds": 15, "valid": true}}
+```
+
+The server acknowledges these updates with `ok presence` and updates the QML
+presence card without creating a bubble.
 
 The server acknowledges each request with `queued <id>`. It writes
 `dismissed <id>` back to every connected client when a seen bubble finishes

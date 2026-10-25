@@ -130,7 +130,7 @@ class LayerNotifier:
         self.send_timeout = send_timeout
         self.warn_interval = warn_interval
         self.logger = logger or logging.getLogger("akid.layer")
-        self._queue: asyncio.Queue[dict[str, str]] = asyncio.Queue(maxsize=queue_max)
+        self._queue: asyncio.Queue[dict[str, object]] = asyncio.Queue(maxsize=queue_max)
         self._task: asyncio.Task[None] | None = None
         self._sent = 0
         self._failed = 0
@@ -150,14 +150,16 @@ class LayerNotifier:
             preview = preview_text(paragraph, self.preview_chars)
             if not preview:
                 continue
-            try:
-                self._queue.put_nowait({"character": character, "text": preview})
-            except asyncio.QueueFull:
-                self._dropped += 1
-                self._warn("aki-layer notify queue is full")
+            if not self._enqueue({"character": character, "text": preview}):
                 break
             queued = True
         return queued
+
+    def notify_presence(self, presence: Mapping[str, object]) -> bool:
+        """Publish one presence snapshot for the aki-layer status card."""
+        return self._enqueue(
+            {"kind": "presence", "presence": dict(presence)}
+        )
 
     async def stop(self) -> None:
         task = self._task
@@ -197,7 +199,16 @@ class LayerNotifier:
             finally:
                 self._queue.task_done()
 
-    async def _send(self, payload: Mapping[str, str]) -> None:
+    def _enqueue(self, payload: dict[str, object]) -> bool:
+        try:
+            self._queue.put_nowait(payload)
+        except asyncio.QueueFull:
+            self._dropped += 1
+            self._warn("aki-layer notify queue is full")
+            return False
+        return True
+
+    async def _send(self, payload: Mapping[str, object]) -> None:
         reader, writer = await asyncio.wait_for(
             asyncio.open_unix_connection(str(self.socket_path)),
             timeout=self.send_timeout,

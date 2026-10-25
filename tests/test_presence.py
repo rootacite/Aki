@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import tempfile
 import time
 import unittest
@@ -149,6 +150,36 @@ class PresenceTests(unittest.TestCase):
         after = self.monitor.state
         self.assertEqual(before["active_seconds"], after["active_seconds"])
         self.assertIn("logind unavailable", self.monitor.last_error or "")
+        self.assertFalse(self.monitor.layer_status(now=start + 60)["valid"])
+
+    def test_layer_status_reports_active_duration_and_away(self) -> None:
+        start = local_epoch(2026, 10, 24, 8, 0)
+        self.monitor.process_sample(active(start), now=start)
+        current, _ = self._advance_active(start, 120)
+        active_status = self.monitor.layer_status(now=current)
+        self.assertTrue(active_status["active"])
+        self.assertEqual(active_status["activeSeconds"], 120)
+        self.assertEqual(active_status["activeSinceMs"], int(start * 1000))
+        self.assertFalse(active_status["away"])
+        self.assertEqual(active_status["idleSeconds"], 0)
+
+        idle_at = current + 10
+        self.monitor.process_sample(idle(idle_at), now=idle_at)
+        idle_status = self.monitor.layer_status(now=idle_at + 600)
+        self.assertFalse(idle_status["active"])
+        self.assertEqual(idle_status["activeSeconds"], 0)
+        self.assertFalse(idle_status["away"])
+        self.assertEqual(idle_status["idleSeconds"], 600)
+
+        away_status = self.monitor.layer_status(now=idle_at + 2700)
+        self.assertTrue(away_status["away"])
+        self.assertEqual(away_status["returnIdleSeconds"], 2700)
+
+    def test_layer_status_reports_continuous_no_input_time(self) -> None:
+        self.monitor.provider = mock.Mock(last_activity_at=1000.0)
+        status = self.monitor.layer_status(now=1012.9)
+        self.assertEqual(status["lastInputAtMs"], 1_000_000)
+        self.assertEqual(status["noInputSeconds"], 12)
 
 
 class LogindProviderTests(unittest.IsolatedAsyncioTestCase):
@@ -258,6 +289,51 @@ class LogindProviderTests(unittest.IsolatedAsyncioTestCase):
             sample = await provider.sample()
         self.assertTrue(sample.valid)
         self.assertFalse(sample.active)
+
+
+class PresenceRunTests(unittest.IsolatedAsyncioTestCase):
+    async def test_run_publishes_a_snapshot_for_each_sample(self) -> None:
+        class SequenceProvider:
+            def __init__(self) -> None:
+                self.samples = [
+                    active(1000.0),
+                    ActivitySample(False, valid=True, sampled_at=1015.0),
+                ]
+
+            async def sample(self) -> ActivitySample:
+                if self.samples:
+                    return self.samples.pop(0)
+                await asyncio.Event().wait()
+                raise AssertionError("unreachable")
+
+            def close(self) -> None:
+                pass
+
+        with tempfile.TemporaryDirectory() as tempdir:
+            monitor = PresenceMonitor(
+                Path(tempdir) / "presence.json",
+                provider=SequenceProvider(),
+                poll_seconds=1,
+            )
+            snapshots: list[dict[str, object]] = []
+            published = asyncio.Event()
+
+            async def on_sample() -> None:
+                snapshots.append(monitor.layer_status())
+                if len(snapshots) >= 2:
+                    published.set()
+
+            async def on_triggers(triggers) -> None:
+                pass
+
+            monitor.start(on_triggers, on_sample)
+            try:
+                await asyncio.wait_for(published.wait(), timeout=2.0)
+            finally:
+                await monitor.stop()
+
+        self.assertTrue(snapshots[0]["active"])
+        self.assertFalse(snapshots[1]["active"])
 
 
 class FakeInputProbe:
