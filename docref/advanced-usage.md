@@ -30,7 +30,7 @@
 - **人格与 userdata。** 每个 profile 使用自己的公开人格模板，支持称呼占位符、MemFS
   渲染、备份和 git 提交，互不覆盖。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
-- **桌面实况上下文。** 每个 turn 在系统提示词中原地刷新唯一的 `<aki-live-context>` 块，
+- **桌面实况上下文。** 每个 turn 在系统提示词中原地刷新唯一的 `<live-context>` 块，
   包含当前时间、焦点窗口、CPU top 5、最近 20 条 zsh 命令和截图路径；不写入消息历史。
 
 ---
@@ -193,7 +193,7 @@ systemctl --user restart akid@aki.service
 systemctl --user restart akid-proxy@aki.service
 ```
 
-脚本会保留现有 core memory 和 `<aki-live-context>`，并先备份到
+脚本会保留现有 core memory 和 `<live-context>`，并先备份到
 `~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 ownership/identity/
 transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
 `{CORE_MEMORY}` 占位符必须保留。
@@ -204,17 +204,17 @@ wake routing → identity → channel turn → transcript → live context`：
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
    `prompts/haru-system.md`），包含身份、记忆机制、工具规则、执行锁规则和模式边界。
 2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
-3. `<aki-tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
+3. `<tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
    `@Owner` 转述规则，每个 turn 刷新。
-4. `<aki-channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
+4. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
    execution guidance、专属域规则和输出规则。
-5. `<aki-channel-wake-routing>`：`@用户`、`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
+5. `<channel-wake-routing>`：`@用户`、`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
    真实 system prompt，并随 profile username 刷新。
-6. `<aki-channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
-7. `<aki-channel-turn>`：当前频道 turn 的 `wake-reminder`、新消息 sender/seq/正文、guidance、
+6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
+7. `<channel-turn>`：当前频道 turn 的 `wake-reminder`、新消息 sender/seq/正文、guidance、
    initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
-8. `<aki-channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
-9. `<aki-live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
+8. `<channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
+9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
    始终最后追加。
 
 ### Aki 专属工具与触发器
@@ -229,7 +229,7 @@ Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，�
   直到下一条用户频道消息。不能作用于 Aki 自己，不取消正在执行的 turn。
 - `aki_ledger_add/delete/list`：独立于 Letta 的生活账本，保存在
   `~/.aki/ledger/aki.json`。整个文件硬上限 16384 UTF-8 字节，单条正文最多 1024 字节；
-  超出时逐条淘汰最旧记录。账本固定注入 Aki 的 `<aki-live-context>`，不参与预算裁剪。
+  超出时逐条淘汰最旧记录。账本固定注入 Aki 的 `<live-context>`，不参与预算裁剪。
 
 触发器只由 Aki profile 运行。活动状态优先使用 evdev 键盘/鼠标事件判断；`loginctl` 的
 `LockedHint` 仍然有效，而 `IdleHint`/`IdleSinceHint` 只在不具备输入设备读取权限时兜底。
@@ -241,7 +241,7 @@ Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，�
 设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
 `~/.aki/aki.conf` 的 `[schedule]` 和 `[presence]` 段。
 
-执行锁规则只存在于基座 prompt，不再生成 `<aki-execution-lock>` 动态块。动态块按标签原地
+执行锁规则只存在于基座 prompt，不再生成 `<execution-lock>` 动态块。动态块按标签原地
 更新；即使 transcript 在 turn 之间单独刷新，也不会跑到 live context 后面。
 
 默认 socket 为 `$XDG_RUNTIME_DIR/aki/akid.sock`。手动运行时：
@@ -524,15 +524,15 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 可选 `seq`、在线成员列表 `<channel-context>` 和原始 `message`。其他智能体触发的 turn
 还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
-的 `<aki-channel-turn>` 中。
+的 `<channel-turn>` 中。
 每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。用户不在智能体成员
 列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如 `@Master`）表示这条回复
 只对用户说、无需打扰其他成员，会强制只唤醒用户。本地 turn 不包含频道 transcript 或 turn
 块，但仍刷新并保留
-`<aki-channel-identity>`、`<aki-channel-wake-routing>` 与 `<aki-live-context>`。
+`<channel-identity>`、`<channel-wake-routing>` 与 `<live-context>`。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
-的 `<aki-channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
+的 `<channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
 - 第一行单独写 `@<username>`：强制只唤醒用户，不唤醒任何其他成员；仅在你只对用户说话、无需打扰其他人时使用。该标记发布前会被移除。
@@ -548,7 +548,7 @@ initiation budget、execution responder、新消息摘要和 `wait_other` 提示
 用户生效。
 
 这些选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
-`<aki-channel-transcript>` 使用。
+`<channel-transcript>` 使用。
 
 ### 有序讨论与 `wait_other`
 
@@ -563,6 +563,25 @@ initiation budget、execution responder、新消息摘要和 `wait_other` 提示
 等待完成后没有固定完成超时；只要对方 akid 在线，就会一直等到它结束当前 turn。
 `wait_other` 的 `tool_call` / `tool_result` 不写入频道，也不出现在 tokifactor 的工具卡片中。
 这个机制依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
+
+### 独处模式
+
+```bash
+akictl solo Aki              # 与 Aki 进入独处
+akictl solo status --json    # 查看当前 retained 状态
+akictl solo off              # 结束；读不到 retained 时可用 `akictl solo off Aki` 强制结束
+```
+
+独处使用由群 magic 与成员 `memberId` 稳定派生的独立 magic。目标成员只切换
+Tokifactor active magic，不更换 MQTT session、不退订 topic；独处期间的群密文会到达
+socket 但无法解密并被丢弃，退出后不会重放。其他成员仍留在群信道，群聊和主动触发继续运行。
+
+目标成员的独处历史写入 `<profile>.solo.jsonl`，与群聊 transcript 分开；群聊 transcript
+在独处期间以 `frozen="true"` 保留。独处提示由 `prompts/<profile>-solo.md` 提供，
+system prompt 额外包含 `<solo-mode>` 与 `<solo-transcript>`，后者使用
+`[solo] transcript_budget_tokens` 独立预算。独处回复不会唤醒其他成员，正文中的成员
+`@` 会被移除。其他成员如果在此期间 `@` 独处目标，不会产生目标 turn；发起方会收到
+一次临时系统提示 turn。
 
 > 执行锁和 control 主题的详细协议见 [架构与开发](architecture.md)。
 
@@ -650,7 +669,7 @@ Haru 通过 Letta external tool 注册 `generate_image`，后端调用 MiniMax
   `require_approval` 默认 `true`，审批事件里的 `tool_name` 是 `generate_image`、
   `channel` 是 `image`。
 - `generate_image` 是 Haru 的专属工具，和日程工具之于 Aki 一样由
-  `<aki-tool-ownership>` 管理。Aki、Fuyu 和 Natsu 的工具列表不会注册它；它们的 system
+  `<tool-ownership>` 管理。Aki、Fuyu 和 Natsu 的工具列表不会注册它；它们的 system
   prompt 会明确写有“图片创作/文生图归 Haru”，并提示用 `@Haru` 转交。
 - API key 不写进 prompt、日志或记忆：在 `~/.aki/haru.conf` 的 `[upstream.minimax] api_key`
   配置。MiniMax 的 HTTP 错误和 `base_resp.status_code != 0` 都会作为工具错误返回给 Agent。
@@ -720,7 +739,7 @@ akid 通过 Letta external tool 注册 `desktop_take_screenshot`：
 ### 桌面实况上下文
 
 akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写入 agent 系统提示词末尾的
-唯一 `<aki-live-context>` 块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
+唯一 `<live-context>` 块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
 请求只看到一份当前快照，历史中没有重复副本。
 
 块内包含：

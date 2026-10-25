@@ -159,7 +159,13 @@ class MqttClient:
             self._subacks.pop(packet_id, None)
 
     async def publish(
-        self, topic: str, payload: bytes, qos: int = 1, timeout: float = 10.0
+        self,
+        topic: str,
+        payload: bytes,
+        qos: int = 1,
+        timeout: float = 10.0,
+        *,
+        retain: bool = False,
     ) -> None:
         if not self.connected:
             raise MqttConnectionLost("not connected")
@@ -170,7 +176,7 @@ class MqttClient:
         if qos > 0:
             body += packet_id.to_bytes(2, "big")
         body += payload
-        header = (PUBLISH << 4) | ((qos & 0x03) << 1)
+        header = (PUBLISH << 4) | ((qos & 0x03) << 1) | (0x01 if retain else 0)
         if qos == 1:
             future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
             self._pubacks[packet_id] = future

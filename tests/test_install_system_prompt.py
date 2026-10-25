@@ -20,7 +20,7 @@ spec.loader.exec_module(installer)
 AGENT_ID = "agent-test"
 CONVERSATION_ID = "default"
 CORE = "<persona>\nAki\n</persona>\n"
-LIVE = '<aki-live-context refreshed_at="2026-01-01T00:00:00+08:00">\n<note>desktop</note>\n</aki-live-context>'
+LIVE = '<live-context refreshed_at="2026-01-01T00:00:00+08:00">\n<note>desktop</note>\n</live-context>'
 MEMORY = "<memory>\n# Memory\n\n- [character](character/MEMORY.md)\n</memory>"
 
 

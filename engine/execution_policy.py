@@ -8,7 +8,7 @@ from typing import Any
 
 from engine.tool_ownership import EXCLUSIVE_TOOL_NAMES, is_exclusive_tool
 
-EXECUTION_LOCK_TAG = "aki-execution-lock"
+EXECUTION_LOCK_TAG = "execution-lock"
 WAIT_OTHER_TOOL = "wait_other"
 
 READ_ONLY_TOOLS = frozenset(
@@ -70,7 +70,8 @@ LOCK_BUSY_ERROR = (
 )
 
 _EXECUTION_LOCK_RE = re.compile(
-    rf"\n*<{re.escape(EXECUTION_LOCK_TAG)}\b.*?</{re.escape(EXECUTION_LOCK_TAG)}>\n*",
+    rf"\n*<(?:{re.escape(EXECUTION_LOCK_TAG)}|aki-execution-lock)\b"
+    rf".*?</(?:{re.escape(EXECUTION_LOCK_TAG)}|aki-execution-lock)>\n*",
     re.S,
 )
 

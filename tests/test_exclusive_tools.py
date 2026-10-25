@@ -308,7 +308,7 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         await server._poll_schedules()
         self.assertEqual(len(server.queue), 1)
         self.assertEqual(server.queue[0].origin, "proactive")
-        self.assertIn("aki-trigger", server.queue[0].message)
+        self.assertIn("trigger", server.queue[0].message)
 
     async def test_old_schedule_is_missed_without_queue(self) -> None:
         server = make_server(self.root)
@@ -334,12 +334,12 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         )
         await server._refresh_tool_ownership()
         system = json.loads(path.read_text(encoding="utf-8"))["system"]
-        self.assertIn("<aki-tool-ownership", system)
+        self.assertIn("<tool-ownership", system)
         self.assertIn('profile="aki"', system)
         self.assertIn("aki_zero_reply_budget", system)
         server._clear_tool_ownership_block()
         cleared = json.loads(path.read_text(encoding="utf-8"))["system"]
-        self.assertNotIn("<aki-tool-ownership", cleared)
+        self.assertNotIn("<tool-ownership", cleared)
 
     async def test_operation_journal_tracks_lifecycle(self) -> None:
         server = make_server(self.root)

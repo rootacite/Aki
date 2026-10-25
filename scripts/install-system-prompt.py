@@ -22,7 +22,11 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT = ROOT / "prompts" / "aki-system.md"
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 CORE_PLACEHOLDER = "{CORE_MEMORY}"
-LIVE_CONTEXT_RE = re.compile(r"\n*<aki-live-context\b.*?</aki-live-context>\n*", re.S)
+LIVE_CONTEXT_RE = re.compile(
+    r"\n*<(?:live-context|aki-live-context)\b.*?"
+    r"</(?:live-context|aki-live-context)>\n*",
+    re.S,
+)
 MEMORY_BLOCK_RE = re.compile(r"<memory>.*?</memory>", re.S)
 
 
@@ -124,7 +128,7 @@ def load_prompt(path: Path) -> str:
     if prompt.count(CORE_PLACEHOLDER) != 1:
         raise RuntimeError(f"prompt must contain {CORE_PLACEHOLDER} exactly once")
     if LIVE_CONTEXT_RE.search(prompt):
-        raise RuntimeError("prompt must not contain an <aki-live-context> block")
+        raise RuntimeError("prompt must not contain a <live-context> block")
     return prompt
 
 

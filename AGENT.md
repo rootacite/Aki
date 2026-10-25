@@ -275,7 +275,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `tokifactor_send_image`。`generate_image` 与 `tokifactor_send_image` 都是非只读工具，
   但显式免执行锁，不需要先调用 `acquire_execution_lock`；生图审批仍由
   `[image] require_approval` 控制。`generate_image` 还是 Haru 的
-  exclusive tool：其他成员不会注册该工具，会在 `<aki-tool-ownership>` 中看到
+  exclusive tool：其他成员不会注册该工具，会在 `<tool-ownership>` 中看到
   “图片创作/文生图归 Haru”并以 `@Haru` 转交。MCP、TTS、视频和 ComfyUI 留到后续阶段。
 - 频道图片：Tokifactor 支持正文加最多 4 张图片，单图 8 MiB、单条总计 16 MiB。Aki 把
   入站图片存入各 profile 的 `~/.aki/channel-media/`，频道历史和 system prompt 只记录
@@ -283,6 +283,12 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片，不为此调用
   `tokifactor_send_image`。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
   user role 中新增的多模态 base64 和后续消息全部消失。
+- 独处模式：`akictl solo <成员>` 通过群 control 握手。目标成员切换到由群 magic 与
+  memberId 派生的 solo magic，但保持 MQTT session/client id 与订阅不变；其他成员继续
+  正常运行。目标成员的群 transcript 在独处期间冻结保留，独处 transcript 单独注入
+  `<solo-transcript>`，使用 `[solo] transcript_budget_tokens`。独处回复强制
+  `wake=user`、移除成员 `@`、禁用 `wait_other`。目标成员自己的独处历史写入
+  `<profile>.solo.jsonl`；退出后不广播、不混入群 transcript。
 - 服务：`akid@<profile>.service` 管网关，`akid-proxy@<profile>.service` 管独立
   loopback LLM proxy；akid 进程本身不监听模型端口。
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
@@ -290,14 +296,15 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
-- 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<aki-live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
-- System prompt 固定顺序：`base → core memory → <aki-tool-ownership> →
-  <aki-channel-policy> → <aki-channel-wake-routing> → <aki-channel-identity> →
-  <aki-channel-turn> → <aki-channel-transcript> → <aki-live-context>`。
+- 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
+- System prompt 固定顺序：`base → core memory → <tool-ownership> →
+  <channel-policy> → <channel-wake-routing> → <channel-identity> →
+  <channel-turn> → <channel-transcript> → <solo-mode> → <solo-transcript> →
+  <live-context>`。
   policy/wake routing 在启动时写入；turn 仅频道 turn 注入，local turn 会清除；transcript
   仅频道/proactive turn 注入；live context 始终最后。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
-  schema 过滤、Letta ownership mod、akid 运行时校验和 `<aki-tool-ownership>` 提示词共同
+  schema 过滤、Letta ownership mod、akid 运行时校验和 `<tool-ownership>` 提示词共同
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。
 - Aki 状态：`~/.aki/schedules/aki.json`（最多 256 条，10 分钟 missed 宽限）、
   `~/.aki/ledger/aki.json`（文件 ≤16384 UTF-8 字节，单条正文 ≤1024 字节，FIFO 淘汰）、

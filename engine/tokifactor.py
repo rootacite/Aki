@@ -109,6 +109,11 @@ STRUCTURED_FIELDS = (
     "pendingApprovals",
     "uptimeS",
     "memoryTokens",
+    "soloId",
+    "soloTargetId",
+    "soloTargetName",
+    "soloStartedAt",
+    "soloError",
 )
 
 

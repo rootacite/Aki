@@ -74,18 +74,18 @@ class ToolOwnershipTests(unittest.TestCase):
     def test_block_is_idempotent_and_precedes_channel_blocks(self) -> None:
         block = render_tool_ownership_prompt("fuyu")
         system = (
-            "BASE mentions <aki-tool-ownership> as policy.\n\n"
-            "<aki-channel-identity>identity</aki-channel-identity>\n\n"
-            "<aki-live-context>live</aki-live-context>\n"
+            "BASE mentions <tool-ownership> as policy.\n\n"
+            "<channel-identity>identity</channel-identity>\n\n"
+            "<live-context>live</live-context>\n"
         )
         once = apply_tool_ownership(system, block)
         twice = apply_tool_ownership(once, block)
         self.assertEqual(once, twice)
-        self.assertIn("BASE mentions <aki-tool-ownership> as policy.", twice)
-        self.assertLess(once.index("<aki-tool-ownership"), once.index("<aki-channel-identity"))
+        self.assertIn("BASE mentions <tool-ownership> as policy.", twice)
+        self.assertLess(once.index("<tool-ownership"), once.index("<channel-identity"))
         cleared = clear_tool_ownership(once)
-        self.assertNotIn("</aki-tool-ownership>", cleared)
-        self.assertIn("BASE mentions <aki-tool-ownership> as policy.", cleared)
+        self.assertNotIn("</tool-ownership>", cleared)
+        self.assertIn("BASE mentions <tool-ownership> as policy.", cleared)
 
     def test_generated_letta_mod_contains_all_exclusive_tools(self) -> None:
         mod = render_tool_ownership_mod()

@@ -11,18 +11,22 @@ from typing import Any, Iterable, Mapping
 from engine.image_generation import ASPECT_RATIOS, MAX_IMAGES, MAX_PROMPT_CHARS
 
 
-TOOL_OWNERSHIP_TAG = "aki-tool-ownership"
+TOOL_OWNERSHIP_TAG = "tool-ownership"
 
 OWNER_LABELS: dict[str, str] = {"aki": "Aki", "haru": "Haru"}
 
 TOOL_OWNERSHIP_DENIED = "TOOL_OWNERSHIP_DENIED"
 
 _TOOL_OWNERSHIP_RE = re.compile(
-    rf"\n*<{re.escape(TOOL_OWNERSHIP_TAG)}\s+[^>]*>.*?</{re.escape(TOOL_OWNERSHIP_TAG)}>\n*",
+    rf"\n*<(?:{re.escape(TOOL_OWNERSHIP_TAG)}|aki-tool-ownership)\s+[^>]*>"
+    rf".*?</(?:{re.escape(TOOL_OWNERSHIP_TAG)}|aki-tool-ownership)>\n*",
     re.S,
 )
 _LATER_BLOCK_RE = re.compile(
-    r"<aki-(?:channel-identity|channel-transcript|live-context)\b"
+    r"<(?:channel-policy|channel-wake-routing|channel-identity|channel-turn|"
+    r"channel-transcript|solo-mode|solo-transcript|live-context|"
+    r"aki-channel-policy|aki-channel-wake-routing|aki-channel-identity|"
+    r"aki-channel-turn|aki-channel-transcript|aki-live-context)\b"
 )
 
 

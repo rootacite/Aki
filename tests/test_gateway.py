@@ -123,7 +123,7 @@ class FakeChannel:
     async def publish_notice(self, text: str) -> None:
         self.published.append(("notice", text))
 
-    async def publish_control(self, text: str, metadata: dict[str, str]) -> None:
+    async def publish_control(self, text: str, metadata: dict[str, str], **_: object) -> None:
         payload = {str(key): str(value) for key, value in metadata.items()}
         self.control.append((text, payload))
 
@@ -1281,10 +1281,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("sender: Acite", prompt)
         self.assertIn("message:\n你好", prompt)
         self.assertNotIn("automatically published", prompt)
-        self.assertNotIn("<aki-channel-policy", prompt)
-        self.assertNotIn("<aki-channel-turn", prompt)
+        self.assertNotIn("<channel-policy", prompt)
+        self.assertNotIn("<channel-turn", prompt)
         system = self._agent_system(agent_path)
-        self.assertIn("<aki-channel-policy", system)
+        self.assertIn("<channel-policy", system)
         self.assertIn(
             "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
             system,
@@ -1311,7 +1311,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         await server._refresh_channel_turn(turn)
         system = self._agent_system(agent_path)
-        self.assertIn('<aki-channel-turn version="1" from_agent="false" new="true">', system)
+        self.assertIn('<channel-turn version="1" from_agent="false" new="true">', system)
         self.assertIn(
             '<new-message seq="7" sender="Acite" sender_id="sender-1" source="user"',
             system,
@@ -1325,9 +1325,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('remaining="3"', system)
         self.assertIn("resets=\"user-message\"", system)
         prompt = server._channel_prompt("Acite", "sender-1", "hello")
-        self.assertNotIn("<aki-channel-turn", prompt)
+        self.assertNotIn("<channel-turn", prompt)
         await server._refresh_channel_turn(None)
-        self.assertNotIn("<aki-channel-turn", self._agent_system(agent_path))
+        self.assertNotIn("<channel-turn", self._agent_system(agent_path))
 
     async def test_wake_routing_is_written_to_real_system_prompt(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
@@ -1346,7 +1346,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         server = await self.start_server()
 
         agent_system = self._agent_system(agent_path)
-        self.assertIn("<aki-channel-wake-routing", agent_system)
+        self.assertIn("<channel-wake-routing", agent_system)
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", agent_system)
         self.assertIn("强制只唤醒用户，不唤醒任何其他成员。", agent_system)
         self.assertIn(
@@ -1355,7 +1355,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", agent_system)
 
         compiled = json.loads(prompt_path.read_text(encoding="utf-8"))["content"]
-        self.assertIn("<aki-channel-wake-routing", compiled)
+        self.assertIn("<channel-wake-routing", compiled)
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", compiled)
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用。", compiled
@@ -1401,7 +1401,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server._channel_history[-1].sender_id, legacy_member_id("Aki"))
         self.assertTrue(server._channel_history[-1].from_agent)
         system = self._agent_system(agent_path)
-        self.assertIn("<aki-channel-transcript", system)
+        self.assertIn("<channel-transcript", system)
         self.assertIn(body, system)
         self.assertIn('new="true"', system)
         self.assertIn('source="agent"', system)
@@ -1674,7 +1674,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new-message: true", queued.message)
         self.assertIn('<new-message seq="1"', queued.message)
         self.assertIn('<text>@Aki 这条必须处理</text>', queued.message)
-        self.assertNotIn("<aki-channel-turn", queued.message)
+        self.assertNotIn("<channel-turn", queued.message)
         server.active = None
         server.queue.clear()
 
@@ -2056,11 +2056,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(
             "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
         )
-        self.assertNotIn("<aki-channel-turn", prompt)
+        self.assertNotIn("<channel-turn", prompt)
 
     async def test_legacy_dynamic_execution_lock_block_is_removed(self) -> None:
         agent_path = self._write_test_agent(
-            "BASE PROMPT\n\n<aki-execution-lock authorized=\"true\">old</aki-execution-lock>\n"
+            "BASE PROMPT\n\n<execution-lock authorized=\"true\">old</execution-lock>\n"
         )
         server = await self.start_server()
         client = await self.client()
@@ -2069,7 +2069,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await client.collect_turn(turn["turn_id"])
         system = self._agent_system(agent_path)
         self.assertIn("BASE PROMPT", system)
-        self.assertNotIn("<aki-execution-lock", system)
+        self.assertNotIn("<execution-lock", system)
 
     async def test_channel_execution_lock_authorization_matrix(self) -> None:
         agent_path = self._write_test_agent()
@@ -2101,7 +2101,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await server._on_channel_text("alice", "alice-1", "do this")
         await wait_until(lambda: bool(fake_channel.final_texts()))
         system = self._agent_system(agent_path)
-        self.assertNotIn("<aki-execution-lock", system)
+        self.assertNotIn("<execution-lock", system)
         prompt = render_channel_turn(
             self_member=server._channel_self_member(),
             members=server._channel_member_views(),
@@ -2226,8 +2226,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         local = await client.call("aki.chat.send", {"message": "local hello"})
         await client.collect_turn(local["turn_id"])
         local_system = self._agent_system(agent_path)
-        self.assertNotIn("<aki-channel-transcript", local_system)
-        self.assertIn("<aki-channel-identity", local_system)
+        self.assertNotIn("<channel-transcript", local_system)
+        self.assertIn("<channel-identity", local_system)
         self.assertIn('kind="agent"', local_system)
 
     async def test_human_member_kind_does_not_count_as_agent(self) -> None:
@@ -4152,8 +4152,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn("echo: hello", first_final["data"]["content"])
                 first_system = self._agent_system(agent_path)
-                self.assertEqual(first_system.count("<aki-live-context"), 1)
-                self.assertEqual(first_system.count("</aki-live-context>"), 1)
+                self.assertEqual(first_system.count("<live-context"), 1)
+                self.assertEqual(first_system.count("</live-context>"), 1)
                 self.assertEqual(first_system.count("{CORE_MEMORY}"), 1)
                 self.assertEqual(stat.S_IMODE(agent_path.stat().st_mode), 0o600)
                 self.assertIn("Fake Window &lt;test&gt;", first_system)
@@ -4176,8 +4176,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertIn("echo: again", second_final["data"]["content"])
                 second_system = self._agent_system(agent_path)
-                self.assertEqual(second_system.count("<aki-live-context"), 1)
-                self.assertEqual(second_system.count("</aki-live-context>"), 1)
+                self.assertEqual(second_system.count("<live-context"), 1)
+                self.assertEqual(second_system.count("</live-context>"), 1)
                 self.assertNotEqual(first_system, second_system)
                 health = await client.call("aki.status", {})
                 self.assertTrue(health["live_context"]["updated"])
@@ -4239,7 +4239,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     "approval_request", [event["type"] for event in events]
                 )
                 system = self._agent_system(agent_path)
-                self.assertIn("<aki-live-context", system)
+                self.assertIn("<live-context", system)
                 self.assertNotIn("<screenshot", system)
                 self.assertIn("echo hi", system)
                 status = await client.call("aki.status", {})
@@ -4261,7 +4261,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             encoding="utf-8",
         )
         agent_path = self._write_test_agent(
-            "BASE\n\n<aki-live-context refreshed_at=\"old\">stale</aki-live-context>\n"
+            "BASE\n\n<live-context refreshed_at=\"old\">stale</live-context>\n"
         )
         try:
             with mock.patch.dict(
@@ -4289,28 +4289,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 await client.collect_turn(turn["turn_id"])
                 system = self._agent_system(agent_path)
                 block = system[
-                    system.index("<aki-live-context") : system.index(
-                        "</aki-live-context>"
+                    system.index("<live-context") : system.index(
+                        "</live-context>"
                     )
-                    + len("</aki-live-context>")
+                    + len("</live-context>")
                 ]
                 self.assertLessEqual(estimate_tokens(block), 2048)
                 self.assertNotIn("stale", system)
 
                 disabled_path = self._write_test_agent(
-                    "BASE\n\n<aki-live-context refreshed_at=\"old\">stale</aki-live-context>\n"
+                    "BASE\n\n<live-context refreshed_at=\"old\">stale</live-context>\n"
                 )
                 await server.stop()
                 self.server = None
                 server = await self.start_server(live_context_enabled=False)
                 cleared = self._agent_system(disabled_path)
-                self.assertNotIn("<aki-live-context", cleared)
+                self.assertNotIn("<live-context", cleared)
                 client = await self.client()
                 await client.hello()
                 turn = await client.call("aki.chat.send", {"message": "hello"})
                 await client.collect_turn(turn["turn_id"])
                 self.assertNotIn(
-                    "<aki-live-context", self._agent_system(disabled_path)
+                    "<live-context", self._agent_system(disabled_path)
                 )
         finally:
             for sock in sockets:
@@ -4343,7 +4343,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 server._enqueue_channel_turn("sender", "sender", "channel hello")
                 await wait_until(lambda: server.active is None and not server.queue)
                 system = self._agent_system(agent_path)
-                self.assertEqual(system.count("<aki-live-context"), 1)
+                self.assertEqual(system.count("<live-context"), 1)
                 self.assertIn("echo channel", system)
         finally:
             for sock in sockets:

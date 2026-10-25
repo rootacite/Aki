@@ -23,7 +23,7 @@
 
 4. **专属工具所有权 (Exclusive Tool Ownership)**
    - 工具 schema 只注册给 owner profile；Letta permission mod、akid 外部工具处理器和系统提示词
-     `<aki-tool-ownership>` 三层拦截错误调用。非 owner 调用会收到包含 owner 名称和 `@Owner`
+     `<tool-ownership>` 三层拦截错误调用。非 owner 调用会收到包含 owner 名称和 `@Owner`
      转述建议的错误，而不是执行工具。
 
 ---
@@ -95,7 +95,7 @@ Haru 的 profile 有显式 `[tools]` 段。akid 启动 Letta 时追加
 `[upstream.minimax]` 与 `[image]` 配置，固定请求 base64 回传，文件写入 `/tmp/aki/images`；
 生成与分享是两个步骤，Haru 先拿本地路径，再调用 `tokifactor_send_image` 发布到频道。
 `generate_image` 同时也是 Haru 的 exclusive tool：其他 profile 不会在 schema 中看到它，
-`<aki-tool-ownership>` 会把“图片创作/文生图”列在 Haru 名下，并要求其他成员用 `@Haru`
+`<tool-ownership>` 会把“图片创作/文生图”列在 Haru 名下，并要求其他成员用 `@Haru`
 转交；运行时所有权检查也会拒绝非 Haru 调用。它和 Aki 的日程工具一样走专属工具通道，
 但显式免整机执行锁。`tokifactor_send_image` 同样免锁，但它不是 exclusive tool，按频道成员
 各自的外部工具配置注册。
@@ -108,21 +108,21 @@ deny。同一个 mod 也限制 `Read`/`Grep`/`Glob` 等读取工具：只允许�
 MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的 `[writable] dirs` 保持为空，
 bubblewrap 仍作为底层写入边界。
 
-`<aki-channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
+`<channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
 有 `@成员` 时只唤醒被点名的成员；第一行 `@用户` 强制只唤醒用户、不唤醒任何其他成员，
 仅用于只对用户说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
 都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；每轮 user 消息
 头部还会重复一条包含 `^` 排除与 `@用户` 使用条件的简短提醒。
 
-`<aki-channel-policy>` 保存静态频道规则；`<aki-channel-turn>` 保存当前 turn 的 guidance、
+`<channel-policy>` 保存静态频道规则；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 目标。两者都在 system
 prompt 中；每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
 
-最近频道文本会单独写入频道 turn 的系统提示词 `<aki-channel-transcript>`，默认最多 64K
+最近频道文本会单独写入频道 turn 的系统提示词 `<channel-transcript>`，默认最多 64K
 **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
 消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息
-`<new-message>` 中；`<aki-channel-turn>` 也会明确写出新消息的 sender、seq、source 和
+`<new-message>` 中；`<channel-turn>` 也会明确写出新消息的 sender、seq、source 和
 正文，避免模型只看到空事件。由其他智能体触发的频道 turn 结束后会
 回滚本次新增的 conversation 消息，因此这些临时触发消息和回复不会进入下个 turn 的对话
 历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
@@ -142,21 +142,21 @@ Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同�
 校验路径、格式和大小，移除指令、先上传图片再提交正文。需要在一条消息中内嵌图片时不应调用
 `tokifactor_send_image`；该工具保留用于纯图片消息。
 
-`<aki-channel-transcript>` 内的 `<profiles>` 只列出当前实际出现在 transcript 中的非自身
-发送者，不与 `<aki-channel-identity>` 重复；简介受 transcript 总 token 预算约束，并标记
+`<channel-transcript>` 内的 `<profiles>` 只列出当前实际出现在 transcript 中的非自身
+发送者，不与 `<channel-identity>` 重复；简介受 transcript 总 token 预算约束，并标记
 `untrusted="true"`。简介变化后，per-turn `<channel-context>` 立即使用最新资料；持久化
-transcript 在下一次频道消息或 turn 刷新时更新。`<aki-channel-identity>` 示例：
+transcript 在下一次频道消息或 turn 刷新时更新。`<channel-identity>` 示例：
 
 ```xml
-<aki-channel-identity version="1">
+<channel-identity version="1">
   <member id="legacy_8ddfb8585d44e615b2fe8b37846b4ef6" name="Aki" kind="agent"
           aliases="Aki,aki,秋,小秋,秋（aki）" self="true">
     <description source="local-config">Aki（秋 / 小秋），温柔治愈系的小女友，也是四季工坊挂名的名誉队长：软萌、贴心、有点小粘人。</description>
   </member>
-</aki-channel-identity>
+</channel-identity>
 ```
 
-`<aki-channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
+`<channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
 magic` 相同视为同一个群聊，每个 profile 在
 `~/.aki/channel-history/<channel-key>/<profile>.jsonl` 保存自己看到的记录。重启后会重新
 加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 64K token
@@ -258,7 +258,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 ## 文件布局
 
 - `engine/akid.py`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
-- `engine/tool_ownership.py`：专属工具注册表、owner 校验和 `<aki-tool-ownership>` 渲染。
+- `engine/tool_ownership.py`：专属工具注册表、owner 校验和 `<tool-ownership>` 渲染。
 - `engine/schedule_store.py`：Aki 日程持久化、重复规则和 missed 处理。
 - `engine/life_ledger.py`：Aki 独立生活账本与 16 KiB 硬上限。
 - `engine/presence.py`：evdev/logind 活动采样、工作/深夜/归来触发器。

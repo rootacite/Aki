@@ -49,7 +49,7 @@ class LifeLedgerTests(unittest.TestCase):
         snapshot = ledger.snapshot()
         self.assertEqual(snapshot["count"], 1)
         block = render_ledger_block(ledger.records())
-        self.assertIn("<aki-life-ledger", block)
+        self.assertIn("<life-ledger", block)
         self.assertIn("喜欢热牛奶", block)
         self.assertIn('id="ledger-', block)
 
@@ -64,7 +64,7 @@ class LifeLedgerTests(unittest.TestCase):
             budget_tokens=1024,
             ledger_block=render_ledger_block(ledger.records()),
         )
-        self.assertIn("<aki-life-ledger", text)
+        self.assertIn("<life-ledger", text)
         self.assertIn("今天有点累", text)
 
 

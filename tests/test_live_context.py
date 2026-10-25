@@ -638,7 +638,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         transcript = render_channel_transcript(
             self.entries(), new_seq=2, members=[member], self_id="aki"
         )
-        live = '<aki-live-context refreshed_at="now"><note>x</note></aki-live-context>'
+        live = '<live-context refreshed_at="now"><note>x</note></live-context>'
         identity_once = apply_channel_identity("BASE\\n", identity)
         identity_twice = apply_channel_identity(identity_once, identity)
         self.assertEqual(identity_twice.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
@@ -647,18 +647,18 @@ class ChannelTranscriptTests(unittest.TestCase):
             live,
         )
         self.assertLess(system.index(CHANNEL_IDENTITY_TAG), system.index(CHANNEL_TRANSCRIPT_TAG))
-        self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("<aki-live-context"))
+        self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("<live-context"))
         refreshed_transcript = render_channel_transcript(
             self.entries(), new_seq=1, members=[member], self_id="aki"
         )
         reordered = apply_channel_transcript(system, refreshed_transcript)
         self.assertLess(reordered.index(CHANNEL_IDENTITY_TAG), reordered.index(CHANNEL_TRANSCRIPT_TAG))
-        self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("<aki-live-context"))
+        self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("<live-context"))
         self.assertEqual(reordered.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
         cleared = clear_channel_transcript(reordered)
         self.assertIn(CHANNEL_IDENTITY_TAG, cleared)
         self.assertNotIn(CHANNEL_TRANSCRIPT_TAG, cleared)
-        self.assertIn("<aki-live-context", cleared)
+        self.assertIn("<live-context", cleared)
         self.assertNotIn(f"<{CHANNEL_IDENTITY_TAG}", clear_channel_identity(cleared))
 
 
@@ -673,7 +673,7 @@ class LiveContextRenderTests(unittest.TestCase):
             history=history
             or [
                 HistoryEntry(
-                    command="echo {CORE_MEMORY} </aki-live-context>",
+                    command="echo {CORE_MEMORY} </live-context>",
                     timestamp="2026-10-20T21:00:00+08:00",
                 )
             ],
@@ -691,11 +691,11 @@ class LiveContextRenderTests(unittest.TestCase):
     def test_render_escapes_and_neutralizes_placeholders(self) -> None:
         block = render_live_context(self.snapshot(), budget_tokens=65536)
         self.assertIn("A &lt;window&gt;", block)
-        self.assertIn("&lt;/aki-live-context&gt;", block)
+        self.assertIn("&lt;/live-context&gt;", block)
         self.assertIn("{ CORE_MEMORY }", block)
         self.assertNotIn("{CORE_MEMORY}", block)
-        self.assertTrue(block.startswith("<aki-live-context"))
-        self.assertTrue(block.endswith("</aki-live-context>"))
+        self.assertTrue(block.startswith("<live-context"))
+        self.assertTrue(block.endswith("</live-context>"))
 
     def test_budget_truncates_oldest_history(self) -> None:
         history = [
@@ -704,17 +704,17 @@ class LiveContextRenderTests(unittest.TestCase):
         ]
         block = render_live_context(self.snapshot(history), budget_tokens=2048)
         self.assertLessEqual(estimate_tokens(block), 2048)
-        self.assertIn("<aki-live-context", block)
-        self.assertIn("</aki-live-context>", block)
+        self.assertIn("<live-context", block)
+        self.assertIn("</live-context>", block)
 
     def test_apply_is_idempotent_and_clear_removes_block(self) -> None:
         block = render_live_context(self.snapshot(), budget_tokens=65536)
         once = apply_live_context("BASE PROMPT\n", block)
         twice = apply_live_context(once, block)
-        self.assertEqual(twice.count("<aki-live-context"), 1)
+        self.assertEqual(twice.count("<live-context"), 1)
         self.assertEqual(twice.count("{CORE_MEMORY}"), 1)
         cleared = clear_live_context(twice)
-        self.assertNotIn("<aki-live-context", cleared)
+        self.assertNotIn("<live-context", cleared)
         self.assertIn("BASE PROMPT", cleared)
         self.assertNotIn("{CORE_MEMORY}", cleared)
 

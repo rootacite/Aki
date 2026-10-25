@@ -31,6 +31,7 @@ _KNOWN_SECTIONS = {
     "live",
     "schedule",
     "presence",
+    "solo",
     "avatar",
     "proxy",
     "channel",
@@ -209,6 +210,8 @@ class AkiConfig:
     presence_night_history_days: int = 30
     presence_return_idle_seconds: int = 2700
     presence_return_debounce_seconds: int = 10
+    solo_transcript_budget_tokens: int = 64 * 1024
+    solo_prompt_file: str = ""
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     image: ImageGeneration | None = None
 
@@ -428,6 +431,11 @@ night_history_days = 30
 return_idle_seconds = 2700
 return_debounce_seconds = 10
 
+[solo]
+transcript_budget_tokens = 65536
+# 留空则使用 prompts/<profile>-solo.md
+prompt_file =
+
 [avatar]
 path =
 
@@ -586,6 +594,10 @@ night_end = 05:30
 night_history_days = 30
 return_idle_seconds = 2700
 return_debounce_seconds = 10
+
+[solo]
+transcript_budget_tokens = 65536
+prompt_file =
 
 [avatar]
 path = assets/small/haru.jpg
@@ -1063,6 +1075,10 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         presence_return_debounce_seconds=_int_or(
             parser, "presence", "return_debounce_seconds", 10, minimum=0
         ),
+        solo_transcript_budget_tokens=_int_or(
+            parser, "solo", "transcript_budget_tokens", 64 * 1024, minimum=1024
+        ),
+        solo_prompt_file=parser.get("solo", "prompt_file", fallback="").strip(),
         tool_policy=tool_policy,
         image=image,
     )

@@ -17,7 +17,7 @@ from engine.aki_config import atomic_write
 LEDGER_VERSION = 1
 DEFAULT_MAX_BYTES = 16 * 1024
 DEFAULT_MAX_RECORD_BYTES = 1024
-LEDGER_TAG = "aki-life-ledger"
+LEDGER_TAG = "life-ledger"
 
 
 class LedgerError(ValueError):

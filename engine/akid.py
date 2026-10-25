@@ -115,11 +115,15 @@ from engine.live_context import (
     apply_channel_wake_routing,
     apply_channel_transcript,
     apply_live_context,
+    apply_solo_mode,
+    apply_solo_transcript,
     clamp_budget_tokens,
     clear_channel_identity,
     clear_channel_turn,
     clear_channel_transcript,
     clear_live_context,
+    clear_solo_mode,
+    clear_solo_transcript,
     collect_live_context,
     desktop_environment,
     match_channel_mentions,
@@ -131,8 +135,26 @@ from engine.live_context import (
     render_channel_wake_reminder,
     render_channel_transcript,
     render_live_context,
+    render_solo_mode,
+    render_solo_transcript,
     route_channel_reply,
+    strip_channel_mentions,
     strip_channel_non_wakes,
+)
+from engine.solo_mode import (
+    SOLO_ACTIVE,
+    SOLO_END,
+    SOLO_FAILED,
+    SOLO_READY,
+    SOLO_START,
+    SoloSession,
+    clear_solo_session,
+    default_solo_state_path,
+    derive_solo_magic,
+    load_solo_scene,
+    load_solo_session,
+    now_iso as solo_now_iso,
+    save_solo_session,
 )
 from engine.life_ledger import (
     LedgerError,
@@ -825,6 +847,7 @@ class GatewayConfig:
     presence_night_history_days: int = 30
     presence_return_idle_seconds: int = 2700
     presence_return_debounce_seconds: int = 10
+    solo_state: Path | None = None
     presence_state: Path | None = None
     ledger_state: Path | None = None
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
@@ -1028,20 +1051,53 @@ class ChannelConnection:
         wake = ""
         wake_ids = ""
         if phase == "final":
-            route = route_channel_reply(
-                cleaned_text,
-                members,
-                user_name=self.server.config.username,
-            )
-            text = route.text.strip()
+            if self.server._solo_session is not None:
+                text = strip_channel_mentions(cleaned_text, members)
+                wake = CHANNEL_WAKE_USER
+                wake_ids = ""
+            else:
+                route = route_channel_reply(
+                    cleaned_text,
+                    members,
+                    user_name=self.server.config.username,
+                )
+                text = route.text.strip()
+                mentioned = match_channel_mentions(text, members)
+                blocked = {
+                    member_id: self.server._solo_targets.get(member_id, {})
+                    for member_id in mentioned
+                    if member_id in self.server._solo_targets
+                }
+                if blocked:
+                    target_ids = tuple(
+                        member_id
+                        for member_id in route.target_ids
+                        if member_id not in blocked
+                    )
+                    if route.wake == CHANNEL_WAKE_MENTIONS and not target_ids:
+                        route_wake = CHANNEL_WAKE_USER
+                        route_target_ids: tuple[str, ...] = ()
+                    else:
+                        route_wake = route.wake
+                        route_target_ids = target_ids
+                    names = [
+                        str(value.get("target_name") or member_id)
+                        for member_id, value in blocked.items()
+                    ]
+                    self.server._enqueue_solo_notice(", ".join(names))
+                else:
+                    route_wake = route.wake
+                    route_target_ids = route.target_ids
+                wake = route_wake if text else CHANNEL_WAKE_USER
+                wake_ids = ",".join(route_target_ids) if text else ""
             if not text and not images:
                 return
-            wake = route.wake if text else CHANNEL_WAKE_USER
-            wake_ids = ",".join(route.target_ids) if text else ""
             state.wake = wake
             state.wake_ids = wake_ids
         else:
             text, _excluded = strip_channel_non_wakes(cleaned_text, members)
+            if self.server._solo_session is not None:
+                text = strip_channel_mentions(text, members)
             if not text:
                 return
         if not force and text == state.last_text:
@@ -1451,6 +1507,7 @@ class GatewayServer:
             "ephemeral_turns": 0,
         }
         self._channel_transcript_lock = asyncio.Lock()
+        self._solo_lock = asyncio.Lock()
         self.channel_history_dir = config.channel_history_dir or (
             (config.profile_config_path.parent / "channel-history")
             if config.profile_config_path is not None
@@ -1459,10 +1516,37 @@ class GatewayServer:
         self.channel_media_dir = config.channel_media_dir or (
             self.channel_history_dir / "media"
         )
-        self.channel_history_path = self._channel_history_path()
+        self.solo_state_path = config.solo_state or default_solo_state_path(
+            config.profile
+        )
+        loaded_solo = load_solo_session(self.solo_state_path)
+        self._solo_session = (
+            loaded_solo
+            if loaded_solo is not None
+            and loaded_solo.target_id == self._channel_self_key()
+            and loaded_solo.profile == config.profile
+            else None
+        )
+        self._solo_targets: dict[str, dict[str, str]] = {}
+        self._solo_scene = ""
+        self._frozen_group_history: list[ChannelTranscriptEntry] = []
+        self._frozen_group_history_seq = 0
+        self.group_channel_history_path = self._channel_history_path(solo=False)
+        self.solo_channel_history_path = self._channel_history_path(solo=True)
+        self.channel_history_path = (
+            self.solo_channel_history_path
+            if self._solo_session is not None
+            else self.group_channel_history_path
+        )
         self._channel_pending_images: dict[str, dict[str, Any]] = {}
         self._channel_attachment_tasks: set[asyncio.Task[Any]] = set()
-        self._load_channel_history()
+        if self._solo_session is not None:
+            self._load_channel_history(self.group_channel_history_path)
+            self._frozen_group_history = list(self._channel_history)
+            self._frozen_group_history_seq = self._channel_history_seq
+            self._load_channel_history(self.solo_channel_history_path)
+        else:
+            self._load_channel_history()
         self._agent_initiation_remaining = max(
             0, int(config.agent_initiation_limit)
         )
@@ -1606,10 +1690,16 @@ class GatewayServer:
         self.proactive_conn = NullConnection()
         self.channel: TokifactorChannel | None = None
         if config.mqtt_enabled:
+            active_magic = (
+                derive_solo_magic(config.mqtt_magic, self._channel_self_key())
+                if self._solo_session is not None
+                else config.mqtt_magic
+            )
             self.channel = TokifactorChannel(
                 host=config.mqtt_host,
                 port=config.mqtt_port,
-                magic=config.mqtt_magic,
+                magic=active_magic,
+                session_magic=config.mqtt_magic,
                 topic=config.mqtt_topic,
                 sender_name=config.mqtt_sender_name,
                 sender_id=config.mqtt_sender_id,
@@ -1718,6 +1808,7 @@ class GatewayServer:
         await self._refresh_channel_policy()
         await self._refresh_channel_wake_routing()
         await self._refresh_channel_turn(None)
+        await self._refresh_channel_transcript()
         await self._refresh_tool_ownership()
         if self.config.aki is not None:
             try:
@@ -2514,6 +2605,7 @@ class GatewayServer:
             "execution_lock": self.execution_lock.status(),
             "backend": backend,
             "channel": channel,
+            "solo": self._solo_status(),
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
             "tool_ownership": self._tool_ownership_status(),
@@ -2647,11 +2739,19 @@ class GatewayServer:
         )
         return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
-    def _channel_history_path(self) -> Path:
+    def _channel_history_path(self, *, solo: bool | None = None) -> Path:
+        use_solo = (
+            self._solo_session is not None if solo is None else bool(solo)
+        )
+        filename = (
+            f"{self.config.profile or 'aki'}.solo.jsonl"
+            if use_solo
+            else f"{self.config.profile or 'aki'}.jsonl"
+        )
         return (
             self.channel_history_dir
             / self._channel_history_key()
-            / f"{self.config.profile or 'aki'}.jsonl"
+            / filename
         )
 
     def _channel_media_root(self) -> Path:
@@ -2784,8 +2884,8 @@ class GatewayServer:
             )
         return tuple(attachments)
 
-    def _load_channel_history(self) -> None:
-        path = self._channel_history_path()
+    def _load_channel_history(self, path: Path | None = None) -> None:
+        path = path or self._channel_history_path()
         self.channel_history_path = path
         by_seq: dict[int, ChannelTranscriptEntry] = {}
         load_error: str | None = None
@@ -2856,6 +2956,19 @@ class GatewayServer:
                 self._normalize_channel_history_kind(member_id, MEMBER_KIND_USER)
 
     def _persist_channel_history(self) -> None:
+        if self._solo_session is None and not self._channel_history:
+            try:
+                if (
+                    self.channel_history_path.is_file()
+                    and self.channel_history_path.stat().st_size > 1
+                ):
+                    LOGGER.error(
+                        "refusing to replace non-empty group history with an empty snapshot: %s",
+                        self.channel_history_path,
+                    )
+                    return
+            except OSError:
+                pass
         body = "".join(
             json.dumps(
                 self._channel_history_payload(entry),
@@ -3005,7 +3118,10 @@ class GatewayServer:
                     label="channel turn",
                 )
             return
-        wait_labels = self._wait_labels_for_participants(turn.channel_participants)
+        solo = self._solo_session is not None
+        wait_labels = (
+            () if solo else self._wait_labels_for_participants(turn.channel_participants)
+        )
         block = render_channel_turn(
             self_member=self._channel_self_member(),
             members=self._channel_member_views(),
@@ -3019,6 +3135,7 @@ class GatewayServer:
             user_name=self.config.username,
             wait_labels=wait_labels,
             message_attachments=turn.channel_attachments,
+            solo=solo,
         )
         async with self._wake_routing_lock:
             self._update_system_prompt_text(
@@ -3117,12 +3234,10 @@ class GatewayServer:
         path = self._agent_record_path()
         if path is None:
             return
-        entries = (
-            list(self._channel_history)
-            if limit is None
-            else self._channel_history[: max(0, limit)]
-        )
-        entries = [
+        def with_attachment_state(
+            entries: list[ChannelTranscriptEntry],
+        ) -> list[ChannelTranscriptEntry]:
+            return [
             replace(
                 entry,
                 attachments=tuple(
@@ -3138,14 +3253,49 @@ class GatewayServer:
             if entry.attachments
             else entry
             for entry in entries
-        ]
-        block = render_channel_transcript(
-            entries,
-            new_seq=new_seq,
-            budget_tokens=self.config.channel_transcript_budget_tokens,
-            members=self._channel_member_views(),
-            self_id=self._channel_self_key(),
-        )
+            ]
+
+        members = self._channel_member_views()
+        if self._solo_session is not None:
+            group_entries = with_attachment_state(
+                list(self._frozen_group_history)
+                if limit is None
+                else self._frozen_group_history[: max(0, limit)]
+            )
+            group_block = render_channel_transcript(
+                group_entries,
+                new_seq=new_seq,
+                budget_tokens=self.config.channel_transcript_budget_tokens,
+                members=members,
+                self_id=self._channel_self_key(),
+                frozen=True,
+            )
+            solo_entries = with_attachment_state(
+                list(self._channel_history)
+                if limit is None
+                else self._channel_history[: max(0, limit)]
+            )
+            solo_block = render_solo_transcript(
+                solo_entries,
+                budget_tokens=self.config.aki.solo_transcript_budget_tokens
+                if self.config.aki is not None
+                else 64 * 1024,
+                members=members,
+                self_id=self._channel_self_key(),
+            )
+        else:
+            group_block = render_channel_transcript(
+                with_attachment_state(
+                    list(self._channel_history)
+                    if limit is None
+                    else self._channel_history[: max(0, limit)]
+                ),
+                new_seq=new_seq,
+                budget_tokens=self.config.channel_transcript_budget_tokens,
+                members=members,
+                self_id=self._channel_self_key(),
+            )
+            solo_block = ""
         async with self._channel_transcript_lock:
             try:
                 record = json.loads(path.read_text(encoding="utf-8"))
@@ -3155,10 +3305,36 @@ class GatewayServer:
                 if not isinstance(system, str) or not system:
                     raise ValueError("agent system prompt is not a string")
                 updated = (
-                    apply_channel_transcript(system, block)
-                    if block
+                    apply_channel_transcript(system, group_block)
+                    if group_block
                     else clear_channel_transcript(system)
                 )
+                if self._solo_session is not None:
+                    scene = self._solo_scene or load_solo_scene(
+                        self.config.profile,
+                        username=self.config.username,
+                        explicit=(
+                            self.config.aki.solo_prompt_file
+                            if self.config.aki is not None
+                            else ""
+                        ),
+                    )
+                    self._solo_scene = scene
+                    updated = apply_solo_mode(
+                        updated,
+                        render_solo_mode(
+                            member_name=self.config.channel_name,
+                            user_name=self.config.username,
+                            session_id=self._solo_session.session_id,
+                            scene=scene,
+                        ),
+                    )
+                    updated = apply_solo_transcript(
+                        updated, solo_block
+                    ) if solo_block else clear_solo_transcript(updated)
+                else:
+                    updated = clear_solo_mode(updated)
+                    updated = clear_solo_transcript(updated)
                 if updated != system:
                     self._write_agent_record(path, record, updated)
                 self._channel_transcript_status.update(
@@ -3167,8 +3343,19 @@ class GatewayServer:
                         "entries": len(self._channel_history),
                         "last_seq": self._channel_history_seq,
                         "rendered_seq": new_seq,
-                        "rendered_entries": len(entries),
-                        "block_tokens": len(block.encode("utf-8")) if block else 0,
+                        "rendered_entries": len(
+                            group_entries if self._solo_session is not None else self._channel_history
+                        ) if limit is None else len(self._channel_history),
+                        "block_tokens": len(group_block.encode("utf-8"))
+                        if group_block
+                        else 0,
+                        "solo_mode": self._solo_session is not None,
+                        "solo_entries": len(self._channel_history)
+                        if self._solo_session is not None
+                        else 0,
+                        "solo_block_tokens": len(solo_block.encode("utf-8"))
+                        if solo_block
+                        else 0,
                         "agent_path": str(path),
                     }
                 )
@@ -3353,6 +3540,7 @@ class GatewayServer:
             "memory_tokens_error": token_error,
             "backend": self._backend_health(),
             "channel": channel,
+            "solo": self._solo_status(),
             "sandbox": sandbox,
             "external_tools": self._external_tools_health(),
             "tool_ownership": self._tool_ownership_status(),
@@ -3510,7 +3698,12 @@ class GatewayServer:
                 await self._finish_turn(turn, "backend_unavailable")
                 return
             self._clear_execution_lock_policy()
-            if turn.origin in ("mqtt", "proactive"):
+            if turn.origin == "solo_notice":
+                await self._refresh_channel_identity()
+                await self._refresh_channel_transcript()
+                await self._refresh_channel_turn(None)
+                turn.conversation_snapshot = self._snapshot_conversation()
+            elif turn.origin in ("mqtt", "proactive"):
                 await self._refresh_channel_identity()
                 await self._refresh_channel_transcript(
                     new_seq=turn.channel_message_seq,
@@ -3716,22 +3909,66 @@ class GatewayServer:
             self.queue.append(turn)
             self._schedule_status_refresh()
 
+    def _enqueue_solo_notice(self, target_names: str) -> None:
+        names = ", ".join(
+            part.strip() for part in target_names.split(",") if part.strip()
+        )
+        if not names:
+            return
+        if self.active is not None and self.active.origin == "solo_notice":
+            return
+        if any(turn.origin == "solo_notice" for turn in self.queue):
+            return
+        user_name = self.config.username or "Master"
+        message = (
+            "[akid solo notice]\n"
+            f"你刚才提醒的目标（{names}）正在与{user_name}独处，当前无法响应。"
+            "请自然地向用户简短说明这一点；不要再 @ 该目标，也不要尝试唤醒其他成员。"
+            "本轮只处理这个提示，不要调用工具。"
+        )
+        turn = Turn(
+            turn_id=f"turn-{uuid.uuid4().hex}",
+            conn=self.proactive_conn,
+            message=message,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="solo_notice",
+            lock_authorized=False,
+            lock_authorization="solo-notice",
+            trigger_kind="solo_mention",
+            trigger_facts={"targets": names},
+        )
+        if (
+            self.active is None
+            and not self.queue
+            and not self._compacting
+            and not self._external_tools_pending
+            and bool(getattr(self.backend, "ready", False))
+        ):
+            self.active = turn
+            turn.state = "running"
+            self._spawn_turn(turn)
+            return
+        turn.state = "queued"
+        self.queue.append(turn)
+        self._schedule_status_refresh()
+
     def _build_proactive_message(self, pending: Mapping[str, Mapping[str, Any]]) -> str:
         blocks: list[str] = []
         for kind, payload in pending.items():
             if kind == "schedule":
                 schedules = list(payload.get("schedules") or [])
                 blocks.append(
-                    '<aki-trigger type="schedule">\n'
+                    '<trigger type="schedule">\n'
                     + json.dumps(schedules, ensure_ascii=False, indent=2)
-                    + "\n</aki-trigger>"
+                    + "\n</trigger>"
                 )
             elif kind == "presence":
                 triggers = list(payload.get("triggers") or [])
                 blocks.append(
-                    '<aki-trigger type="presence">\n'
+                    '<trigger type="presence">\n'
                     + json.dumps(triggers, ensure_ascii=False, indent=2)
-                    + "\n</aki-trigger>"
+                    + "\n</trigger>"
                 )
                 journal = payload.get("journal")
                 if journal:
@@ -3900,7 +4137,7 @@ class GatewayServer:
                 },
             )
             if reason == "completed":
-                if turn.origin == "proactive":
+                if turn.origin in ("proactive", "solo_notice"):
                     await self._publish_proactive_text(turn, assistant_text)
                 elif turn.origin != "mqtt":
                     self._notify_layer(self._layer_own_character(), assistant_text)
@@ -4342,12 +4579,17 @@ class GatewayServer:
         return metadata
 
     async def _publish_channel_control(
-        self, text: str, metadata: Mapping[str, Any]
+        self,
+        text: str,
+        metadata: Mapping[str, Any],
+        *,
+        qos: int = 0,
+        retain: bool = False,
     ) -> bool:
         channel = self.channel
         if channel is None or not channel.connected:
             return False
-        await channel.publish_control(text, metadata)
+        await channel.publish_control(text, metadata, qos=qos, retain=retain)
         return True
 
     async def _publish_channel_status(self) -> None:
@@ -4705,11 +4947,168 @@ class GatewayServer:
             )
         return views
 
+    def _solo_status(self) -> dict[str, Any]:
+        session = self._solo_session
+        return {
+            "active": session is not None,
+            "session_id": session.session_id if session else "",
+            "target_id": session.target_id if session else "",
+            "target_name": session.target_name if session else "",
+            "started_at": session.started_at if session else "",
+            "group_magic_session": self.config.mqtt_magic,
+            "known_solo_targets": sorted(self._solo_targets),
+            "group_transcript_frozen": session is not None,
+            "solo_history_path": str(self.solo_channel_history_path),
+        }
+
+    async def _cancel_mqtt_turns_for_solo(self) -> None:
+        queued = [turn for turn in self.queue if turn.origin == "mqtt"]
+        if queued:
+            self.queue = [turn for turn in self.queue if turn.origin != "mqtt"]
+            for turn in queued:
+                turn.cancelled = True
+                turn.end_sent = True
+                turn.done_event.set()
+        active = self.active
+        if active is not None and active.origin == "mqtt" and not active.end_sent:
+            await self._cancel_turn(active)
+
+    async def _activate_solo(self, session: SoloSession) -> None:
+        if session.target_id != self._channel_self_key():
+            return
+        if self._solo_session is not None:
+            if self._solo_session.session_id == session.session_id:
+                await self._publish_solo_ready(session)
+            else:
+                await self._publish_channel_control(
+                    "solo busy",
+                    {
+                        **self._channel_identity_metadata(),
+                        "kind": SOLO_FAILED,
+                        "soloId": session.session_id,
+                        "soloTargetId": session.target_id,
+                        "soloError": "another solo session is already active",
+                    },
+                    qos=1,
+                )
+            return
+        scene = load_solo_scene(
+            self.config.profile,
+            username=self.config.username,
+            explicit=(
+                self.config.aki.solo_prompt_file
+                if self.config.aki is not None
+                else ""
+            ),
+        )
+        await self._cancel_mqtt_turns_for_solo()
+        self._persist_channel_history()
+        self._frozen_group_history = list(self._channel_history)
+        self._frozen_group_history_seq = self._channel_history_seq
+        self._solo_session = session
+        self._solo_scene = scene
+        save_solo_session(self.solo_state_path, session)
+        self._solo_targets.pop(self._channel_self_key(), None)
+        await self._publish_solo_ready(session)
+
+        channel = self.channel
+        if channel is not None:
+            channel.set_active_magic(
+                derive_solo_magic(self.config.mqtt_magic, self._channel_self_key())
+            )
+            channel.discard_inbox()
+        self._load_channel_history(self.solo_channel_history_path)
+        await self._refresh_channel_transcript()
+        await self._refresh_channel_turn(None)
+        await self._publish_channel_control(
+            f"{self.config.channel_name} solo active",
+            {
+                **self._channel_identity_metadata(),
+                "kind": SOLO_ACTIVE,
+                "soloId": session.session_id,
+                "soloTargetId": session.target_id,
+                "soloTargetName": session.target_name,
+                "soloStartedAt": session.started_at,
+            },
+            qos=1,
+            retain=True,
+        )
+        LOGGER.info(
+            "solo channel entered target=%s session=%s",
+            session.target_name,
+            session.session_id,
+        )
+
+    async def _publish_solo_ready(self, session: SoloSession) -> None:
+        await self._publish_channel_control(
+            f"{self.config.channel_name} solo ready",
+            {
+                **self._channel_identity_metadata(),
+                "kind": SOLO_READY,
+                "soloId": session.session_id,
+                "soloTargetId": session.target_id,
+                "soloTargetName": session.target_name,
+                "soloStartedAt": session.started_at,
+            },
+            qos=1,
+        )
+
+    async def _deactivate_solo(self, *, session_id: str = "") -> None:
+        session = self._solo_session
+        if session is None:
+            return
+        if session_id and session_id != session.session_id:
+            return
+        await self._publish_channel_control(
+            f"{self.config.channel_name} solo end",
+            {
+                **self._channel_identity_metadata(),
+                "kind": SOLO_END,
+                "soloId": session.session_id,
+                "soloTargetId": session.target_id,
+                "soloTargetName": session.target_name,
+            },
+            qos=1,
+            retain=True,
+        )
+        self._persist_channel_history()
+        self._solo_session = None
+        self._solo_scene = ""
+        clear_solo_session(self.solo_state_path)
+        channel = self.channel
+        if channel is not None:
+            channel.set_active_magic(self.config.mqtt_magic)
+            channel.discard_inbox()
+        self._load_channel_history(self.group_channel_history_path)
+        if not self._channel_history and self._frozen_group_history:
+            self._channel_history = list(self._frozen_group_history)
+            self._channel_history_seq = self._frozen_group_history_seq
+        self._frozen_group_history = []
+        self._frozen_group_history_seq = 0
+        await self._refresh_channel_transcript()
+        await self._refresh_channel_turn(None)
+        await self._publish_channel_control(
+            f"{self.config.channel_name} solo ended",
+            {
+                **self._channel_identity_metadata(),
+                "kind": SOLO_END,
+                "soloId": session.session_id,
+                "soloTargetId": session.target_id,
+                "soloTargetName": session.target_name,
+            },
+            qos=1,
+            retain=True,
+        )
+        LOGGER.info("solo channel exited session=%s", session.session_id)
+
     async def _on_channel_control(self, envelope: TextEnvelope) -> None:
         metadata = envelope.metadata
         if metadata.get("schema") != "akid.v1":
             return
         kind = metadata.get("kind")
+        if kind in (SOLO_START, SOLO_READY, SOLO_FAILED, SOLO_ACTIVE, SOLO_END):
+            await self._on_solo_control(envelope)
+            return
         if kind not in ("probe", "presence", "status", "offline"):
             return
         if metadata.get("protocolVersion") != str(CHANNEL_PROTOCOL_VERSION):
@@ -4760,6 +5159,67 @@ class GatewayServer:
                 member_id, metadata, sent_at=envelope.sent_at
             )
 
+    async def _on_solo_control(self, envelope: TextEnvelope) -> None:
+        metadata = envelope.metadata
+        if metadata.get("protocolVersion") != str(CHANNEL_PROTOCOL_VERSION):
+            return
+        kind = str(metadata.get("kind") or "")
+        session_id = str(metadata.get("soloId") or "").strip()
+        target_id = str(metadata.get("soloTargetId") or "").strip()
+        target_name = str(metadata.get("soloTargetName") or "").strip()
+        if not target_id:
+            return
+        if kind == SOLO_START:
+            if not session_id:
+                return
+            if metadata.get("memberKind") != MEMBER_KIND_USER:
+                return
+            sender_id = self._member_key(metadata, envelope.sender, envelope.sender_id)
+            if not sender_id or sender_id == self._channel_self_key():
+                return
+            if target_id == self._channel_self_key():
+                session = SoloSession(
+                    session_id=session_id,
+                    target_id=target_id,
+                    target_name=target_name or self.config.channel_name,
+                    profile=self.config.profile,
+                    started_at=str(metadata.get("soloStartedAt") or solo_now_iso()),
+                    group_magic=self.config.mqtt_magic,
+                )
+                await self._activate_solo(session)
+            else:
+                self._solo_targets[target_id] = {
+                    "session_id": session_id,
+                    "target_name": target_name or target_id,
+                    "started_at": str(metadata.get("soloStartedAt") or ""),
+                }
+            return
+        if kind == SOLO_END:
+            self._solo_targets.pop(target_id, None)
+            if self._solo_session is not None and (
+                not target_id or target_id == self._channel_self_key()
+            ):
+                await self._deactivate_solo(session_id=session_id)
+            return
+        if kind == SOLO_ACTIVE:
+            return
+        if kind == SOLO_READY:
+            if target_id == self._channel_self_key():
+                await self._publish_solo_ready(
+                    self._solo_session
+                    or SoloSession(
+                        session_id=session_id,
+                        target_id=target_id,
+                        target_name=target_name or self.config.channel_name,
+                        profile=self.config.profile,
+                        started_at=str(metadata.get("soloStartedAt") or ""),
+                        group_magic=self.config.mqtt_magic,
+                    )
+                )
+            return
+        if kind == SOLO_FAILED:
+            return
+
     async def _mqtt_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
         host = require_string(params, "host")
         host = host.strip()
@@ -4787,10 +5247,16 @@ class GatewayServer:
             self.config.mqtt_host = host
             self.config.mqtt_port = port
             self._load_channel_history()
+            active_magic = (
+                derive_solo_magic(self.config.mqtt_magic, self._channel_self_key())
+                if self._solo_session is not None
+                else self.config.mqtt_magic
+            )
             new_channel = TokifactorChannel(
                 host=host,
                 port=port,
-                magic=self.config.mqtt_magic,
+                magic=active_magic,
+                session_magic=self.config.mqtt_magic,
                 topic=self.config.mqtt_topic,
                 sender_name=self.config.mqtt_sender_name,
                 sender_id=self.config.mqtt_sender_id,
@@ -5305,6 +5771,8 @@ class GatewayServer:
         ]
 
     def _channel_message_mentions(self, text: str) -> set[str]:
+        if self._solo_session is not None:
+            return set()
         return match_channel_mentions(text, self._channel_member_views())
 
     def _channel_lock_authorization(
@@ -5332,6 +5800,8 @@ class GatewayServer:
         wake: str,
         wake_ids: set[str],
     ) -> frozenset[str]:
+        if self._solo_session is not None:
+            return frozenset({self._channel_self_key()})
         if from_agent:
             if wake == CHANNEL_WAKE_MENTIONS:
                 return frozenset(wake_ids)
@@ -6850,7 +7320,7 @@ class GatewayServer:
         return runtime / "aki" / filename
 
     def _wait_targets_for_turn(self, turn: Turn) -> list[tuple[str, str, str]]:
-        if turn.origin != "mqtt":
+        if turn.origin != "mqtt" or self._solo_session is not None:
             return []
         targets: list[tuple[str, str, str]] = []
         seen: set[str] = set()
@@ -8378,6 +8848,44 @@ class GatewayServer:
                 content,
                 render_channel_wake_routing(self.config.username or "Master"),
             )
+            if self._solo_session is not None:
+                scene = self._solo_scene or load_solo_scene(
+                    self.config.profile,
+                    username=self.config.username,
+                    explicit=(
+                        self.config.aki.solo_prompt_file
+                        if self.config.aki is not None
+                        else ""
+                    ),
+                )
+                self._solo_scene = scene
+                content = apply_solo_mode(
+                    content,
+                    render_solo_mode(
+                        member_name=self.config.channel_name,
+                        user_name=self.config.username,
+                        session_id=self._solo_session.session_id,
+                        scene=scene,
+                    ),
+                )
+                solo_block = render_solo_transcript(
+                    list(self._channel_history),
+                    budget_tokens=(
+                        self.config.aki.solo_transcript_budget_tokens
+                        if self.config.aki is not None
+                        else 64 * 1024
+                    ),
+                    members=self._channel_member_views(),
+                    self_id=self._channel_self_key(),
+                )
+                content = (
+                    apply_solo_transcript(content, solo_block)
+                    if solo_block
+                    else clear_solo_transcript(content)
+                )
+            else:
+                content = clear_solo_mode(content)
+                content = clear_solo_transcript(content)
 
             old_core = str(record.get("coreMemory") or "")
             core_parts: list[str] = []
@@ -9288,6 +9796,11 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         presence_night_history_days=aki.presence_night_history_days,
         presence_return_idle_seconds=aki.presence_return_idle_seconds,
         presence_return_debounce_seconds=aki.presence_return_debounce_seconds,
+        solo_state=(
+            Path(os.environ["AKI_SOLO_STATE"]).expanduser()
+            if os.environ.get("AKI_SOLO_STATE")
+            else state_root / "solo" / f"{aki.profile}.json"
+        ),
         presence_state=presence_state,
         ledger_state=ledger_state,
         tool_policy=aki.tool_policy,

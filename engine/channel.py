@@ -68,6 +68,7 @@ class TokifactorChannel:
         topic: str = TEXT_TOPIC,
         sender_name: str = "akid",
         sender_id: str = "akid",
+        session_magic: str | None = None,
         avatar_bytes: bytes | None = None,
         avatar_hash: str = "",
         avatar_mime: str = "",
@@ -84,7 +85,10 @@ class TokifactorChannel:
         self.topic = topic
         self.sender_name = sender_name
         self.sender_id = sender_id
-        material = f"{sender_id}\x00{host}\x00{port}\x00{topic}\x00{magic}"
+        self.session_magic = session_magic or magic
+        material = (
+            f"{sender_id}\x00{host}\x00{port}\x00{topic}\x00{self.session_magic}"
+        )
         self.session_client_id = "akid-" + hashlib.sha256(
             material.encode("utf-8")
         ).hexdigest()[:16]
@@ -145,6 +149,25 @@ class TokifactorChannel:
     @property
     def state(self) -> str:
         return self._state
+
+    def set_active_magic(self, magic: str) -> None:
+        """Switch the Tokifactor encryption identity without reconnecting MQTT."""
+        if not magic:
+            raise ValueError("active magic must not be empty")
+        self.magic = magic
+        self._assembler = TextChunkAssembler(magic)
+        self._image_assembler = ImageChunkAssembler(magic)
+
+    def discard_inbox(self) -> int:
+        dropped = 0
+        while True:
+            try:
+                self._inbox.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            self._inbox.task_done()
+            dropped += 1
+        return dropped
 
     @property
     def last_error(self) -> str | None:
@@ -499,7 +522,12 @@ class TokifactorChannel:
         await self.publish_text(text, metadata)
 
     async def publish_control(
-        self, text: str, metadata: Mapping[str, Any]
+        self,
+        text: str,
+        metadata: Mapping[str, Any],
+        *,
+        qos: int = 0,
+        retain: bool = False,
     ) -> None:
         client = self._client
         if client is None or not self._connected:
@@ -514,7 +542,12 @@ class TokifactorChannel:
         )
         async with self._publish_lock:
             for payload in payloads:
-                await client.publish(CONTROL_TOPIC, payload.encode("utf-8"), qos=0)
+                await client.publish(
+                    CONTROL_TOPIC,
+                    payload.encode("utf-8"),
+                    qos=qos,
+                    retain=retain,
+                )
         self._control_sent += 1
 
     async def publish_notice(self, text: str) -> None:
