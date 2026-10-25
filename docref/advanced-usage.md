@@ -51,6 +51,10 @@ python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/
 
 默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
 
+各成员的采样参数固定在该 profile 的 `[model.*] extra_body` 中，由本地代理合并进每次上游请求：
+Aki `temperature=0.67` / `top_p=0.83`，Fuyu `0.52` / `0.86`，Haru `0.88` / `0.92`。
+新增模型路由时也要带上对应成员的 `extra_body`；`extra_body` 不能覆盖 `model` 等路由字段。
+
 ### Profiles
 
 `~/.aki/*.conf` 中每个合法的 `<profile>.conf` 都是一个独立 profile；`aki.conf`
@@ -365,6 +369,11 @@ MemFS。现在已经上线的是 Aki、Fuyu 和 Haru，所以仓库里有三套�
 - `character/examples.md` — 原创语气示例
 - `username.txt` — 旧版 `aki` profile 的首次迁移来源
 
+人格文件的视角按层拆分：`persona.md` 使用第二人称身份锚点（如“你是 Aki”），
+`character/voice.md` 使用语气规则，`character/relationship.md` 记录第三人称关系事实与边界，
+`character/examples.md` 保留第一人称对话示例。这样既保持角色声音，又避免把身份叙事和
+操作指令混成一段。
+
 `identity.json` 保存该 profile 的不可变 `memberId`、当前 Name、永久别名和 `kind`，
 是频道身份的权威清单，不会写入 MemFS。Aki 的 `userdata/MANIFEST.json` 还会记录最近
 一次同步的来源、MemFS commit 和模板哈希。
@@ -390,15 +399,17 @@ akictl fuyu set-username 主人    # 只修改 fuyu profile
 
 旧版 `aki` profile 在 `[gateway] username` 尚未设置时仍会读取
 `userdata/username.txt` 或旧的按 agent 状态文件作为迁移来源；首次 `set-username`
-会把结果写入 `[gateway] username`。手动修改模板后，可以分别同步两套人格：
+会把结果写入 `[gateway] username`。手动修改模板后，可以分别同步三套人格：
 
 ```bash
 python3 scripts/sync-persona.py --source userdata --dry-run
 python3 scripts/sync-persona.py --source userdata --agent-id <aki-agent-id>
 python3 scripts/sync-persona.py --source userdata2 --agent-id <fuyu-agent-id>
+python3 scripts/sync-persona.py --source userdata3 --agent-id <haru-agent-id>
 
 akictl recompile          # 重编译 Aki 当前会话
 akictl fuyu recompile     # 重编译 Fuyu 当前会话
+akictl haru recompile     # 重编译 Haru 当前会话
 ```
 
 脚本只接受上述白名单文件，会校验 frontmatter、检查未解析的占位符、备份旧版本到

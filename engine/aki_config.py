@@ -355,6 +355,10 @@ def template_text(
         if name == DEFAULT_PROFILE
         else ""
     )
+    sampling = {
+        "aki": 'extra_body = {"temperature": 0.67, "top_p": 0.83}',
+        "fuyu": 'extra_body = {"temperature": 0.52, "top_p": 0.86}',
+    }.get(name, "")
     return f"""[gateway]
 agent_id = {agent_id}
 conversation = default
@@ -470,6 +474,7 @@ path = /chat/completions
 context_window = 1000000
 max_tokens = 384000
 input = text,image
+{sampling}
 
 [model.grok-4.7]
 upstream = xai
@@ -479,6 +484,7 @@ path = /responses
 context_window = 500000
 max_tokens = 500000
 input = text,image
+{sampling}
 
 [model.gemini-2.5-flash]
 upstream = gemini
@@ -488,6 +494,7 @@ path = /chat/completions
 context_window = 1048576
 max_tokens = 65536
 input = text,image
+{sampling}
 
 [model.gemini-3.8-flash]
 upstream = openrouter
@@ -497,6 +504,7 @@ path = /chat/completions
 context_window = 1048576
 max_tokens = 65536
 input = text,image
+{sampling}
 """
 
 
@@ -624,7 +632,7 @@ path = /chat/completions
 context_window = 1000000
 max_tokens = 65536
 input = text,image
-extra_body = {{"reasoning_effort": "low"}}
+extra_body = {{"reasoning_effort": "low", "temperature": 0.88, "top_p": 0.92}}
 """
 
 
