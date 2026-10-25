@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="docref/fs2.png" width="450" alt="Aki 四季工坊海报">
+  <img src="docref/fs2.jpg" width="450" alt="Aki 四季工坊海报">
 </p>
 
 ---
