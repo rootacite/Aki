@@ -254,7 +254,8 @@ class ChannelContextTests(unittest.TestCase):
             "@Master仅在你只对Master说话，无需打扰其他人时使用。", block
         )
         self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", block)
-        self.assertIn("无 `@`、无 `^成员名`：唤醒所有其他在线成员。", block)
+        self.assertIn("人类触发的 turn 只回复Master，不唤醒其他成员", block)
+        self.assertIn("其他 Agent 触发的 turn 才唤醒所有其他在线成员", block)
         self.assertIn("出现 `@Master` 时不唤醒任何其他成员", block)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
@@ -390,6 +391,44 @@ class ChannelContextTests(unittest.TestCase):
         self.assertEqual(everyone_suppressed.text, "只提醒你。")
         self.assertEqual(everyone_suppressed.wake, CHANNEL_WAKE_USER)
         self.assertEqual(everyone_suppressed.target_ids, ())
+
+    def test_human_turn_defaults_to_user_only(self) -> None:
+        members = self.members()
+        reply = route_channel_reply(
+            "三位随便回复我一句。", members, user_name="Master", from_agent=False
+        )
+        self.assertEqual(reply.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(reply.target_ids, ())
+        agent_reply = route_channel_reply(
+            "三位随便回复我一句。", members, user_name="Master", from_agent=True
+        )
+        self.assertEqual(agent_reply.wake, CHANNEL_WAKE_ALL)
+        explicit = route_channel_reply(
+            "@Fuyu 你看一下。", members, user_name="Master", from_agent=False
+        )
+        self.assertEqual(explicit.wake, CHANNEL_WAKE_MENTIONS)
+        self.assertEqual(explicit.target_ids, ("fuyu",))
+
+    def test_user_marker_on_later_line_is_user_only_and_removed(self) -> None:
+        members = self.members()
+        route = route_channel_reply(
+            "#[emoji]\n\n@哥哥\n小春报到。",
+            members,
+            user_name="哥哥",
+            from_agent=False,
+        )
+        self.assertEqual(route.wake, CHANNEL_WAKE_USER)
+        self.assertEqual(route.target_ids, ())
+        self.assertNotIn("@哥哥", route.text)
+        self.assertIn("小春报到", route.text)
+        inline = route_channel_reply(
+            "收到，@Master 这条只对你说。",
+            members,
+            user_name="Master",
+            from_agent=False,
+        )
+        self.assertEqual(inline.wake, CHANNEL_WAKE_USER)
+        self.assertNotIn("@Master", inline.text)
 
     def test_wake_reminder_includes_user_only_marker(self) -> None:
         reminder = render_channel_wake_reminder("哥哥")

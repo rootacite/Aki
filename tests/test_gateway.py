@@ -1493,6 +1493,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "turn-all", 4, state, force=True, phase="final"
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 4)
+        self.assertEqual(fake_channel.events_of("turn")[-1]["wake"], "user")
+
+        state = ChannelTurnState(text="提醒所有人。", origin_is_agent=True)
+        await server.channel_conn._flush_progress(
+            "turn-agent-all", 5, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 5)
         self.assertEqual(fake_channel.events_of("turn")[-1]["wake"], "all")
 
     async def test_agent_reply_wake_scope_controls_turns(self) -> None:

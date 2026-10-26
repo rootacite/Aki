@@ -1131,6 +1131,7 @@ class ChannelConnection:
                     cleaned_text,
                     members,
                     user_name=self.server.config.username,
+                    from_agent=state.origin_is_agent,
                 )
                 text = route.text.strip()
                 mentioned = match_channel_mentions(text, members)
