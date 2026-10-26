@@ -18,8 +18,8 @@
   },
   "patches": {
     "0000-build-use-local-tsc.patch": "b4199c1391f1331938f8142862310287dcfab81aaf69f8d2fa464fce45e24df4",
-    "0001-aki-bridge.patch": "65d0dba934e365727108a08545f34790eb91586b445d5e4cac6375d1760eaae7",
+    "0001-aki-bridge.patch": "826136b989e15b9813fba54eea6d85e23c55569a27ac2bd0227508e654b84071",
     "0002-aki-compaction-policy.patch": "57265c9995e7f5fb4b9686d6db860272a9c3e1688ac49342db6a4eddbbc705c5"
   },
-  "runtime_sha256": "55cf6c648cfd6fea590d1fb6c5b210fb918189596dbd4d011328bdb2847ae82a"
+  "runtime_sha256": "d95d2a929a88aa5999faaa3865c873a46863ea1fab97166704a7a6d7c5bd8b9a"
 }
