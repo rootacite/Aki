@@ -139,6 +139,35 @@ class PresenceTests(unittest.TestCase):
         triggers = self.monitor.process_sample(active(second_return + 10), now=second_return + 10)
         self.assertTrue([item for item in triggers if item.kind == "return"])
 
+    def test_restart_while_active_does_not_suppress_next_return(self) -> None:
+        start = local_epoch(2026, 10, 24, 8, 0)
+        state_path = Path(self.tempdir.name) / "restart-presence.json"
+        before_restart = PresenceMonitor(
+            state_path,
+            return_idle_seconds=2700,
+            return_debounce_seconds=10,
+        )
+        before_restart.process_sample(active(start), now=start)
+        before_restart._save_state(force=True)
+
+        after_restart = PresenceMonitor(
+            state_path,
+            return_idle_seconds=2700,
+            return_debounce_seconds=10,
+        )
+        after_restart.process_sample(active(start + 10), now=start + 10)
+        idle_start = start + 20
+        after_restart.process_sample(idle(idle_start), now=idle_start)
+        return_at = idle_start + 2710
+        after_restart.process_sample(active(return_at), now=return_at)
+        triggers = after_restart.process_sample(
+            active(return_at + 10), now=return_at + 10
+        )
+        self.assertEqual(
+            [item.kind for item in triggers if item.kind == "return"],
+            ["return"],
+        )
+
     def test_invalid_sample_does_not_change_state(self) -> None:
         start = local_epoch(2026, 10, 24, 8, 0)
         self.monitor.process_sample(active(start), now=start)

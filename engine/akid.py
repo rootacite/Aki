@@ -4119,6 +4119,10 @@ class GatewayServer:
     ) -> None:
         if not triggers:
             return
+        LOGGER.info(
+            "presence triggers=%s",
+            ",".join(trigger.kind for trigger in triggers),
+        )
         payload: dict[str, Any] = {
             "triggers": [trigger.to_dict() for trigger in triggers],
         }
@@ -4178,6 +4182,11 @@ class GatewayServer:
                 proactive_id=f"proactive-{uuid.uuid4().hex}",
             )
             self._last_proactive_at = now_iso()
+            LOGGER.info(
+                "proactive turn enqueued kind=%s id=%s",
+                turn.trigger_kind,
+                turn.proactive_id,
+            )
             if (
                 self.active is None
                 and not self.queue

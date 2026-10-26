@@ -656,13 +656,22 @@ class PresenceMonitor:
                                 )
                             )
                             previous["last_return_at"] = now_iso(clock)
+                        else:
+                            self.logger.info(
+                                "presence return suppressed after monitor startup "
+                                "idle_seconds=%s",
+                                int(idle_seconds),
+                            )
                         previous["return_suppressed"] = False
                         previous["last_idle_started_at"] = None
                         previous["return_candidate_since"] = None
+            elif not idle_started:
+                # The monitor may have restarted while the user was active.
+                # Clear the startup suppression on the first active sample so a
+                # later idle -> return cycle still produces a trigger.
+                previous["return_suppressed"] = False
             if not initialized_before:
                 previous["initialized"] = True
-                if not idle_started:
-                    previous["return_suppressed"] = False
 
             active_seconds = float(previous.get("active_seconds") or 0)
             next_threshold = float(
