@@ -271,38 +271,19 @@ def strip_user_notice_target(text: str, user_name: str) -> tuple[str, bool]:
 
     The marker forces the reply to wake only the user.  It is intended for
     replies addressed exclusively to the user, where other agents should not be
-    disturbed.  A standalone marker line anywhere in the reply is also
-    accepted, because models commonly put an emoji/tag line before it.
+    disturbed.
     """
     name = user_name.strip()
     if not name:
         return text, False
-    boundary = r"(?=\s|$|[，,。.!！?？:：])"
-    leading = re.compile(
-        r"^\s*@" + re.escape(name) + boundary,
+    pattern = re.compile(
+        r"^\s*@" + re.escape(name) + r"(?=\s|$)",
         re.IGNORECASE,
     )
-    match = leading.match(text)
-    if match is not None:
-        return text[match.end() :].lstrip(), True
-    standalone = re.compile(
-        r"(?m)^[ \t]*@" + re.escape(name) + r"[ \t]*[，,。.!！?？:：]?[ \t]*(?:\r?\n|$)",
-        re.IGNORECASE,
-    )
-    match = standalone.search(text)
-    if match is not None:
-        cleaned = text[: match.start()] + text[match.end() :]
-        return re.sub(r"\n{3,}", "\n\n", cleaned).strip(), True
-    # Do not leak the configured user marker into the published message even
-    # when the model placed it inline rather than on its own line.
-    inline = re.compile(
-        r"(?<![A-Za-z0-9_])@" + re.escape(name) + r"(?![A-Za-z0-9_])",
-        re.IGNORECASE,
-    )
-    if inline.search(text):
-        cleaned = inline.sub("", text)
-        return re.sub(r"[ \t]{2,}", " ", cleaned).strip(), False
-    return text, False
+    match = pattern.match(text)
+    if match is None:
+        return text, False
+    return text[match.end() :].lstrip(), True
 
 
 def _non_wake_alias_map(
@@ -387,7 +368,6 @@ def route_channel_reply(
     members: list[ChannelMember] | tuple[ChannelMember, ...],
     *,
     user_name: str,
-    from_agent: bool = True,
 ) -> ChannelReplyRoute:
     """Resolve which agents a final channel reply should wake."""
     cleaned, excluded = strip_channel_non_wakes(text, members)
@@ -414,10 +394,6 @@ def route_channel_reply(
             wake=CHANNEL_WAKE_MENTIONS,
             target_ids=tuple(sorted(eligible - excluded)),
         )
-    if not from_agent:
-        # A human-triggered reply is addressed to the human by default. Only
-        # an explicit @member (or ^ exclusions) may wake other agents.
-        return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_USER)
     return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_ALL)
 
 
@@ -1110,12 +1086,10 @@ def render_channel_wake_routing(user_name: str) -> str:
             f'<{CHANNEL_WAKE_ROUTING_TAG} version="1">',
             "每条最终回复都必须按以下 Agent-Agent 唤醒规则选择范围：",
             "- 有 `@成员名 `：只唤醒被 @ 的成员。",
-            f"- 第一行或任意独立一行写 `@{name}`：强制只唤醒{name}，不唤醒任何其他成员。"
+            f"- 第一行单独写 `@{name}`：强制只唤醒{name}，不唤醒任何其他成员。"
             f"@{name}仅在你只对{name}说话，无需打扰其他人时使用。",
-            "- 无 `@`、有 `^成员名`：不唤醒被 `^` 的成员；人类触发的 turn 默认只回复人类，"
-            "只有其他 Agent 触发的 turn 才唤醒其余在线成员。",
-            f"- 无 `@`、无 `^成员名`：人类触发的 turn 只回复{name}，不唤醒其他成员；"
-            "其他 Agent 触发的 turn 才唤醒所有其他在线成员。",
+            "- 无 `@`、有 `^成员名`：不唤醒被 `^` 的成员，其余其他在线成员仍会唤醒。",
+            "- 无 `@`、无 `^成员名`：唤醒所有其他在线成员。",
             f"`@{name}` 和 `^成员名` 标记均会在发布前自动移除；"
             f"出现 `@{name}` 时不唤醒任何其他成员，其他情况下 `^` 优先于 `@`。",
             "无论选择哪种方式，回复都会进入群聊消息记录。",
