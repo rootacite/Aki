@@ -3960,6 +3960,12 @@ class GatewayServer:
                     block = await self._refresh_channel_turn(turn, apply=False)
                     if block:
                         overlay_parts.append(block)
+                    overlay_parts.append(
+                        render_channel_roster(
+                            self_member=self._channel_self_member(),
+                            members=self._channel_member_views(),
+                        )
+                    )
                 else:
                     await self._refresh_channel_transcript(
                         new_seq=turn.channel_message_seq,
@@ -6810,9 +6816,13 @@ class GatewayServer:
         identity = (
             f"{display_sender} ({member_id})" if member_id else display_sender
         )
-        roster = render_channel_roster(
-            self_member=self._channel_self_member(),
-            members=self._channel_member_views(),
+        roster = (
+            ""
+            if self._aki_bridge_available()
+            else render_channel_roster(
+                self_member=self._channel_self_member(),
+                members=self._channel_member_views(),
+            )
         )
         attachment_names = ", ".join(
             attachment.name for attachment in sorted(attachments, key=lambda item: item.index)
