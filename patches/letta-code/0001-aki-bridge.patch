@@ -1,14 +1,18 @@
 diff --git a/src/aki/bridge.test.ts b/src/aki/bridge.test.ts
 new file mode 100644
-index 0000000..c9dadef
+index 0000000..0bc0f1a
 --- /dev/null
 +++ b/src/aki/bridge.test.ts
-@@ -0,0 +1,93 @@
+@@ -0,0 +1,128 @@
 +import { afterEach, describe, expect, test } from "bun:test";
++import { mkdtemp, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
 +import {
 +  akiBridgeCapabilities,
 +  applyAkiProviderOverlay,
 +  beginAkiTurn,
++  captureAkiProviderCall,
 +  endAkiTurn,
 +  updateAkiTurn,
 +} from "@/aki/bridge";
@@ -96,13 +100,44 @@ index 0000000..c9dadef
 +      updateAkiTurn("missing", { interjection: { user_messages: [] } }),
 +    ).toThrow("aki turn is not active");
 +  });
++
++  test("captures the actual provider request when enabled", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-api-capture-"));
++    process.env.AKI_API_CALL_CAPTURE = directory;
++    try {
++      beginAkiTurn("turn-capture", {
++        turn_context: { system_append: "<channel-turn>test</channel-turn>" },
++      });
++      const enriched = applyAkiProviderOverlay(input());
++      captureAkiProviderCall({
++        agentId: enriched.agentId,
++        conversationId: enriched.conversationId,
++        model: enriched.agent.model,
++        systemPrompt: enriched.systemPrompt ?? enriched.agent.system,
++        messages: enriched.uiMessages,
++        tools: [],
++      });
++      const raw = await readFile(
++        join(directory, "api-calls-agent-test.jsonl"),
++        "utf8",
++      );
++      const record = JSON.parse(raw.trim()) as Record<string, unknown>;
++      expect(record.system_prompt).toContain("<channel-turn>test</channel-turn>");
++      expect((record.overlay as Record<string, unknown>).turn_id).toBe(
++        "turn-capture",
++      );
++    } finally {
++      delete process.env.AKI_API_CALL_CAPTURE;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
 +});
 diff --git a/src/aki/bridge.ts b/src/aki/bridge.ts
 new file mode 100644
-index 0000000..ca0c161
+index 0000000..ac67cbb
 --- /dev/null
 +++ b/src/aki/bridge.ts
-@@ -0,0 +1,178 @@
+@@ -0,0 +1,264 @@
 +/**
 + * Aki bridge state inside the Letta process.
 + *
@@ -112,6 +147,8 @@ index 0000000..ca0c161
 + */
 +
 +import { randomUUID } from "node:crypto";
++import { appendFileSync, mkdirSync } from "node:fs";
++import { join } from "node:path";
 +import type { ProviderTurnInput } from "@/backend/dev/provider-turn-executor";
 +import type { LocalMessage, LocalUserMessage } from "@/backend/local/local-message";
 +
@@ -281,19 +318,106 @@ index 0000000..ca0c161
 +  }
 +  activeTurn.pendingInterjections.push(...messages);
 +}
++
++export function akiOverlaySnapshot(): Record<string, unknown> | null {
++  if (!activeTurn) return null;
++  return {
++    turn_id: activeTurn.turnId,
++    system_append: activeTurn.overlay.turn_context?.system_append ?? "",
++    mid_system_append:
++      activeTurn.overlay.turn_context?.mid_system_append ?? "",
++    overlay_user_messages:
++      activeTurn.overlay.turn_context?.user_messages ?? [],
++    pending_interjections: activeTurn.pendingInterjections,
++  };
++}
++
++function captureSafe(value: unknown, depth = 0): unknown {
++  if (depth > 12) return "[depth limit]";
++  if (typeof value === "string") {
++    return value.length > 300_000 ? `${value.slice(0, 300_000)}\n...[truncated]` : value;
++  }
++  if (Array.isArray(value)) {
++    return value.map((item) => captureSafe(item, depth + 1));
++  }
++  if (value !== null && typeof value === "object") {
++    const output: Record<string, unknown> = {};
++    for (const [key, child] of Object.entries(value)) {
++      if (
++        key === "data" &&
++        typeof child === "string" &&
++        child.length > 1000
++      ) {
++        output[key] = "[base64 omitted]";
++        continue;
++      }
++      output[key] = captureSafe(child, depth + 1);
++    }
++    return output;
++  }
++  return value;
++}
++
++export function captureAkiProviderCall(input: {
++  agentId: string;
++  conversationId: string;
++  model: string;
++  systemPrompt: string;
++  midConversationSystemPrompt?: string;
++  messages: unknown[];
++  tools: unknown;
++}): void {
++  const directory = process.env.AKI_API_CALL_CAPTURE?.trim();
++  if (!directory) return;
++  try {
++    mkdirSync(directory, { recursive: true, mode: 0o700 });
++    const safeAgent = input.agentId.replace(/[^A-Za-z0-9_.-]/g, "_");
++    const path = join(directory, `api-calls-${safeAgent}.jsonl`);
++    const record = {
++      captured_at: new Date().toISOString(),
++      pid: process.pid,
++      agent_id: input.agentId,
++      conversation_id: input.conversationId,
++      model: input.model,
++      overlay: akiOverlaySnapshot(),
++      system_prompt: input.systemPrompt,
++      mid_conversation_system_prompt:
++        input.midConversationSystemPrompt ?? "",
++      messages: input.messages,
++      tools: input.tools,
++    };
++    appendFileSync(path, `${JSON.stringify(captureSafe(record))}\n`, {
++      mode: 0o600,
++    });
++    console.error(
++      `[aki-api-capture] agent=${input.agentId} turn=${String(
++        (record.overlay as Record<string, unknown> | null)?.turn_id ?? "-",
++      )} messages=${input.messages.length} file=${path}`,
++    );
++  } catch (error) {
++    console.error(
++      `[aki-api-capture] failed: ${
++        error instanceof Error ? error.message : String(error)
++      }`,
++    );
++  }
++}
 diff --git a/src/backend/dev/pi-stream-adapter.ts b/src/backend/dev/pi-stream-adapter.ts
-index 334c67b..c89ddd4 100644
+index 334c67b..eaf51c6 100644
 --- a/src/backend/dev/pi-stream-adapter.ts
 +++ b/src/backend/dev/pi-stream-adapter.ts
-@@ -10,6 +10,7 @@ import type {
+@@ -10,6 +10,10 @@ import type {
  } from "@earendil-works/pi-ai";
  import { isContextOverflow, Type } from "@earendil-works/pi-ai";
  
-+import { applyAkiProviderOverlay } from "@/aki/bridge";
++import {
++  applyAkiProviderOverlay,
++  captureAkiProviderCall,
++} from "@/aki/bridge";
  import type { LocalCompactionStats } from "@/backend/local/compaction";
  import {
    emptyLocalUsage,
-@@ -574,6 +575,7 @@ export class PiStreamAdapter implements ProviderStreamAdapter {
+@@ -574,6 +578,7 @@ export class PiStreamAdapter implements ProviderStreamAdapter {
    private async *streamOnce(
      input: ProviderTurnInput,
    ): AsyncIterable<ProviderStreamEvent> {
@@ -301,6 +425,22 @@ index 334c67b..c89ddd4 100644
      const tools = toPiTools(input.clientTools);
      const localModel = await resolveAvailableLocalModelForTurn({
        model: input.agent.model,
+@@ -604,6 +609,15 @@ export class PiStreamAdapter implements ProviderStreamAdapter {
+       messages,
+       ...(tools ? { tools } : {}),
+     };
++    captureAkiProviderCall({
++      agentId: input.agentId,
++      conversationId: input.conversationId,
++      model: input.agent.model,
++      systemPrompt: context.systemPrompt ?? input.agent.system,
++      midConversationSystemPrompt: input.midConversationSystemPrompt,
++      messages: context.messages,
++      tools: context.tools,
++    });
+     const reasoning = reasoningForSettings(
+       input.agent.model_settings,
+       input.agent.model,
 diff --git a/src/backend/local/aki-conversation-state.test.ts b/src/backend/local/aki-conversation-state.test.ts
 new file mode 100644
 index 0000000..1ec091d
