@@ -327,13 +327,14 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
-- 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
+- 桌面实况：每个 turn 采集一次桌面快照。bridge 模式下 `<live-context>` 作为 per-turn overlay 追加在实际 API 请求末尾，不写回持久 system prompt；旧后端才原地刷新持久块。截图只放路径与元数据，默认 64K token 上限。
 - 实际 API call 的 system prompt 固定顺序：`base → core memory → <tool-ownership> →
   <channel-policy> → <channel-wake-routing> → <channel-identity> →
   <channel-turn> → <channel-transcript> → <solo-mode> → <solo-transcript> →
   <live-context>`。
-  policy/wake routing/identity/live context 写入持久 system prompt；bridge 模式下
-  `<channel-turn>`、`<channel-transcript>`、channel roster 和 solo 块只作为当前 turn 的
+  policy/wake routing/identity 写入持久 system prompt；bridge 模式下
+  `<channel-turn>`、`<channel-transcript>`、channel roster、solo 块和 `<live-context>`
+  只作为当前 turn 的
   overlay 拼进 API 请求，不写回 agent record 或 `system-prompt.json`，turn 结束后自然消失。
   旧后端没有 bridge 时才回退为写回 system prompt 并清除。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具

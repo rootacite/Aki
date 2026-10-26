@@ -177,6 +177,10 @@ magic` 相同视为同一个群聊，每个 profile 在
 加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 64K token
 预算约束。
 
+`<live-context>` 在 bridge 模式下同样只作为 per-turn overlay 追加在实际 API 请求末尾，
+不写回 agent record / `system-prompt.json`。它每轮重新采集桌面快照；旧后端无 bridge 时才
+回退为原地刷新持久块。
+
 当一个智能体正在工作时，新消息先只更新 transcript 并标记 `during-work="true"`，供下一次
 API call 使用。若当前 turn 后续仍有 tool call/API call，用户消息视为已在该 turn 中消费；
 如果当前 turn 已进入最终响应、之后不再有 API call，则用户消息在 turn 结束时补成一个独立

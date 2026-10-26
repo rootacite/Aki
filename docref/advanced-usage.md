@@ -30,7 +30,7 @@
 - **人格与 userdata。** 每个 profile 使用自己的公开人格模板，支持称呼占位符、MemFS
   渲染、备份和 git 提交，互不覆盖。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
-- **桌面实况上下文。** 每个 turn 在系统提示词中原地刷新唯一的 `<live-context>` 块，
+- **桌面实况上下文。** 每个 turn 采集一次快照；bridge 模式下 `<live-context>` 作为 per-turn overlay 注入实际 API 请求，不落盘，
   包含当前时间、焦点窗口、CPU top 5、最近 20 条 zsh 命令和截图路径；不写入消息历史。
 
 ---
@@ -214,7 +214,8 @@ systemctl --user restart akid@aki.service
 systemctl --user restart akid-proxy@aki.service
 ```
 
-脚本会保留现有 core memory 和 `<live-context>`，并先备份到
+脚本会保留现有 core memory；旧后端已持久化的 `<live-context>` 也会保留，bridge 模式下
+live context 不再落盘，而由每个 turn 的 overlay 注入。脚本会先备份到
 `~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 ownership/identity/
 transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
 `{CORE_MEMORY}` 占位符必须保留。
@@ -238,8 +239,8 @@ wake routing → identity → channel turn → transcript → live context`：
    bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
 8. `<channel-transcript>`：仅频道来源的 turn 包含；bridge 模式下同样只走 turn overlay，
    不写回持久 system prompt；其中有 `<profiles>` 和 `<messages>`。
-9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
-   始终最后追加。
+9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
+   bridge 模式下作为 per-turn overlay，始终最后追加、不落盘。
 
 ### Aki 专属工具与触发器
 
@@ -584,8 +585,8 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。profile username 不在智能体成员
 列表中，普通回复直接说话即可；回复中任意位置的 `@<username>`（例如 `@Master`）表示这条回复
 只对该 username 说、无需打扰其他成员，会强制只唤醒该 username。本地 turn 不包含频道 transcript 或 turn
-块，但仍刷新并保留
-`<channel-identity>`、`<channel-wake-routing>` 与 `<live-context>`。
+块；`<channel-identity>` 与 `<channel-wake-routing>` 仍持久刷新，`<live-context>` 在
+bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
 的 `<channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
@@ -862,8 +863,9 @@ akid 通过 Letta external tool 注册 `desktop_take_screenshot`：
 
 ### 桌面实况上下文
 
-akid 在每个 turn 真正开始前采集一次桌面快照，并把它原地写入 agent 系统提示词末尾的
-唯一 `<live-context>` 块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
+bridge 模式下，akid 在每个 turn 真正开始前采集一次桌面快照，并把它作为 per-turn overlay
+追加到实际 API 请求末尾的唯一 `<live-context>` 块，不写回持久 system prompt；旧后端才原地
+刷新持久块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
 请求只看到一份当前快照，历史中没有重复副本。
 
 块内包含：

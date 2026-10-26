@@ -3139,9 +3139,11 @@ class GatewayServer:
             return
 
         def clear(system: str) -> str:
-            return clear_solo_transcript(
-                clear_solo_mode(
-                    clear_channel_turn(clear_channel_transcript(system))
+            return clear_live_context(
+                clear_solo_transcript(
+                    clear_solo_mode(
+                        clear_channel_turn(clear_channel_transcript(system))
+                    )
                 )
             )
 
@@ -3631,16 +3633,18 @@ class GatewayServer:
             timeout=min(self.config.live_context_timeout, 2.5),
         )
 
-    async def _refresh_live_context(self) -> None:
+    async def _refresh_live_context(self, *, apply: bool = True) -> str:
         if not self.config.live_context_enabled:
-            return
+            return ""
+        if self._aki_bridge_available():
+            apply = False
         path = self._agent_record_path()
-        if path is None:
+        if path is None and apply:
             self._live_context_status["last_errors"] = [
                 f"agent record not found for {self.config.agent_id}"
             ]
             self._live_context_status["updated"] = False
-            return
+            return ""
         captured_at = datetime.now().astimezone()
         options = LiveContextOptions(
             ps_bin=self.config.ps_bin,
@@ -3671,15 +3675,16 @@ class GatewayServer:
                     else ""
                 ),
             )
-            async with self._live_context_lock:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                updated = apply_live_context(system, block)
-                self._write_agent_record(path, record, updated)
+            if apply:
+                async with self._live_context_lock:
+                    record = json.loads(path.read_text(encoding="utf-8"))
+                    if not isinstance(record, dict):
+                        raise ValueError("agent record is not a JSON object")
+                    system = record.get("system")
+                    if not isinstance(system, str) or not system:
+                        raise ValueError("agent system prompt is not a string")
+                    updated = apply_live_context(system, block)
+                    self._write_agent_record(path, record, updated)
             self._live_context_status.update(
                 {
                     "enabled": True,
@@ -3690,20 +3695,22 @@ class GatewayServer:
                     "last_sections": snapshot.sections(),
                     "last_errors": list(snapshot.errors),
                     "block_bytes": len(block.encode("utf-8")),
-                    "agent_path": str(path),
+                    "agent_path": str(path) if path is not None else "",
                     "updated": True,
                 }
             )
+            return block
         except Exception as exc:
             LOGGER.warning("live context refresh failed: %s", exc)
             self._live_context_status.update(
                 {
                     "last_captured_at": captured_at.isoformat(timespec="seconds"),
                     "last_errors": [str(exc)],
-                    "agent_path": str(path),
+                    "agent_path": str(path) if path is not None else "",
                     "updated": False,
                 }
             )
+            return ""
 
     def _agent_info(self) -> tuple[str | None, str | None, int | None]:
         try:
@@ -3956,12 +3963,12 @@ class GatewayServer:
             elif turn.origin in ("mqtt", "proactive"):
                 await self._refresh_channel_identity()
                 if bridge:
+                    block = await self._refresh_channel_turn(turn, apply=False)
+                    if block:
+                        overlay_parts.append(block)
                     block = await self._refresh_channel_transcript(
                         new_seq=turn.channel_message_seq, apply=False
                     )
-                    if block:
-                        overlay_parts.append(block)
-                    block = await self._refresh_channel_turn(turn, apply=False)
                     if block:
                         overlay_parts.append(block)
                     overlay_parts.append(
@@ -3990,7 +3997,9 @@ class GatewayServer:
                     }
                 )
             await self._refresh_tool_ownership()
-            await self._refresh_live_context()
+            live_block = await self._refresh_live_context()
+            if bridge and live_block:
+                overlay_parts.append(live_block)
             if turn.origin == "mqtt" and not turn.origin_is_agent:
                 turn.channel_prompt_boundary = capture_conversation_boundary(
                     self._conversation_dir() / "messages.jsonl"
