@@ -1,0 +1,3 @@
+[submodule "vendor/letta-code"]
+	path = vendor/letta-code
+	url = https://github.com/letta-ai/letta-code

@@ -184,6 +184,14 @@ akictl fuyu set-username Master
 
 ---
 
+## 许可证
+
+本项目以 GNU General Public License v3.0 or later（`GPL-3.0-or-later`）发布，完整文本见 [LICENSE](LICENSE)。
+
+`vendor/letta-code` 是 Letta Code 的 upstream submodule，保留其 Apache-2.0 许可证；Letta 品牌资源（名称、Logo、图片和 ASCII art）不适用 Apache-2.0。第三方声明与品牌资源排除条款见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+---
+
 ## 进阶文档
 
 - [进阶使用：安装细节、Profiles、模型代理、MQTT、工具与人格同步](docref/advanced-usage.md)

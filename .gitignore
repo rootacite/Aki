@@ -23,3 +23,6 @@ userdata3/identity.json
 
 # aki-layer build output
 aki-layer/build/
+
+# vendored Letta build output
+build/
