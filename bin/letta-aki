@@ -1,0 +1,17 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-3.0-or-later
+set -eu
+
+root=${AKI_LETTA_RUNTIME:-"$HOME/.local/lib/aki/letta-code/current"}
+node=${AKI_NODE_BIN:-/usr/bin/node}
+
+if [ ! -f "$root/letta.js" ]; then
+    echo "letta-aki: vendored runtime not found: $root/letta.js" >&2
+    exit 127
+fi
+if [ ! -x "$node" ]; then
+    echo "letta-aki: node executable not found: $node" >&2
+    exit 127
+fi
+
+exec "$node" "$root/letta.js" "$@"

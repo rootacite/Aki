@@ -1,0 +1,12 @@
+diff --git a/build.js b/build.js
+--- a/build.js
++++ b/build.js
+@@ -362,7 +362,7 @@
+ 
+ // Generate type declarations for wire types export
+ console.log("📝 Generating type declarations...");
+-await Bun.$`bunx tsc -p tsconfig.types.json`;
++await Bun.$`./node_modules/.bin/tsc -p tsconfig.types.json`;
+ rewriteDeclarationAliases(join(__dirname, "dist/types"));
+ console.log("   Output: dist/types/protocol.d.ts");
+ 
