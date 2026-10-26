@@ -3409,6 +3409,10 @@ class GatewayServer:
         limit: int | None = None,
         apply: bool = True,
     ) -> str:
+        # With the bridge, the transcript is a per-turn overlay. Never mirror
+        # it into the persisted system prompt as well.
+        if self._aki_bridge_available():
+            apply = False
         path = self._agent_record_path()
         if path is None and apply:
             return ""
