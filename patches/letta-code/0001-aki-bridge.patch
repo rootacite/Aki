@@ -1,0 +1,967 @@
+diff --git a/src/aki/bridge.test.ts b/src/aki/bridge.test.ts
+new file mode 100644
+index 0000000..c9dadef
+--- /dev/null
++++ b/src/aki/bridge.test.ts
+@@ -0,0 +1,93 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import {
++  akiBridgeCapabilities,
++  applyAkiProviderOverlay,
++  beginAkiTurn,
++  endAkiTurn,
++  updateAkiTurn,
++} from "@/aki/bridge";
++import type { ProviderTurnInput } from "@/backend/dev/provider-turn-executor";
++
++function input(): ProviderTurnInput {
++  return {
++    conversationId: "default",
++    agentId: "agent-test",
++    agent: {
++      id: "agent-test",
++      name: "Test",
++      system: "base system",
++      tags: [],
++      model: "openai/gpt-test",
++      model_settings: {},
++    },
++    systemPrompt: "base system",
++    body: { messages: [] } as never,
++    history: [],
++    uiMessages: [],
++    clientTools: [],
++    clientSkills: [],
++  };
++}
++
++afterEach(() => {
++  endAkiTurn("turn-1");
++  endAkiTurn("turn-2");
++});
++
++describe("Aki bridge", () => {
++  test("advertises its wire capabilities", () => {
++    expect(akiBridgeCapabilities()).toMatchObject({
++      version: 1,
++      features: [
++        "turn_overlay",
++        "conversation_reload",
++        "conversation_snapshot",
++        "conversation_restore",
++      ],
++    });
++  });
++
++  test("replays turn_context on every provider request", () => {
++    beginAkiTurn("turn-1", {
++      turn_context: {
++        system_append: "<channel-turn>context</channel-turn>",
++        user_messages: [{ content: "ephemeral context" }],
++      },
++    });
++    const first = applyAkiProviderOverlay(input());
++    const second = applyAkiProviderOverlay(input());
++    expect(first.systemPrompt).toBe(
++      "base system\n\n<channel-turn>context</channel-turn>",
++    );
++    expect(first.uiMessages).toHaveLength(1);
++    expect(second.uiMessages).toHaveLength(1);
++    expect(first.uiMessages[0]?.content).toEqual([
++      { type: "text", text: "ephemeral context" },
++    ]);
++  });
++
++  test("delivers interjections once at the next request boundary", () => {
++    beginAkiTurn("turn-1", {});
++    updateAkiTurn("turn-1", {
++      interjection: { user_messages: [{ content: "interjection" }] },
++    });
++    const first = applyAkiProviderOverlay(input());
++    const second = applyAkiProviderOverlay(input());
++    expect(first.uiMessages).toHaveLength(1);
++    expect(second.uiMessages).toHaveLength(0);
++  });
++
++  test("does not leak overlay state after the turn ends", () => {
++    beginAkiTurn("turn-1", {
++      turn_context: { system_append: "temporary" },
++    });
++    endAkiTurn("turn-1");
++    expect(applyAkiProviderOverlay(input()).systemPrompt).toBe("base system");
++  });
++
++  test("rejects updates for an inactive turn", () => {
++    expect(() =>
++      updateAkiTurn("missing", { interjection: { user_messages: [] } }),
++    ).toThrow("aki turn is not active");
++  });
++});
+diff --git a/src/aki/bridge.ts b/src/aki/bridge.ts
+new file mode 100644
+index 0000000..ca0c161
+--- /dev/null
++++ b/src/aki/bridge.ts
+@@ -0,0 +1,178 @@
++/**
++ * Aki bridge state inside the Letta process.
++ *
++ * The bridge is intentionally process-local: akid installs turn-scoped
++ * overlays over stream-json, and the provider request boundary applies them
++ * without persisting anything into the agent conversation.
++ */
++
++import { randomUUID } from "node:crypto";
++import type { ProviderTurnInput } from "@/backend/dev/provider-turn-executor";
++import type { LocalMessage, LocalUserMessage } from "@/backend/local/local-message";
++
++export interface AkiEphemeralMessage {
++  role?: "user" | "system";
++  content: string | Array<{ type: "text"; text: string }>;
++}
++
++export interface AkiTurnContext {
++  system_append?: string;
++  mid_system_append?: string;
++  user_messages?: AkiEphemeralMessage[];
++}
++
++export interface AkiTurnOverlay {
++  turn_context?: AkiTurnContext;
++  interjection?: { user_messages?: AkiEphemeralMessage[] };
++}
++
++interface AkiTurnState {
++  turnId: string;
++  overlay: AkiTurnOverlay;
++  pendingInterjections: AkiEphemeralMessage[];
++}
++
++let activeTurn: AkiTurnState | null = null;
++
++export function akiBridgeCapabilities(): Record<string, unknown> {
++  return {
++    version: 1,
++    features: [
++      "turn_overlay",
++      "conversation_reload",
++      "conversation_snapshot",
++      "conversation_restore",
++    ],
++  };
++}
++
++function asRecord(value: unknown): Record<string, unknown> {
++  return value !== null && typeof value === "object" && !Array.isArray(value)
++    ? (value as Record<string, unknown>)
++    : {};
++}
++
++function normalizeOverlay(value: unknown): AkiTurnOverlay {
++  const record = asRecord(value);
++  const turnContext = asRecord(record.turn_context);
++  const interjection = asRecord(record.interjection);
++  return {
++    ...(Object.keys(turnContext).length > 0
++      ? { turn_context: turnContext as AkiTurnContext }
++      : {}),
++    ...(Object.keys(interjection).length > 0
++      ? { interjection: interjection as AkiTurnOverlay["interjection"] }
++      : {}),
++  };
++}
++
++export function beginAkiTurn(turnId: string, overlay: unknown): void {
++  activeTurn = {
++    turnId,
++    overlay: normalizeOverlay(overlay),
++    pendingInterjections: [],
++  };
++}
++
++export function updateAkiTurn(turnId: string, overlay: unknown): void {
++  if (!activeTurn || activeTurn.turnId !== turnId) {
++    throw new Error(`aki turn is not active: ${turnId}`);
++  }
++  const next = normalizeOverlay(overlay);
++  const current = activeTurn.overlay;
++  if (next.interjection?.user_messages?.length) {
++    activeTurn.pendingInterjections.push(...next.interjection.user_messages);
++  }
++  activeTurn.overlay = {
++    ...(current.turn_context || next.turn_context
++      ? {
++          turn_context: {
++            ...(current.turn_context ?? {}),
++            ...(next.turn_context ?? {}),
++          },
++        }
++      : {}),
++  };
++}
++
++export function endAkiTurn(turnId: string): void {
++  if (activeTurn?.turnId === turnId) activeTurn = null;
++}
++
++function appendBlock(current: string | undefined, block: string | undefined): string | undefined {
++  const text = block?.trim();
++  if (!text) return current;
++  return current?.trim() ? `${current.trim()}\n\n${text}` : text;
++}
++
++function contentParts(message: AkiEphemeralMessage): LocalUserMessage["content"] {
++  if (typeof message.content === "string") {
++    return [{ type: "text", text: message.content }];
++  }
++  return message.content;
++}
++
++function makeEphemeralMessage(
++  message: AkiEphemeralMessage,
++  input: ProviderTurnInput,
++): LocalUserMessage {
++  const now = new Date().toISOString();
++  return {
++    id: `aki-overlay-${randomUUID()}`,
++    role: "user",
++    content: contentParts(message),
++    timestamp: Date.now(),
++    metadata: {
++      created_at: now,
++      updated_at: now,
++      agent_id: input.agentId,
++      conversation_id: input.conversationId,
++    },
++  };
++}
++
++/**
++ * Apply the active Aki overlay immediately before a provider request.
++ * turn_context is replayed for every request in the turn; interjections are
++ * consumed once at the next request boundary.
++ */
++export function applyAkiProviderOverlay(input: ProviderTurnInput): ProviderTurnInput {
++  const state = activeTurn;
++  if (!state) return input;
++  const turnContext = state.overlay.turn_context ?? {};
++  const interjections = state.pendingInterjections;
++  state.pendingInterjections = [];
++  const messages = [
++    ...(turnContext.user_messages ?? []),
++    ...interjections,
++  ].map((message) => makeEphemeralMessage(message, input));
++  const systemPrompt = appendBlock(
++    input.systemPrompt ?? input.agent.system,
++    turnContext.system_append,
++  );
++  const midConversationSystemPrompt = appendBlock(
++    input.midConversationSystemPrompt,
++    turnContext.mid_system_append,
++  );
++  if (!messages.length && systemPrompt === input.systemPrompt && midConversationSystemPrompt === input.midConversationSystemPrompt) {
++    return input;
++  }
++  return {
++    ...input,
++    ...(systemPrompt !== undefined ? { systemPrompt } : {}),
++    ...(midConversationSystemPrompt !== undefined
++      ? { midConversationSystemPrompt }
++      : {}),
++    uiMessages: [...input.uiMessages, ...messages] as LocalMessage[],
++  };
++}
++
++export function addAkiInterjection(
++  turnId: string,
++  messages: AkiEphemeralMessage[],
++): void {
++  if (!activeTurn || activeTurn.turnId !== turnId) {
++    throw new Error(`aki turn is not active: ${turnId}`);
++  }
++  activeTurn.pendingInterjections.push(...messages);
++}
+diff --git a/src/backend/dev/pi-stream-adapter.ts b/src/backend/dev/pi-stream-adapter.ts
+index 334c67b..c89ddd4 100644
+--- a/src/backend/dev/pi-stream-adapter.ts
++++ b/src/backend/dev/pi-stream-adapter.ts
+@@ -10,6 +10,7 @@ import type {
+ } from "@earendil-works/pi-ai";
+ import { isContextOverflow, Type } from "@earendil-works/pi-ai";
+ 
++import { applyAkiProviderOverlay } from "@/aki/bridge";
+ import type { LocalCompactionStats } from "@/backend/local/compaction";
+ import {
+   emptyLocalUsage,
+@@ -574,6 +575,7 @@ export class PiStreamAdapter implements ProviderStreamAdapter {
+   private async *streamOnce(
+     input: ProviderTurnInput,
+   ): AsyncIterable<ProviderStreamEvent> {
++    input = applyAkiProviderOverlay(input);
+     const tools = toPiTools(input.clientTools);
+     const localModel = await resolveAvailableLocalModelForTurn({
+       model: input.agent.model,
+diff --git a/src/backend/local/aki-conversation-state.test.ts b/src/backend/local/aki-conversation-state.test.ts
+new file mode 100644
+index 0000000..a9785ee
+--- /dev/null
++++ b/src/backend/local/aki-conversation-state.test.ts
+@@ -0,0 +1,74 @@
++import { afterEach, describe, expect, test } from "bun:test";
++import { mkdtemp, readFile, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { LocalStore } from "@/backend/local/local-store";
++
++let root: string | null = null;
++
++afterEach(async () => {
++  if (root) {
++    await rm(root, { recursive: true, force: true });
++    root = null;
++  }
++});
++
++async function storeWithConversation(): Promise<{
++  store: LocalStore;
++  conversationId: string;
++}> {
++  root = await mkdtemp(join(tmpdir(), "aki-conversation-state-"));
++  const store = new LocalStore("agent-test", { storageDir: root });
++  const conversation = store.createConversation({ agent_id: "agent-test" });
++  return { store, conversationId: conversation.id };
++}
++
++function appendUser(store: LocalStore, conversationId: string, text: string): void {
++  store.appendTurnInput(conversationId, {
++    agent_id: "agent-test",
++    messages: [{ role: "user", content: text }],
++  } as never);
++}
++
++function conversationDir(conversationId: string): string {
++  const key = `conversation:${conversationId}`;
++  return join(
++    root as string,
++    "conversations",
++    Buffer.from(key).toString("base64url"),
++  );
++}
++
++describe("Aki conversation state bridge", () => {
++  test("snapshots and restores the logical message list in-process", async () => {
++    const { store, conversationId } = await storeWithConversation();
++    appendUser(store, conversationId, "first");
++    const snapshot = store.snapshotConversation(conversationId, "agent-test");
++    appendUser(store, conversationId, "second");
++    expect(store.listLocalMessages(conversationId)).toHaveLength(2);
++
++    const restored = store.restoreConversation(snapshot.snapshot_id);
++    expect(restored).toMatchObject({ restored: true, message_count: 1 });
++    expect(store.listLocalMessages(conversationId)).toHaveLength(1);
++    const raw = await readFile(
++      join(conversationDir(conversationId), "messages.jsonl"),
++      "utf8",
++    );
++    expect(raw).toContain("first");
++    expect(raw).not.toContain("second");
++  });
++
++  test("reloads a resident conversation from disk without restarting", async () => {
++    const { store, conversationId } = await storeWithConversation();
++    appendUser(store, conversationId, "first");
++    expect(store.listLocalMessages(conversationId)).toHaveLength(1);
++    const reloaded = store.reloadConversationFromDisk(
++      conversationId,
++      "agent-test",
++    );
++    expect(reloaded).toMatchObject({ reloaded: true, message_count: 1 });
++    expect(store.listLocalMessages(conversationId)[0]?.content).toEqual([
++      { type: "text", text: "first" },
++    ]);
++  });
++});
+diff --git a/src/backend/local/local-backend.ts b/src/backend/local/local-backend.ts
+index 6b404b3..02bd4bf 100644
+--- a/src/backend/local/local-backend.ts
++++ b/src/backend/local/local-backend.ts
+@@ -471,6 +471,34 @@ export class LocalBackend extends HeadlessBackend {
+     } as Awaited<ReturnType<Backend["compactConversationMessages"]>>;
+   }
+ 
++  reloadConversation(
++    conversationId: string,
++    agentId?: string,
++  ): { reloaded: true; message_count: number } {
++    return this.store.reloadConversationFromDisk(
++      conversationId,
++      agentId ?? this.store.resolveAgentIdForConversation(conversationId),
++    );
++  }
++
++  snapshotConversation(
++    conversationId: string,
++    agentId?: string,
++  ): { snapshot_id: string; message_count: number; updated_at: string } {
++    return this.store.snapshotConversation(
++      conversationId,
++      agentId ?? this.store.resolveAgentIdForConversation(conversationId),
++    );
++  }
++
++  restoreConversation(snapshotId: string): {
++    restored: true;
++    message_count: number;
++    conversation_id: string;
++  } {
++    return this.store.restoreConversation(snapshotId);
++  }
++
+   protected override async resolveSystemPromptForTurn(input: {
+     conversationId: string;
+     agentId: string;
+diff --git a/src/backend/local/local-store.ts b/src/backend/local/local-store.ts
+index 60f2e63..ae29fda 100644
+--- a/src/backend/local/local-store.ts
++++ b/src/backend/local/local-store.ts
+@@ -271,6 +271,17 @@ export interface LocalStoreOptions {
+   residentMessageTailLimit?: number;
+ }
+ 
++interface AkiConversationSnapshot {
++  snapshotId: string;
++  conversationId: string;
++  agentId: string;
++  conversation: StoredConversation;
++  messages: LocalMessage[];
++  createdAtMs: number;
++}
++
++const AKI_SNAPSHOT_TTL_MS = 60 * 60 * 1000;
++
+ export class LocalBackendNotFoundError extends Error {
+   readonly status = 404;
+ 
+@@ -389,6 +400,10 @@ export class LocalStore {
+     string,
+     LocalCompiledSystemPrompt
+   >();
++  private readonly akiConversationSnapshots = new Map<
++    string,
++    AkiConversationSnapshot
++  >();
+   private readonly messagesById = new Map<string, StoredMessage[]>();
+   // Assistant ids with a stop_reason chunk (turn completed), for rollback.
+   private readonly settledLocalMessageIds = new Set<string>();
+@@ -709,6 +724,118 @@ export class LocalStore {
+     return this.ensureConversation(conversationId, agentId);
+   }
+ 
++  /**
++   * Explicitly discard the resident conversation window and reload it from
++   * disk. Used by the Aki bridge instead of external file edits + restarts.
++   */
++  reloadConversationFromDisk(
++    conversationId: string,
++    agentId: string,
++  ): { reloaded: true; message_count: number } {
++    const key = this.conversationKey(conversationId, agentId);
++    const conversationDir = this.conversationDirForKey(key);
++    if (!conversationDir) {
++      return {
++        reloaded: true,
++        message_count: this.localMessagesForConversation(conversationId, agentId)
++          .length,
++      };
++    }
++    const recordJson = readFileSync(join(conversationDir, "conversation.json"), "utf8");
++    const conversation = parsePersistedLocalConversation(recordJson, (id) =>
++      this.executionAgentIdForConversation(id),
++    );
++    if (!conversation) {
++      throw new Error(`cannot parse conversation ${conversationId}`);
++    }
++    this.localMessagesByConversationKey.delete(key);
++    this.loadedConversationKeys.delete(key);
++    this.tailResidentConversationKeys.delete(key);
++    this.residentTailStartIndexByConversationKey.delete(key);
++    this.unreadTranscriptHeadBytesByKey.delete(key);
++    this.transcriptMetadataByConversationKey.delete(key);
++    this.compiledSystemPromptByConversationKey.delete(key);
++    this.conversations.set(key, conversation);
++    this.conversationRecordJsonByKey.set(key, recordJson);
++    this.transcriptMetadataRecord(key, conversationDir);
++    this.loadConversationMessageTail(key, conversation.id, agentId);
++    this.rebuildMessageIndex();
++    return {
++      reloaded: true,
++      message_count: this.localMessagesForConversation(conversation.id, agentId)
++        .length,
++    };
++  }
++
++  /** Capture the exact logical message list for an in-process Aki rollback. */
++  snapshotConversation(
++    conversationId: string,
++    agentId: string,
++  ): { snapshot_id: string; message_count: number; updated_at: string } {
++    const conversation = this.retrieveConversation(
++      conversationId,
++      agentId,
++    ) as StoredConversation;
++    const messages = this.localMessagesForConversation(
++      conversation.id,
++      agentId,
++    ).map((message) => cloneLocalMessage(message));
++    this.pruneAkiSnapshots();
++    const snapshotId = `aki-snap-${randomUUID()}`;
++    this.akiConversationSnapshots.set(snapshotId, {
++      snapshotId,
++      conversationId: conversation.id,
++      agentId,
++      conversation: JSON.parse(JSON.stringify(conversation)) as StoredConversation,
++      messages,
++      createdAtMs: Date.now(),
++    });
++    return {
++      snapshot_id: snapshotId,
++      message_count: messages.length,
++      updated_at: String(conversation.updated_at ?? ""),
++    };
++  }
++
++  /** Restore a previously captured logical message list and rewrite its transcript. */
++  restoreConversation(
++    snapshotId: string,
++  ): { restored: true; message_count: number; conversation_id: string } {
++    this.pruneAkiSnapshots();
++    const snapshot = this.akiConversationSnapshots.get(snapshotId);
++    if (!snapshot) {
++      throw new Error(`unknown Aki conversation snapshot: ${snapshotId}`);
++    }
++    const key = this.conversationKey(snapshot.conversationId, snapshot.agentId);
++    const messages = snapshot.messages.map((message) => cloneLocalMessage(message));
++    const conversation: StoredConversation = {
++      ...(JSON.parse(JSON.stringify(snapshot.conversation)) as StoredConversation),
++      updated_at: currentIsoTimestamp(),
++    };
++    this.conversations.set(key, conversation);
++    this.localMessagesByConversationKey.set(key, messages);
++    this.markConversationFullyResident(key);
++    this.persistConversationState(conversation.id, snapshot.agentId, {
++      transcript: "rewrite",
++    });
++    this.rebuildMessageIndex();
++    this.akiConversationSnapshots.delete(snapshotId);
++    return {
++      restored: true,
++      message_count: messages.length,
++      conversation_id: conversation.id,
++    };
++  }
++
++  private pruneAkiSnapshots(): void {
++    const cutoff = Date.now() - AKI_SNAPSHOT_TTL_MS;
++    for (const [snapshotId, snapshot] of this.akiConversationSnapshots) {
++      if (snapshot.createdAtMs < cutoff) {
++        this.akiConversationSnapshots.delete(snapshotId);
++      }
++    }
++  }
++
+   retrievePublicConversation(
+     conversationId: string,
+     agentId?: string,
+diff --git a/src/headless.ts b/src/headless.ts
+index e662c56..e84c5d6 100644
+--- a/src/headless.ts
++++ b/src/headless.ts
+@@ -10,9 +10,12 @@ import type {
+ } from "@letta-ai/letta-client/resources/agents/messages";
+ import type { StopReasonType } from "@letta-ai/letta-client/resources/runs/runs";
+ import { resolveActingUserId } from "@/agent/acting-user";
++import { getScopedMemoryFilesystemRoot } from "@/agent/memory-filesystem";
++import { getMemoryGitStatus } from "@/agent/memory-git";
+ import { loadPreloadedSkills } from "@/agent/preloaded-skills";
+ import { shouldLaunchThroughListener } from "@/agent/subagents/subagent-launcher";
+-import { INTERRUPTED_BY_USER } from "@/constants";
++import { estimateSystemPromptSize } from "@/agent/system-prompt-size";
++import { DEFAULT_SUMMARIZATION_MODEL, INTERRUPTED_BY_USER } from "@/constants";
+ import { buildHeadlessSenderReminder } from "@/headless-message-sender";
+ import { createHeadlessResponseState } from "@/headless-response-state";
+ import { createStartupBackend } from "@/headless-startup-backend";
+@@ -37,6 +40,12 @@ import {
+ import { reportSubagentStdoutLoss } from "@/utils/subagent-stdout-failure";
+ import { isAgentIdCompatibleWithBackend } from "./agent/agent-id";
+ import type { ApprovalResult } from "./agent/approval-execution";
++import {
++  akiBridgeCapabilities,
++  beginAkiTurn,
++  endAkiTurn,
++  updateAkiTurn,
++} from "./aki/bridge";
+ import {
+   buildFreshDenialApprovals,
+   extractConflictDetail,
+@@ -76,10 +85,12 @@ import type { SkillSource } from "./agent/skills";
+ import { SessionStats } from "./agent/stats";
+ import {
+   type BackendMode,
++  type ConversationMessageCompactBody,
+   type ConversationCreateBody,
+   type ConversationMessageStreamBody,
+   getBackend,
+ } from "./backend";
++import { LocalBackend } from "./backend/local/local-backend";
+ import {
+   resolveAgentSandboxConnectionId,
+   resolveEnvironmentConnectionId,
+@@ -110,6 +121,8 @@ import {
+   launchReflectionSubagent,
+ } from "./cli/helpers/reflection-launcher";
+ import { appendTranscriptDeltaJsonl } from "./cli/helpers/reflection-transcript";
++import { getReflectionTranscriptState } from "./cli/helpers/reflection-transcript";
++import { createAgentMcpSession } from "./cli/subcommands/mcp";
+ import {
+   type DrainStreamHook,
+   drainStreamWithResume,
+@@ -1733,6 +1746,7 @@ export async function handleHeadlessCommand(
+       system_info_reminder_enabled: systemInfoReminderEnabled,
+       reflection_trigger: effectiveReflectionSettings.trigger,
+       reflection_step_count: effectiveReflectionSettings.stepCount,
++      aki_bridge: akiBridgeCapabilities(),
+       uuid: `init-${agent.id}`,
+     };
+     writeWireMessage(initEvent);
+@@ -3311,6 +3325,7 @@ async function runBidirectionalMode(
+     system_info_reminder_enabled: systemInfoReminderEnabled,
+     reflection_trigger: reflectionSettings.trigger,
+     reflection_step_count: reflectionSettings.stepCount,
++    aki_bridge: akiBridgeCapabilities(),
+     uuid: `init-${agent.id}`,
+   };
+   writeWireMessage(initEvent);
+@@ -3892,6 +3907,27 @@ async function runBidirectionalMode(
+     if (message.type === "control_request") {
+       const subtype = message.request?.subtype;
+       const requestId = message.request_id;
++      const replyAki = (
++        payload?: Record<string, unknown>,
++        error?: string,
++      ): void => {
++        writeWireMessage({
++          type: "control_response",
++          response: error
++            ? {
++                subtype: "error",
++                request_id: requestId ?? "",
++                error,
++              }
++            : {
++                subtype: "success",
++                request_id: requestId ?? "",
++                response: payload ?? {},
++              },
++          session_id: sessionId,
++          uuid: randomUUID(),
++        });
++      };
+ 
+       if (subtype === "initialize") {
+         // Return session info
+@@ -3936,6 +3972,283 @@ async function runBidirectionalMode(
+           uuid: randomUUID(),
+         };
+         writeWireMessage(interruptResponse);
++      } else if (
++        subtype === "aki_begin_turn" ||
++        subtype === "aki_update_turn" ||
++        subtype === "aki_end_turn"
++      ) {
++        const request = message.request as unknown as Record<string, unknown>;
++        const turnId = String(request.turn_id ?? "");
++        try {
++          if (subtype === "aki_begin_turn") {
++            beginAkiTurn(turnId, request.overlay);
++          } else if (subtype === "aki_update_turn") {
++            updateAkiTurn(turnId, request.overlay);
++          } else {
++            endAkiTurn(turnId);
++          }
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: { ok: true, turn_id: turnId },
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
++      } else if (subtype === "aki_reload_conversation") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          if (!(backend instanceof LocalBackend)) {
++            throw new Error("aki bridge requires the local backend");
++          }
++          const conversation = String(request.conversation_id ?? conversationId);
++          const agentId = String(request.agent_id ?? agent.id);
++          const result = backend.reloadConversation(conversation, agentId);
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: result,
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
++      } else if (subtype === "aki_conversation_snapshot") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          if (!(backend instanceof LocalBackend)) {
++            throw new Error("aki bridge requires the local backend");
++          }
++          const conversation = String(request.conversation_id ?? conversationId);
++          const agentId = String(request.agent_id ?? agent.id);
++          const result = backend.snapshotConversation(conversation, agentId);
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: result,
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
++      } else if (subtype === "aki_conversation_restore") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          if (!(backend instanceof LocalBackend)) {
++            throw new Error("aki bridge requires the local backend");
++          }
++          const snapshotId = String(request.snapshot_id ?? "");
++          const result = backend.restoreConversation(snapshotId);
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: result,
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
++      } else if (subtype === "aki_compact") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          if (!(backend instanceof LocalBackend)) {
++            throw new Error("aki bridge requires the local backend");
++          }
++          const conversation = String(request.conversation_id ?? conversationId);
++          const agentId = String(request.agent_id ?? agent.id);
++          const mode = request.mode === undefined ? undefined : String(request.mode);
++          const modes = new Set([
++            "all",
++            "sliding_window",
++            "self_compact_all",
++            "self_compact_sliding_window",
++          ]);
++          if (mode && !modes.has(mode)) {
++            throw new Error(`invalid compaction mode: ${mode}`);
++          }
++          let compactParams: ConversationMessageCompactBody | undefined;
++          if (mode) {
++            const agentRecord = await backend.retrieveAgent(agentId);
++            const settings = (
++              agentRecord as unknown as {
++                compaction_settings?: { model?: string };
++              }
++            ).compaction_settings;
++            compactParams = {
++              compaction_settings: {
++                mode: mode as never,
++                model: settings?.model?.trim() || DEFAULT_SUMMARIZATION_MODEL,
++              },
++            };
++          }
++          const body =
++            conversation === "default"
++              ? ({ agent_id: agentId, ...(compactParams ?? {}) } as ConversationMessageCompactBody)
++              : compactParams;
++          const result = await backend.compactConversationMessages(
++            conversation,
++            body,
++          );
++          replyAki((result ?? {}) as unknown as Record<string, unknown>);
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_reflect") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          const agentId = String(request.agent_id ?? agent.id);
++          const conversation = String(request.conversation_id ?? conversationId);
++          const result = await launchReflectionSubagent({
++            agentId,
++            conversationId: conversation,
++            memfsEnabled: settingsManager.isMemfsEnabled(agentId),
++            triggerSource: "manual",
++            reflectionSettings,
++            description: AUTO_REFLECTION_DESCRIPTION,
++            recompileByConversation: systemPromptRecompileByConversation,
++            recompileQueuedByConversation: queuedSystemPromptRecompileByConversation,
++          });
++          replyAki(
++            result.launched
++              ? {
++                  launched: true,
++                  payload_path: result.payloadPath,
++                  subagent_id: result.subagentId,
++                }
++              : {
++                  launched: false,
++                  reason: result.reason,
++                },
++          );
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_reflection_status") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          const agentId = String(request.agent_id ?? agent.id);
++          const conversation = String(request.conversation_id ?? conversationId);
++          const state = await getReflectionTranscriptState(agentId, conversation);
++          replyAki(state as unknown as Record<string, unknown>);
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_memory_status") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          const agentId = String(request.agent_id ?? agent.id);
++          const status = await getMemoryGitStatus(agentId);
++          replyAki(status as unknown as Record<string, unknown>);
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_memory_tokens") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          const agentId = String(request.agent_id ?? agent.id);
++          const memoryDir = String(
++            request.memory_dir ?? getScopedMemoryFilesystemRoot(agentId),
++          );
++          const estimate = estimateSystemPromptSize(memoryDir, true);
++          replyAki({ total_tokens: estimate.total, files: estimate.files });
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_mcp_list") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          const agentId = String(request.agent_id ?? agent.id);
++          const servers = settingsManager.getMcpServers(agentId);
++          replyAki({ servers: servers.map((server) => ({ name: server.name })) });
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        }
++      } else if (subtype === "aki_mcp_tools") {
++        const request = message.request as unknown as Record<string, unknown>;
++        const session = createAgentMcpSession(
++          String(request.agent_id ?? agent.id),
++        );
++        try {
++          const tools = await session.listTools();
++          replyAki({ tools });
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        } finally {
++          await session.close();
++        }
++      } else if (subtype === "aki_mcp_call") {
++        const request = message.request as unknown as Record<string, unknown>;
++        const session = createAgentMcpSession(
++          String(request.agent_id ?? agent.id),
++        );
++        try {
++          const toolName = String(request.tool_name ?? "");
++          const args =
++            request.args !== null &&
++            typeof request.args === "object" &&
++            !Array.isArray(request.args)
++              ? (request.args as Record<string, unknown>)
++              : {};
++          const result = await session.callTool(toolName, args);
++          replyAki({ result });
++        } catch (error) {
++          replyAki(undefined, error instanceof Error ? error.message : String(error));
++        } finally {
++          await session.close();
++        }
+       } else if (subtype === "register_external_tools") {
+         // Register external tools from SDK
+         const toolsRequest = message.request as {
+diff --git a/src/types/protocol.ts b/src/types/protocol.ts
+index c552b93..049e9c8 100644
+--- a/src/types/protocol.ts
++++ b/src/types/protocol.ts
+@@ -109,6 +109,7 @@ export interface SystemInitMessage extends MessageEnvelope {
+   system_info_reminder_enabled?: boolean;
+   reflection_trigger?: "off" | "step-count" | "compaction-event";
+   reflection_step_count?: number;
++  aki_bridge?: Record<string, unknown>;
+   // output_style omitted - Letta Code doesn't have output styles feature
+ }
+ 

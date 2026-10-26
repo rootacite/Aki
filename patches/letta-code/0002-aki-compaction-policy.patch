@@ -1,0 +1,82 @@
+diff --git a/src/backend/dev/provider-turn-executor.ts b/src/backend/dev/provider-turn-executor.ts
+index 49d681f..3027503 100644
+--- a/src/backend/dev/provider-turn-executor.ts
++++ b/src/backend/dev/provider-turn-executor.ts
+@@ -31,8 +31,7 @@ import type {
+ } from "./headless-turn-executor";
+ import { normalizeLocalProviderError } from "./local-provider-errors";
+ 
+-const LOCAL_CONTEXT_COMPACTION_RESERVE_TOKENS = 16_384;
+-const LOCAL_SMALL_CONTEXT_COMPACTION_RESERVE_RATIO = 0.2;
++const DEFAULT_AKI_COMPACTION_RATIO = 0.5;
+ 
+ export interface ProviderTurnInput {
+   conversationId: string;
+@@ -249,14 +248,12 @@ export function contextCompactionThreshold(
+     return undefined;
+   }
+ 
+-  const reserveTokens = Math.min(
+-    LOCAL_CONTEXT_COMPACTION_RESERVE_TOKENS,
+-    Math.max(
+-      1,
+-      Math.floor(contextWindow * LOCAL_SMALL_CONTEXT_COMPACTION_RESERVE_RATIO),
+-    ),
+-  );
+-  return Math.max(0, contextWindow - reserveTokens);
++  const configured = Number(process.env.AKI_COMPACTION_RATIO);
++  const ratio =
++    Number.isFinite(configured) && configured > 0 && configured <= 1
++      ? configured
++      : DEFAULT_AKI_COMPACTION_RATIO;
++  return Math.max(0, Math.floor(contextWindow * ratio));
+ }
+ 
+ export function shouldCompactForContextPressure(input: {
+diff --git a/src/backend/provider-turn-executor.test.ts b/src/backend/provider-turn-executor.test.ts
+index 5c82fbc..ff5ee95 100644
+--- a/src/backend/provider-turn-executor.test.ts
++++ b/src/backend/provider-turn-executor.test.ts
+@@ -69,25 +69,35 @@ function assistantMessage(usage = emptyLocalUsage()): LocalAssistantMessage {
+ }
+ 
+ describe("ProviderTurnExecutor", () => {
+-  test("reserves Pi's output headroom before the context window is full", () => {
+-    expect(contextCompactionThreshold(100_000)).toBe(83_616);
++  test("uses Aki's configurable 0.5 compaction ratio", () => {
++    delete process.env.AKI_COMPACTION_RATIO;
++    expect(contextCompactionThreshold(100_000)).toBe(50_000);
+     expect(
+       shouldCompactForContextPressure({
+-        contextTokens: 86_045,
++        contextTokens: 50_001,
+         contextWindow: 100_000,
+       }),
+     ).toBe(true);
+     expect(
+       shouldCompactForContextPressure({
+-        contextTokens: 83_616,
++        contextTokens: 50_000,
+         contextWindow: 100_000,
+       }),
+     ).toBe(false);
+   });
+ 
+-  test("caps the reserve for small local context windows", () => {
+-    expect(contextCompactionThreshold(10_000)).toBe(8_000);
+-    expect(contextCompactionThreshold(1_000)).toBe(800);
++  test("honors AKI_COMPACTION_RATIO", () => {
++    process.env.AKI_COMPACTION_RATIO = "0.8";
++    expect(contextCompactionThreshold(100_000)).toBe(80_000);
++    process.env.AKI_COMPACTION_RATIO = "invalid";
++    expect(contextCompactionThreshold(100_000)).toBe(50_000);
++    delete process.env.AKI_COMPACTION_RATIO;
++  });
++
++  test("scales the threshold for small local context windows", () => {
++    delete process.env.AKI_COMPACTION_RATIO;
++    expect(contextCompactionThreshold(10_000)).toBe(5_000);
++    expect(contextCompactionThreshold(1_000)).toBe(500);
+     expect(contextCompactionThreshold(0)).toBeUndefined();
+     expect(contextCompactionThreshold(Number.NaN)).toBeUndefined();
+   });
