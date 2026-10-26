@@ -229,12 +229,15 @@ wake routing → identity → channel turn → transcript → live context`：
    `@Owner` 转述规则，每个 turn 刷新。
 4. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
    execution guidance、专属域规则和输出规则。
-5. `<channel-wake-routing>`：`@用户`、`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
-   真实 system prompt，并随 profile username 刷新。
+5. `<channel-wake-routing>`：`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
+   持久 system prompt，并随 profile username 刷新；每轮 `<reply-target>` 再给出柔和的
+   用户-only 提示。
 6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
 7. `<channel-turn>`：当前频道 turn 的 `wake-reminder`、新消息 sender/seq/正文、guidance、
    initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
-8. `<channel-transcript>`：仅频道来源的 turn 包含；其中有 `<profiles>` 和 `<messages>`。
+   bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
+8. `<channel-transcript>`：仅频道来源的 turn 包含；bridge 模式下同样只走 turn overlay，
+   不写回持久 system prompt；其中有 `<profiles>` 和 `<messages>`。
 9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本，
    始终最后追加。
 
@@ -593,7 +596,8 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 - 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
 因此，只想让用户看到、不要惊动其他 agent 时，可以在回复任意位置写 `@Master`；也可以继续
-使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。per-turn `<reply-target>` 会提示“当前只需要回复用户”；
+使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。per-turn `<reply-target>` 会提示
+“如果你认为当前只需要回复用户”；
 `@<username>` 可放在任意位置，并从发布内容中移除，但回复
 仍会写入频道消息记录。
 
@@ -602,7 +606,7 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 用户生效。
 
 这些选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
-`<channel-transcript>` 使用。
+`<channel-transcript>` 使用。群聊消息记录独立于该块是否持久化，始终保留在频道历史中。
 
 ### 有序讨论与 `wait_other`
 

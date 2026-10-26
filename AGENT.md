@@ -282,12 +282,11 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `message-time: YYYY-MM-DD HH:mm`，使用消息 `sent_at` 转换到本机时区。历史上下文可由
   `scripts/migrate-channel-turn-times.py` 迁移：默认 dry-run；`--apply` 前会备份各 profile
   的 conversation 文件，优先匹配频道记录，旧记录缺时间时仅在能唯一对应时补写。
-- 频道成员表：当前 turn 的 user prompt 仍包含 `<channel-context>` 成员表，正文写入
-  `wake-reminder` 的说话者。用户发言使用 `${{USERNAME}}` 占位符替换为 profile 的
-  `[gateway] username`，智能体发言使用成员名，不再追加类型标签。turn 正常结束后 akid 只从该条已
-  持久化的 user message 删除成员表，保留 message-time、sender、seq、正文和附件，并把
-  `conversation.json.updated_at` 改为严格不同的时间，让 Letta 淘汰 resident window 后从
-  `messages.jsonl` 重载。原始 prompt、message id 和 turn id 写入
+- 频道成员表：bridge 模式下 `<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，
+  不写入持久 user message，因此 turn 结束后无需删除。旧后端没有 bridge 时才回退为写入
+  user prompt、turn 后删除成员表并 bump `conversation.json.updated_at`。用户发言使用
+  `${{USERNAME}}` 占位符替换为 profile 的 `[gateway] username`，智能体发言使用成员名，
+  不再追加类型标签。旧后端的原始 prompt、message id 和 turn id 写入
   `~/.aki/channel-prompt-journal/<profile>.jsonl`；`scripts/restore-channel-prompts.py`
   可按 turn 恢复。历史 prompt 由 `scripts/migrate-channel-prompts.py` 迁移，默认 dry-run，
   `--apply` 先完整备份并停止/重启对应 `akid@<profile>.service`。
@@ -329,12 +328,14 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 在系统提示词末尾原地刷新唯一的 `<live-context>` 块；截图只放路径与元数据，默认 64K token 上限。
-- System prompt 固定顺序：`base → core memory → <tool-ownership> →
+- 实际 API call 的 system prompt 固定顺序：`base → core memory → <tool-ownership> →
   <channel-policy> → <channel-wake-routing> → <channel-identity> →
   <channel-turn> → <channel-transcript> → <solo-mode> → <solo-transcript> →
   <live-context>`。
-  policy/wake routing 在启动时写入；turn 仅频道 turn 注入，local turn 会清除；transcript
-  仅频道/proactive turn 注入；live context 始终最后。
+  policy/wake routing/identity/live context 写入持久 system prompt；bridge 模式下
+  `<channel-turn>`、`<channel-transcript>`、channel roster 和 solo 块只作为当前 turn 的
+  overlay 拼进 API 请求，不写回 agent record 或 `system-prompt.json`，turn 结束后自然消失。
+  旧后端没有 bridge 时才回退为写回 system prompt 并清除。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
   schema 过滤、Letta ownership mod、akid 运行时校验和 `<tool-ownership>` 提示词共同
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。

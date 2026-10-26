@@ -119,20 +119,22 @@ bubblewrap 仍作为底层写入边界。
 per-turn `<channel-turn>` 里的 `<reply-target>` 会说明“如果你认为当前只需要回复用户”，并提示可用
 `@<username>`（任意位置）只唤醒用户；`<wake-reminder>` 只保留 `^` 排除规则。
 
-`<channel-policy>` 保存静态频道规则；`<channel-turn>` 保存当前 turn 的 guidance、
-initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。两者都在 system
-prompt 中；每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
+`<channel-policy>` 保存静态频道规则并写入持久 system prompt；`<channel-turn>` 保存当前 turn 的 guidance、
+initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。
+bridge 模式下 `<channel-turn>` 只作为 turn overlay 拼进实际 API 请求的 system prompt，
+不写回 agent record 或 `system-prompt.json`；旧后端无 bridge 时才回退为持久写入。每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
 这条 `wake-reminder` 还会通过 `当前正在和你说话的是 ${{USERNAME}}` 模板写明当前说话者：
-用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。当前 turn 仍能看到
-user prompt 里的完整 `<channel-context>` 成员表；turn 正常结束后，akid 只从已持久化的
-user message 中删除该成员表，保留 message-time、sender、seq、正文和附件。随后它原子重写
-`messages.jsonl`，并把 `conversation.json.updated_at` 改成严格不同的值，使 Letta 在对
-下一个 turn 调用 `findConversation` 时淘汰 resident messages 并从磁盘重载。原始 prompt
-先写入 `~/.aki/channel-prompt-journal/<profile>.jsonl` 以便按 turn 恢复；compaction、
-边界失效或无法唯一匹配时只记录错误，不修改文件。
+用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。bridge 模式下
+`<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，不写入持久 user message，
+turn 结束后自然消失。旧后端没有 bridge 时才回退为 user prompt + turn 后删除成员表，
+原子重写 `messages.jsonl` 并 bump `conversation.json.updated_at`，让 Letta 淘汰 resident
+messages 后重载。旧后端的原始 prompt 先写入 `~/.aki/channel-prompt-journal/<profile>.jsonl`
+以便按 turn 恢复；compaction、边界失效或无法唯一匹配时只记录错误，不修改文件。
 
-最近频道文本会单独写入频道 turn 的系统提示词 `<channel-transcript>`，默认最多 64K
-**token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。记录包含智能体的中间
+最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 system prompt，
+默认最多 64K **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。bridge 模式下
+该块只存在于 turn overlay，不写入持久 system prompt；群聊消息本身仍永久保存在
+`~/.aki/channel-history`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
 消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息
 `<new-message>` 中；`<channel-turn>` 也会明确写出新消息的 sender、seq、source 和
