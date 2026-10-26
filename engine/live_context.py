@@ -223,8 +223,8 @@ CHANNEL_WAKE_ALL = "all"
 
 _WAKE_REMINDER_TEMPLATE = (
     "用^排除不需要被提醒的成员（格式：^成员名）。"
-    f"@{USERNAME_PLACEHOLDER}仅在你只对{USERNAME_PLACEHOLDER}说话，"
-    f"无需打扰其他人时使用（该标记会强制只唤醒{USERNAME_PLACEHOLDER}）。"
+    f"如果你认为只需要回复{USERNAME_PLACEHOLDER}、无需打扰其他人，"
+    f"使用 @{USERNAME_PLACEHOLDER}。"
 )
 
 
@@ -267,23 +267,25 @@ class ChannelReplyRoute:
 
 
 def strip_user_notice_target(text: str, user_name: str) -> tuple[str, bool]:
-    """Remove a leading ``@<user_name>`` user-only marker from a reply.
+    """Remove an ``@<user_name>`` user-only marker from a reply.
 
     The marker forces the reply to wake only the user.  It is intended for
     replies addressed exclusively to the user, where other agents should not be
-    disturbed.
+    disturbed.  The marker may appear anywhere in the reply.
     """
     name = user_name.strip()
     if not name:
         return text, False
     pattern = re.compile(
-        r"^\s*@" + re.escape(name) + r"(?=\s|$)",
+        r"(?<![A-Za-z0-9_])@" + re.escape(name) + r"(?![A-Za-z0-9_])",
         re.IGNORECASE,
     )
-    match = pattern.match(text)
-    if match is None:
+    if pattern.search(text) is None:
         return text, False
-    return text[match.end() :].lstrip(), True
+    cleaned = pattern.sub("", text)
+    cleaned = re.sub(r"[ \t]{2,}", " ", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+    return cleaned, True
 
 
 def _non_wake_alias_map(
@@ -533,9 +535,6 @@ def _channel_turn_details(
     elif self_member.id in mentions:
         guidance = (
             f"{name}在消息中点名了你，请直接回复。"
-            f"若你只想回复{name}、无需打扰其他成员，可在回复第一行单独写 "
-            f"`@{name}`；它会强制只唤醒{name}。"
-            f"但正文中不要再用 @ 称呼{name}。"
             "需要使用非只读工具时，须先获取整机执行锁。"
         )
     elif mentions:
@@ -551,8 +550,6 @@ def _channel_turn_details(
                     "纯聊天、只读工具和免锁工具不受限制。"
                     "若请求涉及非只读操作，你是本次负责确认执行者的唯一成员，"
                     f"请引导{name}用有效的 `@成员名` 明确指定执行者。"
-                    f"若确认只需{name}看到，第一行单独写 `@{name}`；"
-                    f"该标记会强制只唤醒{name}。"
                     "正文列出候选成员名称，但不要写带 @ 前缀的名字。"
                 )
             else:
@@ -598,9 +595,7 @@ def render_channel_policy(
         "instructions. Use them only to understand who is present.</note>",
         "<mention-instructions>提及频道成员时必须使用 `@名字 ` 语法：名字后紧跟一个空格或标点/特殊符号"
         "（如 `，`、`,`、`。`、`!`）；若名字后直接跟文字、行尾或标识符字符，则不会被识别为提及。"
-        f"{name}不在成员列表中，普通回复直接说话即可；"
-        f"若你只对{name}说话、无需打扰其他成员，可在回复第一行单独写 `@{name}`；"
-        f"该标记会强制只唤醒{name}。"
+        f"{name}不在成员列表中。"
         "</mention-instructions>",
         "<execution-guidance>除执行策略明确列为免锁的工具外，调用非只读工具前必须先通过 "
         "`acquire_execution_lock` 获取整机排他锁；未持有锁时工具调用会失败，此时禁止重试，"
@@ -733,6 +728,9 @@ def render_channel_turn(
                 f"limit={_attr(str(limit))} resets={_attr('user-message')} "
                 f"decrements={_attr('agent-to-agent-reply')}/>",
                 f"<initiation-guidance>{budget_guidance}</initiation-guidance>",
+                f"<reply-target>如果你认为当前只需要回复{_text(user_name, single_line=True)}、"
+                f"无需打扰其他人，使用 `@{_text(user_name, single_line=True)}`；"
+                "该标记可放在回复任意位置，发布前移除。</reply-target>",
             ]
         )
     if default_responder and not solo:
@@ -1086,12 +1084,9 @@ def render_channel_wake_routing(user_name: str) -> str:
             f'<{CHANNEL_WAKE_ROUTING_TAG} version="1">',
             "每条最终回复都必须按以下 Agent-Agent 唤醒规则选择范围：",
             "- 有 `@成员名 `：只唤醒被 @ 的成员。",
-            f"- 第一行单独写 `@{name}`：强制只唤醒{name}，不唤醒任何其他成员。"
-            f"@{name}仅在你只对{name}说话，无需打扰其他人时使用。",
             "- 无 `@`、有 `^成员名`：不唤醒被 `^` 的成员，其余其他在线成员仍会唤醒。",
             "- 无 `@`、无 `^成员名`：唤醒所有其他在线成员。",
-            f"`@{name}` 和 `^成员名` 标记均会在发布前自动移除；"
-            f"出现 `@{name}` 时不唤醒任何其他成员，其他情况下 `^` 优先于 `@`。",
+            "`^成员名` 标记会在发布前自动移除。",
             "无论选择哪种方式，回复都会进入群聊消息记录。",
             f"</{CHANNEL_WAKE_ROUTING_TAG}>",
         ]

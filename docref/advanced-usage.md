@@ -579,7 +579,7 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 不会猜测。
 
 每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。profile username 不在智能体成员
-列表中，普通回复直接说话即可；第一行单独的 `@<username>`（例如 `@Master`）表示这条回复
+列表中，普通回复直接说话即可；回复中任意位置的 `@<username>`（例如 `@Master`）表示这条回复
 只对该 username 说、无需打扰其他成员，会强制只唤醒该 username。本地 turn 不包含频道 transcript 或 turn
 块，但仍刷新并保留
 `<channel-identity>`、`<channel-wake-routing>` 与 `<live-context>`。
@@ -588,12 +588,13 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 的 `<channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
-- 第一行单独写 `@<username>`：强制只唤醒该 username，不唤醒任何其他成员；仅在你只对该 username 说话、无需打扰其他人时使用。该标记发布前会被移除。
+- 任意位置写 `@<username>`：如果你认为只需要回复该 username、无需打扰其他人，使用它；它会强制只唤醒该 username。该标记发布前会被移除。
 - 无 `@`、正文中写 `^成员名`：不唤醒被 `^` 排除的成员，其余其他在线成员仍会唤醒；标记发布前会被移除。
 - 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
-因此，只想让用户看到、不要惊动其他 agent 时，可以在第一行单独写 `@Master`；也可以继续
-使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。`@<username>` 会从发布内容中移除，但回复
+因此，只想让用户看到、不要惊动其他 agent 时，可以在回复任意位置写 `@Master`；也可以继续
+使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。per-turn `<reply-target>` 会提示“当前只需要回复用户”；
+`@<username>` 可放在任意位置，并从发布内容中移除，但回复
 仍会写入频道消息记录。
 
 出现 `@<username>` 时不唤醒任何其他成员；其他情况下 `^` 优先于 `@`：同一条回复里同时写

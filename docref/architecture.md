@@ -113,10 +113,11 @@ MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的
 bubblewrap 仍作为底层写入边界。
 
 `<channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
-有 `@成员` 时只唤醒被点名的成员；第一行 `@<username>` 强制只唤醒该 username、不唤醒任何其他成员，
+有 `@成员` 时只唤醒被点名的成员；回复任意位置出现 `@<username>` 时强制只唤醒该 username、不唤醒任何其他成员，
 仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
 都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；每轮 user 消息
-头部还会重复一条包含 `^` 排除与 `@<username>` 使用条件的简短提醒。
+per-turn `<channel-turn>` 里的 `<reply-target>` 会说明“如果你认为当前只需要回复用户”，并提示可用
+`@<username>`（任意位置）只唤醒用户；`<wake-reminder>` 只保留 `^` 排除规则。
 
 `<channel-policy>` 保存静态频道规则；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。两者都在 system
@@ -198,11 +199,11 @@ QoS 1 文本事件（`kind=wait_user`）即时广播；该事件不进入频道�
 通过活跃 turn 收到补充，但不会额外唤醒既不在等待、也不在 working 的成员。有 `@` 时仍按点名
 路由。Tokifactor 用同一状态在成员条上显示蓝色等待边框。
 
-最终回复的 Agent-Agent 唤醒规则是：有 `@成员名` 时只唤醒被点名的成员；第一行单独的
-`@<username>` 强制只唤醒该 username、不唤醒任何其他 agent，仅用于只对该 username 说话、无需打扰其他人
+最终回复的 Agent-Agent 唤醒规则是：有 `@成员名` 时只唤醒被点名的成员；回复中任意位置出现
+`@<username>` 时强制只唤醒该 username、不唤醒任何其他 agent，仅用于只对该 username 说话、无需打扰其他人
 时；无 `@` 而有 `^成员名`（可多个，例如 `^Aki ^Fuyu`）时，不唤醒被 `^` 排除的成员，
 其余其他在线成员仍会唤醒；无 `@` 且无 `^` 时唤醒所有其他在线成员。标记在发布、transcript
-和历史写入前被移除；出现 `@<username>` 时不唤醒任何其他成员，其他情况下 `^` 与 `@`
+和历史写入前被移除；出现 `@<username>`（任意位置）时不唤醒任何其他成员，其他情况下 `^` 与 `@`
 冲突时 `^` 优先。
 实现上把“全员减排除名单”转换为既有的 `wake=mentions` + `wakeIds`，不新增 MQTT 字段。
 

@@ -1303,7 +1303,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
+            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。", prompt
         )
 
     async def test_channel_turn_is_written_to_real_system_prompt(self) -> None:
@@ -1331,7 +1331,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<text>hello</text>", system)
         self.assertIn("<wake-reminder>用^排除不需要被提醒的成员", system)
         self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用", system
+            "<reply-target>如果你认为当前只需要回复Master、无需打扰其他人，使用 `@Master`",
+            system,
         )
         self.assertIn("<guidance>", system)
         self.assertIn('remaining="3"', system)
@@ -1360,25 +1361,21 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         agent_system = self._agent_system(agent_path)
         self.assertIn("<channel-wake-routing", agent_system)
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", agent_system)
-        self.assertIn("强制只唤醒Master，不唤醒任何其他成员。", agent_system)
-        self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用。", agent_system
-        )
         self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", agent_system)
+        self.assertNotIn("@Master", agent_system)
 
         compiled = json.loads(prompt_path.read_text(encoding="utf-8"))["content"]
         self.assertIn("<channel-wake-routing", compiled)
         self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", compiled)
-        self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用。", compiled
-        )
         self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", compiled)
+        self.assertNotIn("@Master", compiled)
 
         channel_prompt = server._channel_prompt("Acite", "sender-1", "你好")
         self.assertNotIn("<wake-routing>", channel_prompt)
         self.assertNotIn("不希望其他成员注意到这条消息", channel_prompt)
         self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用", channel_prompt
+            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。",
+            channel_prompt,
         )
 
     async def test_agent_channel_message_uses_transcript_not_user_role(self) -> None:
@@ -2347,7 +2344,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             prompt,
         )
         self.assertIn(
-            "@Master仅在你只对Master说话，无需打扰其他人时使用", prompt
+            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。", prompt
         )
         self.assertNotIn("<channel-turn", prompt)
 
@@ -3290,7 +3287,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             user_name=server.config.username,
         )
         self.assertIn("Master在消息中点名了你，请直接回复。", own)
-        self.assertIn("它会强制只唤醒Master", own)
+        self.assertIn("当前只需要回复Master", own)
         self.assertNotIn("未点名你", own)
         await server._on_channel_control(
             TextEnvelope(
