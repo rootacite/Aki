@@ -107,12 +107,16 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 需要 Linux、systemd 用户服务和 Python 3。
 
 ```bash
+git submodule update --init --recursive          # 拉取固定版本的 Letta Code
+python3 scripts/build-letta.py --build --install # 构建 vendored Letta 运行时
 python3 install-daemon.py --dry-run   # 预览安装内容
 python3 install-daemon.py             # 安装 akid@.service / akid-proxy@.service
 python3 install-daemon.py --status    # 查看服务状态
 ```
 
-安装后 `akictl` 会链接到 `~/.local/bin/akictl`。第一次启动会自动创建 `~/.aki/aki.conf`。
+安装后 `akictl` 会链接到 `~/.local/bin/akictl`。生产服务使用
+`~/.local/lib/aki/letta-code/current` 的 vendored 运行时，不依赖系统 `PATH` 里的 `letta`。
+安装器会在运行时缺失时自动构建。第一次启动会自动创建 `~/.aki/aki.conf`。
 
 ### 连接 tokifactor
 

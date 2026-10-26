@@ -35,6 +35,9 @@
   proxy；proxy 是独立的 `akid-proxy@.service`，不由 akid 进程拉起。
 - **一个长驻后端，一个活跃 turn。** `akid` 监督一个 Letta stream-json 子进程；多个客户端
   可以同时连接，但同一时间只有一个 turn 在跑，后续消息 FIFO 排队。
+- **Vendored Letta。** Letta Code 固定为 `vendor/letta-code` submodule；生产服务通过
+  `bin/letta-aki` 使用本地构建的运行时，不解析系统 `PATH`。Aki 补丁保存在
+  `patches/letta-code/`，由 `scripts/build-letta.py` 应用于隔离构建目录。
 - **审批属于用户。** 本地 turn 的危险工具只向发起客户端请求批准；超时默认拒绝该工具，
   但 turn 继续。MQTT 频道发起的 turn 由频道里的真人成员审批；如果该 turn 是被其他
   智能体的消息唤醒的，审批权仍归真人用户，不归触发它的智能体。频道 turn 的审批事件
@@ -286,7 +289,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/operation_journal.py`：归来上下文使用的工具调用台账。
 - `engine/layer_process.py`：拉起并监督 `aki-layer` 透明画布进程。
 - `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。
-- `engine/letta_process.py`：Letta 子进程监督、崩溃重启、control request。
+- `engine/letta_process.py`：Letta 子进程监督、崩溃重启、control request 与 Aki bridge。
 - `engine/writable.py`：可写目录注册表、路径校验与 bwrap 策略。
 - `engine/avatar.py`：接口无关的头像资源（路径、MIME、SHA-256）。
 - `engine/sandbox_exec.py`：在 bwrap 内启动 Letta 及其全部子进程。
@@ -297,7 +300,11 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
 - `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
 - `aki-layer/`：Qt Quick + LayerShellQt 透明全屏画布层（overlay layer）。
-- `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装与 legacy 迁移。
+- `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装、vendored Letta 构建与 legacy 迁移。
+- `vendor/letta-code/`：固定版本的 Letta Code upstream submodule。
+- `patches/letta-code/`：Aki 对 Letta 的源码补丁与对应测试。
+- `scripts/build-letta.py`：校验 lock、构建/安装 vendored Letta 运行时。
+- `bin/letta-aki`：生产环境使用的 Letta 运行时包装器。
 - `scripts/sync-persona.py`：把指定 profile 的 userdata 模板渲染并写入 MemFS。
 - `prompts/aki-system.md`、`prompts/fuyu-system.md`：两个已上线成员的基座系统提示词。
 - `userdata/`：Aki 的非隐私人格模板、旧版称呼迁移源和同步清单。
@@ -317,6 +324,9 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
   `aki.admin.zero_initiation_budget`（仅同 UID，且 `source_profile=aki`）。
 - 事件为 `aki.event` 通知，携带 `turn_id`、单调递增 `seq`、`type`、`data`、
   `timestamp`，只发送给该 turn 的发起连接。
+- 长驻 Letta 在 `system/init.aki_bridge` 广告 bridge 能力；`akid` 通过
+  `aki_begin_turn`/`aki_update_turn`/`aki_end_turn` 注入 turn 级 overlay，通过
+  `aki_conversation_snapshot`/`aki_conversation_restore` 在进程内回滚临时 turn。
 - 同一时间只有一个活跃 turn；最多 32 个排队 turn，FIFO；同一连接内
   `client_message_id` 10 分钟内幂等。
 

@@ -11,6 +11,7 @@ import time
 
 WRITE_LOCK = threading.Lock()
 LAST_INPUT_PATH = os.environ.get("FAKE_LETTA_LAST_INPUT", "")
+LAST_CONTROL_PATH = os.environ.get("FAKE_LETTA_LAST_CONTROL", "")
 
 
 def emit(message: dict) -> None:
@@ -665,6 +666,12 @@ class FakeLetta:
             request = message.get("request") or {}
             subtype = request.get("subtype")
             request_id = str(message.get("request_id") or "")
+            if LAST_CONTROL_PATH:
+                try:
+                    with open(LAST_CONTROL_PATH, "a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(message, ensure_ascii=False) + "\n")
+                except OSError:
+                    pass
             if subtype == "interrupt":
                 self.interrupt.set()
                 emit(
@@ -734,6 +741,164 @@ class FakeLetta:
                         },
                     }
                 )
+            elif subtype in ("aki_begin_turn", "aki_update_turn", "aki_end_turn"):
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "ok": True,
+                                "turn_id": request.get("turn_id"),
+                            },
+                        },
+                    }
+                )
+            elif subtype == "aki_reload_conversation":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"reloaded": True, "message_count": 1},
+                        },
+                    }
+                )
+            elif subtype == "aki_conversation_snapshot":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "snapshot_id": "fake-snapshot",
+                                "message_count": 1,
+                                "updated_at": "2026-01-01T00:00:00Z",
+                            },
+                        },
+                    }
+                )
+            elif subtype == "aki_conversation_restore":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "restored": True,
+                                "message_count": 1,
+                                "conversation_id": "default",
+                            },
+                        },
+                    }
+                )
+            elif subtype == "aki_compact":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "compacted": True,
+                                "mode": request.get("mode") or "default",
+                                "num_messages_before": 1,
+                                "num_messages_after": 0,
+                                "summary": "fake compaction",
+                            },
+                        },
+                    }
+                )
+            elif subtype == "aki_reflect":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"launched": False, "reason": "no_payload"},
+                        },
+                    }
+                )
+            elif subtype == "aki_reflection_status":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "last_reflection_started_at": "",
+                                "last_reflection_succeeded_at": "",
+                            },
+                        },
+                    }
+                )
+            elif subtype == "aki_memory_status":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"dirty": False, "aheadOfRemote": False},
+                        },
+                    }
+                )
+            elif subtype == "aki_memory_tokens":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"total_tokens": 1, "files": []},
+                        },
+                    }
+                )
+            elif subtype == "aki_mcp_list":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"servers": []},
+                        },
+                    }
+                )
+            elif subtype == "aki_mcp_tools":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {"tools": []},
+                        },
+                    }
+                )
+            elif subtype == "aki_mcp_call":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "result": {
+                                    "content": [
+                                        {"type": "text", "text": "fake mcp"}
+                                    ]
+                                }
+                            },
+                        },
+                    }
+                )
             return
         if kind == "control_response":
             response = message.get("response") or {}
@@ -743,16 +908,27 @@ class FakeLetta:
 
 def main() -> int:
     fake = FakeLetta()
-    emit(
-        {
-            "type": "system",
-            "subtype": "init",
-            "session_id": "fake-session",
-            "agent_id": "fake-agent",
-            "conversation_id": "default",
-            "model": "fake/model",
-            "tools": [],
+    init_payload = {
+        "type": "system",
+        "subtype": "init",
+        "session_id": "fake-session",
+        "agent_id": "fake-agent",
+        "conversation_id": "default",
+        "model": "fake/model",
+        "tools": [],
+    }
+    if os.environ.get("FAKE_LETTA_AKI_BRIDGE") == "1":
+        init_payload["aki_bridge"] = {
+            "version": 1,
+            "features": [
+                "turn_overlay",
+                "conversation_reload",
+                "conversation_snapshot",
+                "conversation_restore",
+            ],
         }
+    emit(
+        init_payload
     )
     for line in sys.stdin:
         line = line.strip()

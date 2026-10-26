@@ -95,6 +95,16 @@ class LettaProcess:
         return dict(self._init_payload or {})
 
     @property
+    def aki_bridge(self) -> dict[str, Any]:
+        payload = self._init_payload or {}
+        bridge = payload.get("aki_bridge")
+        return dict(bridge) if isinstance(bridge, dict) else {}
+
+    @property
+    def supports_aki_bridge(self) -> bool:
+        return bool(self.aki_bridge.get("version"))
+
+    @property
     def last_ready_at(self) -> float | None:
         return self._last_ready_at
 
@@ -385,6 +395,184 @@ class LettaProcess:
         if after:
             request["after"] = after
         return await self.control_request("list_messages", request, timeout=timeout)
+
+    async def begin_aki_turn(
+        self, turn_id: str, overlay: Mapping[str, Any], *, timeout: float = 10.0
+    ) -> dict[str, Any]:
+        return await self.control_request(
+            "aki_begin_turn",
+            {"turn_id": turn_id, "overlay": dict(overlay)},
+            timeout=timeout,
+        )
+
+    async def update_aki_turn(
+        self, turn_id: str, overlay: Mapping[str, Any], *, timeout: float = 10.0
+    ) -> dict[str, Any]:
+        return await self.control_request(
+            "aki_update_turn",
+            {"turn_id": turn_id, "overlay": dict(overlay)},
+            timeout=timeout,
+        )
+
+    async def end_aki_turn(
+        self, turn_id: str, *, timeout: float = 10.0
+    ) -> dict[str, Any]:
+        return await self.control_request(
+            "aki_end_turn", {"turn_id": turn_id}, timeout=timeout
+        )
+
+    async def reload_conversation(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+            )
+            if value is not None
+        }
+        return await self.control_request(
+            "aki_reload_conversation", request, timeout=timeout
+        )
+
+    async def snapshot_conversation(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+            )
+            if value is not None
+        }
+        return await self.control_request(
+            "aki_conversation_snapshot", request, timeout=timeout
+        )
+
+    async def restore_conversation(
+        self, snapshot_id: str, *, timeout: float = 60.0
+    ) -> dict[str, Any]:
+        return await self.control_request(
+            "aki_conversation_restore",
+            {"snapshot_id": snapshot_id},
+            timeout=timeout,
+        )
+
+    async def compact_conversation(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        mode: str | None = None,
+        timeout: float = 900.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+                ("mode", mode),
+            )
+            if value is not None
+        }
+        return await self.control_request("aki_compact", request, timeout=timeout)
+
+    async def reflect_conversation(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+            )
+            if value is not None
+        }
+        return await self.control_request("aki_reflect", request, timeout=timeout)
+
+    async def reflection_status(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+            )
+            if value is not None
+        }
+        return await self.control_request(
+            "aki_reflection_status", request, timeout=timeout
+        )
+
+    async def memory_status(
+        self, *, agent_id: str | None = None, timeout: float = 20.0
+    ) -> dict[str, Any]:
+        request = {"agent_id": agent_id} if agent_id else {}
+        return await self.control_request("aki_memory_status", request, timeout=timeout)
+
+    async def memory_tokens(
+        self,
+        *,
+        agent_id: str | None = None,
+        memory_dir: str | None = None,
+        timeout: float = 20.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("agent_id", agent_id),
+                ("memory_dir", memory_dir),
+            )
+            if value is not None
+        }
+        return await self.control_request("aki_memory_tokens", request, timeout=timeout)
+
+    async def mcp_list(
+        self, *, agent_id: str | None = None, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        request = {"agent_id": agent_id} if agent_id else {}
+        return await self.control_request("aki_mcp_list", request, timeout=timeout)
+
+    async def mcp_tools(
+        self, *, agent_id: str | None = None, timeout: float = 60.0
+    ) -> dict[str, Any]:
+        request = {"agent_id": agent_id} if agent_id else {}
+        return await self.control_request("aki_mcp_tools", request, timeout=timeout)
+
+    async def mcp_call(
+        self,
+        tool_name: str,
+        arguments: Mapping[str, Any],
+        *,
+        agent_id: str | None = None,
+        timeout: float = 300.0,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "tool_name": tool_name,
+            "args": dict(arguments),
+        }
+        if agent_id:
+            request["agent_id"] = agent_id
+        return await self.control_request("aki_mcp_call", request, timeout=timeout)
 
     async def stop(self) -> None:
         self._stopping = True

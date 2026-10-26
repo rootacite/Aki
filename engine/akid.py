@@ -1468,6 +1468,8 @@ class Turn:
     channel_attachments: tuple[ChannelImageAttachment, ...] = ()
     channel_prompt_boundary: ConversationBoundary | None = None
     conversation_snapshot: dict[str, Any] | None = None
+    bridge_snapshot_id: str | None = None
+    bridge_turn_started: bool = False
     busy_messages: list[dict[str, Any]] = field(default_factory=list)
     user_message_event: asyncio.Event = field(default_factory=asyncio.Event)
     waited_user_seqs: set[int] = field(default_factory=set)
@@ -2368,6 +2370,11 @@ class GatewayServer:
             "restart_count": getattr(self.backend, "restart_count", 0),
             "last_error": getattr(self.backend, "last_error", None),
             "last_ready_at": getattr(self.backend, "last_ready_at", None),
+            "letta_bin": self.config.letta_bin,
+            "aki_bridge": getattr(self.backend, "aki_bridge", {}),
+            "aki_bridge_ready": bool(
+                getattr(self.backend, "supports_aki_bridge", False)
+            ),
         }
 
     def _channel_health(self) -> dict[str, Any]:
@@ -3125,6 +3132,52 @@ class GatewayServer:
         except (OSError, ValueError) as exc:
             LOGGER.warning("failed to clear channel transcript block: %s", exc)
 
+    def _clear_persisted_turn_blocks(self) -> None:
+        """Remove legacy per-turn blocks once the bridge owns turn context."""
+        path = self._agent_record_path()
+        if path is None:
+            return
+
+        def clear(system: str) -> str:
+            return clear_solo_transcript(
+                clear_solo_mode(
+                    clear_channel_turn(clear_channel_transcript(system))
+                )
+            )
+
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(record, dict):
+                system = record.get("system")
+                if isinstance(system, str) and system:
+                    updated = clear(system)
+                    if updated != system:
+                        self._write_agent_record(path, record, updated)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("failed to clear persisted turn blocks: %s", exc)
+        prompt_path = self._conversation_dir() / "system-prompt.json"
+        if not prompt_path.is_file():
+            return
+        try:
+            prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
+            if not isinstance(prompt, dict):
+                return
+            content = prompt.get("content")
+            if not isinstance(content, str) or not content:
+                return
+            updated = clear(content)
+            if updated != content:
+                prompt["content"] = updated
+                atomic_write(
+                    prompt_path,
+                    json.dumps(prompt, ensure_ascii=False, indent=2) + "\n",
+                )
+        except (OSError, ValueError) as exc:
+            LOGGER.warning(
+                "failed to clear persisted turn blocks from conversation prompt: %s",
+                exc,
+            )
+
     def _clear_channel_identity_block(self) -> None:
         path = self._agent_record_path()
         if path is None:
@@ -3229,14 +3282,17 @@ class GatewayServer:
                 label="channel policy",
             )
 
-    async def _refresh_channel_turn(self, turn: Turn | None) -> None:
+    async def _refresh_channel_turn(
+        self, turn: Turn | None, *, apply: bool = True
+    ) -> str:
         if turn is None or turn.origin != "mqtt":
-            async with self._wake_routing_lock:
-                self._update_system_prompt_text(
-                    clear_channel_turn,
-                    label="channel turn",
-                )
-            return
+            if apply:
+                async with self._wake_routing_lock:
+                    self._update_system_prompt_text(
+                        clear_channel_turn,
+                        label="channel turn",
+                    )
+            return ""
         solo = self._solo_session is not None
         wait_labels = (
             () if solo else self._wait_labels_for_participants(turn.channel_participants)
@@ -3256,11 +3312,13 @@ class GatewayServer:
             message_attachments=turn.channel_attachments,
             solo=solo,
         )
-        async with self._wake_routing_lock:
-            self._update_system_prompt_text(
-                lambda system: apply_channel_turn(system, block),
-                label="channel turn",
-            )
+        if apply:
+            async with self._wake_routing_lock:
+                self._update_system_prompt_text(
+                    lambda system: apply_channel_turn(system, block),
+                    label="channel turn",
+                )
+        return block
 
     async def _refresh_channel_wake_routing(self) -> None:
         """Keep the wake-routing rules in the real system prompt."""
@@ -3349,29 +3407,31 @@ class GatewayServer:
         *,
         new_seq: int | None = None,
         limit: int | None = None,
-    ) -> None:
+        apply: bool = True,
+    ) -> str:
         path = self._agent_record_path()
-        if path is None:
-            return
+        if path is None and apply:
+            return ""
+
         def with_attachment_state(
             entries: list[ChannelTranscriptEntry],
         ) -> list[ChannelTranscriptEntry]:
             return [
-            replace(
-                entry,
-                attachments=tuple(
-                    replace(
-                        attachment,
-                        missing=attachment.missing
-                        or not attachment.path
-                        or not Path(attachment.path).is_file(),
-                    )
-                    for attachment in entry.attachments
-                ),
-            )
-            if entry.attachments
-            else entry
-            for entry in entries
+                replace(
+                    entry,
+                    attachments=tuple(
+                        replace(
+                            attachment,
+                            missing=attachment.missing
+                            or not attachment.path
+                            or not Path(attachment.path).is_file(),
+                        )
+                        for attachment in entry.attachments
+                    ),
+                )
+                if entry.attachments
+                else entry
+                for entry in entries
             ]
 
         members = self._channel_member_views()
@@ -3413,6 +3473,8 @@ class GatewayServer:
                 ),
             )
             self._solo_scene = scene
+            rendered_entries = len(group_entries)
+            solo_entries_count = len(solo_entries)
         else:
             group_block = render_channel_transcript(
                 with_attachment_state(
@@ -3426,6 +3488,32 @@ class GatewayServer:
                 self_id=self._channel_self_key(),
             )
             solo_block = ""
+            rendered_entries = len(self._channel_history)
+            solo_entries_count = 0
+
+        overlay_block = self._transcript_overlay_block(
+            group_block, solo_block, scene
+        )
+        self._channel_transcript_status.update(
+            {
+                "budget_tokens": self.config.channel_transcript_budget_tokens,
+                "entries": len(self._channel_history),
+                "last_seq": self._channel_history_seq,
+                "rendered_seq": new_seq,
+                "rendered_entries": rendered_entries,
+                "block_tokens": len(group_block.encode("utf-8"))
+                if group_block
+                else 0,
+                "solo_mode": self._solo_session is not None,
+                "solo_entries": solo_entries_count,
+                "solo_block_tokens": len(solo_block.encode("utf-8"))
+                if solo_block
+                else 0,
+                "agent_path": str(path) if path is not None else "",
+            }
+        )
+        if not apply:
+            return overlay_block
 
         def update_system(system: str) -> str:
             updated = (
@@ -3467,7 +3555,9 @@ class GatewayServer:
                 prompt_path = self._conversation_dir() / "system-prompt.json"
                 if prompt_path.is_file():
                     try:
-                        prompt_record = json.loads(prompt_path.read_text(encoding="utf-8"))
+                        prompt_record = json.loads(
+                            prompt_path.read_text(encoding="utf-8")
+                        )
                         if not isinstance(prompt_record, dict):
                             raise ValueError("conversation prompt is not an object")
                         content = prompt_record.get("content")
@@ -3486,34 +3576,30 @@ class GatewayServer:
                             "failed to refresh conversation channel transcript: %s",
                             exc,
                         )
-                self._channel_transcript_status.update(
-                    {
-                        "budget_tokens": self.config.channel_transcript_budget_tokens,
-                        "entries": len(self._channel_history),
-                        "last_seq": self._channel_history_seq,
-                        "rendered_seq": new_seq,
-                        "rendered_entries": len(
-                            group_entries
-                            if self._solo_session is not None
-                            else self._channel_history
-                        )
-                        if limit is None
-                        else len(self._channel_history),
-                        "block_tokens": len(group_block.encode("utf-8"))
-                        if group_block
-                        else 0,
-                        "solo_mode": self._solo_session is not None,
-                        "solo_entries": len(self._channel_history)
-                        if self._solo_session is not None
-                        else 0,
-                        "solo_block_tokens": len(solo_block.encode("utf-8"))
-                        if solo_block
-                        else 0,
-                        "agent_path": str(path),
-                    }
-                )
             except (OSError, ValueError) as exc:
                 LOGGER.warning("failed to refresh channel transcript: %s", exc)
+        return overlay_block
+
+    def _transcript_overlay_block(
+        self, group_block: str, solo_block: str, scene: str
+    ) -> str:
+        parts: list[str] = []
+        if self._solo_session is not None:
+            parts.append(
+                render_solo_mode(
+                    member_name=self.config.channel_name,
+                    user_name=self.config.username,
+                    session_id=self._solo_session.session_id,
+                    scene=scene,
+                )
+            )
+            if group_block:
+                parts.append(group_block)
+            if solo_block:
+                parts.append(solo_block)
+        elif group_block:
+            parts.append(group_block)
+        return "\n\n".join(parts)
 
     def _clear_execution_lock_policy(self) -> None:
         path = self._agent_record_path()
@@ -3851,23 +3937,41 @@ class GatewayServer:
                 await self._finish_turn(turn, "backend_unavailable")
                 return
             self._clear_execution_lock_policy()
+            bridge = self._aki_bridge_available()
+            overlay_parts: list[str] = []
             if turn.origin == "solo_notice":
                 await self._refresh_channel_identity()
-                await self._refresh_channel_transcript()
-                await self._refresh_channel_turn(None)
-                turn.conversation_snapshot = self._snapshot_conversation()
+                if bridge:
+                    block = await self._refresh_channel_transcript(apply=False)
+                    if block:
+                        overlay_parts.append(block)
+                else:
+                    await self._refresh_channel_transcript()
+                    await self._refresh_channel_turn(None)
+                await self._snapshot_turn_conversation(turn)
             elif turn.origin in ("mqtt", "proactive"):
                 await self._refresh_channel_identity()
-                await self._refresh_channel_transcript(
-                    new_seq=turn.channel_message_seq,
-                )
-                await self._refresh_channel_turn(turn)
+                if bridge:
+                    block = await self._refresh_channel_transcript(
+                        new_seq=turn.channel_message_seq, apply=False
+                    )
+                    if block:
+                        overlay_parts.append(block)
+                    block = await self._refresh_channel_turn(turn, apply=False)
+                    if block:
+                        overlay_parts.append(block)
+                else:
+                    await self._refresh_channel_transcript(
+                        new_seq=turn.channel_message_seq,
+                    )
+                    await self._refresh_channel_turn(turn)
                 if turn.origin_is_agent:
-                    turn.conversation_snapshot = self._snapshot_conversation()
+                    await self._snapshot_turn_conversation(turn)
             else:
-                self._clear_channel_transcript_block()
                 await self._refresh_channel_identity()
-                await self._refresh_channel_turn(None)
+                if not bridge:
+                    self._clear_channel_transcript_block()
+                    await self._refresh_channel_turn(None)
                 self._channel_transcript_status.update(
                     {
                         "rendered_seq": None,
@@ -3881,6 +3985,21 @@ class GatewayServer:
                 turn.channel_prompt_boundary = capture_conversation_boundary(
                     self._conversation_dir() / "messages.jsonl"
                 )
+            if bridge:
+                overlay = (
+                    {"turn_context": {"system_append": "\n\n".join(overlay_parts)}}
+                    if overlay_parts
+                    else {}
+                )
+                try:
+                    await self.backend.begin_aki_turn(turn.turn_id, overlay)
+                    turn.bridge_turn_started = True
+                except Exception as exc:
+                    LOGGER.warning(
+                        "failed to install Aki turn overlay turn=%s: %s",
+                        turn.turn_id,
+                        exc,
+                    )
             try:
                 await self.backend.send_user(await self._build_user_content(turn))
             except BackendUnavailable:
@@ -4230,6 +4349,52 @@ class GatewayServer:
             LOGGER.warning("cannot snapshot channel conversation: %s", exc)
             return None
 
+    def _aki_bridge_available(self) -> bool:
+        return bool(getattr(self.backend, "supports_aki_bridge", False))
+
+    async def _snapshot_turn_conversation(self, turn: Turn) -> None:
+        """Keep a file snapshot as fallback and capture an in-process snapshot."""
+        turn.conversation_snapshot = self._snapshot_conversation()
+        if not self._aki_bridge_available():
+            return
+        try:
+            payload = await self.backend.snapshot_conversation(
+                conversation_id=self.config.conversation_id,
+                agent_id=self.config.agent_id,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "Aki bridge snapshot failed turn=%s; using file snapshot: %s",
+                turn.turn_id,
+                exc,
+            )
+            return
+        snapshot_id = str(payload.get("snapshot_id") or "")
+        if snapshot_id:
+            turn.bridge_snapshot_id = snapshot_id
+
+    async def _push_aki_interjection(
+        self, turn: Turn, text: str, sender: str, seq: int | None
+    ) -> None:
+        if not turn.bridge_turn_started or not self._aki_bridge_available():
+            return
+        seq_attr = f' seq="{seq}"' if seq is not None else ""
+        content = (
+            f'<new-message sender="{xml_escape(sender)}"{seq_attr}>\n'
+            f"{text}\n</new-message>"
+        )
+        try:
+            await self.backend.update_aki_turn(
+                turn.turn_id,
+                {"interjection": {"user_messages": [{"content": content}]}},
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "failed to deliver Aki interjection turn=%s: %s",
+                turn.turn_id,
+                exc,
+            )
+
     async def _restore_conversation_snapshot(
         self, snapshot: Mapping[str, Any]
     ) -> None:
@@ -4317,8 +4482,20 @@ class GatewayServer:
             reason,
             data["duration_ms"],
         )
+        if turn.bridge_turn_started:
+            with contextlib.suppress(Exception):
+                await self.backend.end_aki_turn(turn.turn_id)
+            turn.bridge_turn_started = False
         await self._strip_channel_prompt(turn)
         self._queue_unhandled_busy_messages(turn)
+        if turn.bridge_snapshot_id is not None:
+            task = asyncio.create_task(
+                self._restore_channel_turn_bridge(turn),
+                name=f"channel-bridge-rollback:{turn.turn_id}",
+            )
+            self._turn_tasks.add(task)
+            task.add_done_callback(self._turn_tasks.discard)
+            return
         if turn.conversation_snapshot is not None:
             task = asyncio.create_task(
                 self._restore_channel_turn(turn),
@@ -4455,6 +4632,22 @@ class GatewayServer:
                 await self._restore_conversation_snapshot(turn.conversation_snapshot)
         except Exception:
             LOGGER.exception("channel conversation rollback failed id=%s", turn.turn_id)
+        finally:
+            await self._finalize_turn_state(turn)
+
+    async def _restore_channel_turn_bridge(self, turn: Turn) -> None:
+        try:
+            snapshot_id = turn.bridge_snapshot_id
+            if snapshot_id:
+                await self.backend.restore_conversation(snapshot_id)
+                turn.bridge_snapshot_id = None
+        except Exception:
+            LOGGER.exception(
+                "Aki bridge conversation rollback failed id=%s; using file snapshot",
+                turn.turn_id,
+            )
+            if turn.conversation_snapshot is not None:
+                await self._restore_conversation_snapshot(turn.conversation_snapshot)
         finally:
             await self._finalize_turn_state(turn)
 
@@ -6458,6 +6651,9 @@ class GatewayServer:
                         "attachments": attachments,
                     }
                 )
+                await self._push_aki_interjection(
+                    active, text, sender, entry.seq
+                )
             await self._refresh_channel_transcript()
             return
         if not from_agent and active is not None:
@@ -6475,6 +6671,7 @@ class GatewayServer:
                 "attachments": attachments,
                 }
             )
+            await self._push_aki_interjection(active, text, sender, entry.seq)
             active.user_message_event.set()
             await self._refresh_channel_transcript()
             return
@@ -6824,6 +7021,8 @@ class GatewayServer:
     # -------------------------------------------------------------- backend rx
     async def _on_backend_ready(self, payload: dict[str, Any]) -> None:
         LOGGER.info("backend ready conversation=%s", payload.get("conversation_id"))
+        if self._aki_bridge_available():
+            self._clear_persisted_turn_blocks()
         self._reset_backend_queue_state()
         self._external_tools_registered = False
         self._external_tools_error = None
@@ -6891,6 +7090,9 @@ class GatewayServer:
         self._mcp_tool_names = set()
         self._mcp_tools_error = None
         self._mcp_native_active_servers = []
+        if self._aki_bridge_available():
+            await self._discover_mcp_tools_bridge()
+            return
         try:
             servers = await self._run_letta_json_value(
                 ["mcp", "list", "--agent", self.config.agent_id], timeout=10.0
@@ -6957,6 +7159,63 @@ class GatewayServer:
         LOGGER.info(
             "discovered MCP native tools count=%s servers=%s",
             len(tools),
+            ",".join(names),
+        )
+
+    async def _discover_mcp_tools_bridge(self) -> None:
+        try:
+            server_payload = await self.backend.mcp_list(
+                agent_id=self.config.agent_id
+            )
+            tool_payload = await self.backend.mcp_tools(
+                agent_id=self.config.agent_id
+            )
+        except Exception as exc:
+            self._mcp_tools_error = str(exc)
+            LOGGER.warning("MCP bridge discovery failed: %s", exc)
+            return
+        raw_servers = server_payload.get("servers")
+        all_names = (
+            [
+                str(item.get("name"))
+                for item in raw_servers
+                if isinstance(item, dict) and item.get("name")
+            ]
+            if isinstance(raw_servers, list)
+            else []
+        )
+        allowed = set(self.config.mcp_native_servers)
+        names = [
+            name
+            for name in all_names
+            if (not allowed or name in allowed)
+            and name not in self._mcp_native_excluded
+        ]
+        self._mcp_native_active_servers = list(names)
+        raw_tools = tool_payload.get("tools")
+        if not isinstance(raw_tools, list):
+            self._mcp_tools_error = "aki_mcp_tools returned unexpected payload"
+            return
+        tools: list[dict[str, Any]] = []
+        for item in raw_tools:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()
+            parts = name.split("__")
+            if len(parts) < 3 or parts[0] != "mcp":
+                continue
+            server_name = parts[1]
+            if server_name not in names:
+                continue
+            spec = self._mcp_tool_spec(item, server_name)
+            if spec is not None:
+                tools.append(spec)
+        limit = max(0, self.config.mcp_native_max_tools)
+        self._mcp_tools = tools[:limit] if limit else []
+        self._mcp_tool_names = {tool["name"] for tool in self._mcp_tools}
+        LOGGER.info(
+            "discovered MCP native tools via bridge count=%s servers=%s",
+            len(self._mcp_tools),
             ",".join(names),
         )
 
@@ -8105,6 +8364,17 @@ class GatewayServer:
     async def _call_mcp_tool(
         self, tool_name: str, arguments: Mapping[str, Any]
     ) -> tuple[str, bool]:
+        if self._aki_bridge_available():
+            payload = await self.backend.mcp_call(
+                tool_name,
+                arguments,
+                agent_id=self.config.agent_id,
+                timeout=self.config.mcp_tool_timeout,
+            )
+            result = payload.get("result")
+            return _normalize_mcp_result(
+                json.dumps(result if result is not None else {}, ensure_ascii=False)
+            )
         payload = json.dumps(dict(arguments), ensure_ascii=False)
         command = [
             self.config.letta_bin,
@@ -9498,6 +9768,33 @@ class GatewayServer:
                         "cannot compact while a turn is active or queued",
                     )
 
+                if self._aki_bridge_available():
+                    try:
+                        result = await self._compact_conversation_bridge(
+                            mode, float(timeout)
+                        )
+                    except RpcError:
+                        raise
+                    except Exception as exc:
+                        raise RpcError(
+                            ErrorCode.COMPACT_FAILED,
+                            str(exc),
+                            {"conversation_id": self.config.conversation_id},
+                        ) from exc
+                    LOGGER.info(
+                        "conversation compacted via bridge mode=%s reflection=%s "
+                        "before=%s after=%s",
+                        result.get("mode"),
+                        result.get("reflection"),
+                        result.get("num_messages_before"),
+                        result.get("num_messages_after"),
+                    )
+                    return {
+                        **result,
+                        "conversation_id": self.config.conversation_id,
+                        "backend_ready": True,
+                    }
+
                 with contextlib.suppress(Exception):
                     await self.backend.stop()
                 failure: Exception | None = None
@@ -9571,6 +9868,67 @@ class GatewayServer:
                 self._compacting = False
                 if not self._shutting_down:
                     await self._maybe_start_next()
+
+    async def _compact_conversation_bridge(
+        self, mode: str | None, timeout: float
+    ) -> dict[str, Any]:
+        before = await self.backend.reflection_status(
+            conversation_id=self.config.conversation_id,
+            agent_id=self.config.agent_id,
+        )
+        compacted = await self.backend.compact_conversation(
+            conversation_id=self.config.conversation_id,
+            agent_id=self.config.agent_id,
+            mode=mode,
+            timeout=timeout,
+        )
+        reflection = "not_launched"
+        try:
+            launched = await self.backend.reflect_conversation(
+                conversation_id=self.config.conversation_id,
+                agent_id=self.config.agent_id,
+            )
+            if not launched.get("launched"):
+                reflection = str(launched.get("reason") or "not_launched")
+            else:
+                reflection = await self._wait_bridge_reflection(before, timeout)
+        except Exception as exc:
+            LOGGER.warning("bridge reflection failed: %s", exc)
+            reflection = "failed"
+        return {
+            "compacted": True,
+            "mode": mode or "default",
+            "num_messages_before": compacted.get("num_messages_before"),
+            "num_messages_after": compacted.get("num_messages_after"),
+            "summary": compacted.get("summary"),
+            "reflection": reflection,
+        }
+
+    async def _wait_bridge_reflection(
+        self, before: Mapping[str, Any], timeout: float
+    ) -> str:
+        before_succeeded = str(before.get("last_reflection_succeeded_at") or "")
+        before_started = str(before.get("last_reflection_started_at") or "")
+        deadline = time.monotonic() + max(30.0, timeout)
+        seen = False
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            try:
+                state = await self.backend.reflection_status(
+                    conversation_id=self.config.conversation_id,
+                    agent_id=self.config.agent_id,
+                )
+            except Exception:
+                continue
+            started = str(state.get("last_reflection_started_at") or "")
+            succeeded = str(state.get("last_reflection_succeeded_at") or "")
+            if started and started != before_started:
+                seen = True
+            if succeeded and succeeded != before_succeeded:
+                return "completed"
+            if seen and not started:
+                return "finished"
+        return "timeout"
 
     # ------------------------------------------------------------- conversation
     def _conversation_dir(self) -> Path:
@@ -9863,6 +10221,8 @@ class GatewayServer:
         return data
 
     async def _memory_status(self) -> dict[str, Any]:
+        if self._aki_bridge_available():
+            return await self.backend.memory_status(agent_id=self.config.agent_id)
         return await self._run_letta_json(
             ["memory", "status", "--agent", self.config.agent_id]
         )
@@ -9881,9 +10241,21 @@ class GatewayServer:
             if cached is not None and time.monotonic() - created < 30:
                 return cached, error
             try:
-                data = await self._run_letta_json(
-                    ["memory", "tokens", "--agent", self.config.agent_id, "--format", "json"]
-                )
+                if self._aki_bridge_available():
+                    data = await self.backend.memory_tokens(
+                        agent_id=self.config.agent_id
+                    )
+                else:
+                    data = await self._run_letta_json(
+                        [
+                            "memory",
+                            "tokens",
+                            "--agent",
+                            self.config.agent_id,
+                            "--format",
+                            "json",
+                        ]
+                    )
             except RpcError as exc:
                 self._token_cache = (time.monotonic(), None, exc.message)
                 if allow_error:
@@ -10153,6 +10525,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
     image_require_approval = os.environ.get(
         "AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
+    letta_bin = os.environ.get("AKI_LETTA_BIN", "").strip() or aki.letta_bin
     layer_enabled = os.environ.get("AKI_LAYER_ENABLED")
     if layer_enabled is None:
         layer_enabled = aki.profile == "aki"
@@ -10210,7 +10583,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         profile=aki.profile,
         agent_id=aki.agent_id,
         conversation_id=aki.conversation,
-        letta_bin=aki.letta_bin,
+        letta_bin=letta_bin,
         cwd=cwd,
         emoji_dir=(
             Path(os.environ["AKI_EMOJI_DIR"]).expanduser()

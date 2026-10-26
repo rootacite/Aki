@@ -8,7 +8,8 @@
 都必须把最新构建安装到本机，并重启实际承载该逻辑的进程或 systemd 用户服务。只修改源码、
 只通过测试、或只生成构建产物但继续运行旧进程，都不算完成。
 
-- Aki：按改动范围运行 `python3 install-daemon.py`（unit/launcher/依赖变化时），并重启
+- Aki：按改动范围运行 `python3 install-daemon.py`（unit/launcher/依赖变化时；安装器会校验或构建
+  `vendor/letta-code` 的 vendored 运行时），并重启
   `akid@aki.service`、`akid@fuyu.service` 及对应的 `akid-proxy@*.service`。通过服务启动时间、
   `akid` health/status 和关键日志确认新代码正在运行。
 - Tokifactor：运行 `./install.sh` 重新打包并安装 daemon jar，重启

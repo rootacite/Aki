@@ -124,7 +124,10 @@ class InstallerTests(unittest.TestCase):
             'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"',
         ):
             self.assertIn(fragment, unit)
-        self.assertNotIn("AKI_", unit)
+        self.assertIn('Environment="AKI_LETTA_BIN=/usr/bin/letta"', unit)
+        self.assertIn('Environment="AKI_LETTA_RUNTIME=', unit)
+        self.assertNotIn("AKI_AGENT_ID", unit)
+        self.assertNotIn("AKI_CONVERSATION_ID", unit)
         self.assertIn("--profile %i", unit)
         self.assertIn("akid-proxy@%i.service", unit)
 
@@ -157,7 +160,9 @@ class InstallerTests(unittest.TestCase):
         ), mock.patch.object(
             self.installer, "install_akictl", return_value=home / "bin" / "akictl"
         ):
-            result = self.installer.main(["--profile", "aki", "--no-sandbox"])
+            result = self.installer.main(
+                ["--profile", "aki", "--no-sandbox", "--skip-letta-build"]
+            )
         self.assertEqual(result, 0)
         self.assertIn(
             ["systemctl", "--user", "enable", "--now", "akid-proxy@aki.service"], calls
@@ -198,7 +203,9 @@ class InstallerTests(unittest.TestCase):
         ), mock.patch.object(
             self.installer, "install_akictl", return_value=home / "bin" / "akictl"
         ):
-            result = self.installer.main(["--profile", "aki", "--no-sandbox"])
+            result = self.installer.main(
+                ["--profile", "aki", "--no-sandbox", "--skip-letta-build"]
+            )
         self.assertEqual(result, 1)
         self.assertIn(
             ["systemctl", "--user", "enable", "--now", "akid.service"], calls

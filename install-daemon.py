@@ -213,7 +213,6 @@ def service_unit(
     del (
         agent_id,
         conversation_id,
-        letta_bin,
         socket_path,
         mqtt_enabled,
         mqtt_host,
@@ -236,6 +235,8 @@ Type=simple
 ExecStart={python_bin} {repo / 'engine' / 'akid.py'} --profile %i
 WorkingDirectory={repo}
 Environment="PYTHONUNBUFFERED=1"
+Environment="AKI_LETTA_BIN={letta_bin or repo / 'bin' / 'letta-aki'}"
+Environment="AKI_LETTA_RUNTIME={Path.home() / '.local' / 'lib' / 'aki' / 'letta-code' / 'current'}"
 Environment="XDG_RUNTIME_DIR=%t"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"
 Restart=on-failure
@@ -275,6 +276,32 @@ WantedBy=default.target
 
 def run(command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, text=True, capture_output=True, check=check)
+
+
+def ensure_letta_runtime(repo: Path) -> None:
+    builder = repo / "scripts" / "build-letta.py"
+    if not builder.is_file():
+        raise RuntimeError(f"Letta build script not found: {builder}")
+    check = subprocess.run(
+        [sys.executable, str(builder), "--check"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if check.returncode == 0:
+        return
+    print("building vendored Letta runtime...", file=sys.stderr)
+    result = subprocess.run(
+        [sys.executable, str(builder), "--build", "--install"],
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        detail = (check.stderr or check.stdout or "").strip()
+        raise RuntimeError(
+            "vendored Letta runtime is missing and could not be built"
+            + (f": {detail[-1000:]}" if detail else "")
+        )
 
 
 def rpc_health(socket_path: Path, timeout: float = 2.0) -> dict | None:
@@ -340,7 +367,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--status", action="store_true", help="show unit and gateway status")
     parser.add_argument("--profile", default="aki", help="default profile installed and started")
     parser.add_argument("--agent-id", default=DEFAULT_AGENT_ID)
-    parser.add_argument("--letta-bin", default=shutil.which("letta") or "letta")
+    parser.add_argument(
+        "--letta-bin",
+        default=str(Path(__file__).resolve().parent / "bin" / "letta-aki"),
+    )
     parser.add_argument("--socket", help="gateway socket path")
     parser.add_argument("--mqtt-host", default="192.168.3.1")
     parser.add_argument("--mqtt-port", type=int, default=1883)
@@ -352,6 +382,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mqtt-state", help="persistent MQTT settings JSON path")
     parser.add_argument("--avatar-path", help="Aki avatar image path")
     parser.add_argument("--no-sandbox", action="store_true", help="disable the OS sandbox (unsafe)")
+    parser.add_argument(
+        "--skip-letta-build",
+        action="store_true",
+        help="do not verify/build the vendored Letta runtime",
+    )
     args = parser.parse_args(argv)
 
     if os.geteuid() == 0:
@@ -359,6 +394,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     repo = Path(__file__).resolve().parent
+    if not (args.dry_run or args.uninstall or args.status or args.skip_letta_build):
+        try:
+            ensure_letta_runtime(repo)
+        except (OSError, RuntimeError) as exc:
+            print(f"cannot prepare vendored Letta runtime: {exc}", file=sys.stderr)
+            return 1
     python_bin = "/usr/bin/python3" if Path("/usr/bin/python3").exists() else sys.executable
     profile = args.profile.strip()
     if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,31}", profile):

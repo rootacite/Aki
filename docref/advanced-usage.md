@@ -49,6 +49,25 @@ python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/
 如果该路径已存在且不是本仓库的链接，安装会报错而不会覆盖；`--uninstall`
 只会移除指向本仓库的链接。
 
+### Vendored Letta runtime
+
+Letta Code 以 submodule 形式固定在 `vendor/letta-code`（当前 `v0.34.24`）。
+生产服务只使用本仓库构建的运行时，不依赖 `PATH` 里的系统 `letta`：
+
+```bash
+git submodule update --init --recursive
+python3 scripts/build-letta.py --build --install
+python3 scripts/build-letta.py --check
+./bin/letta-aki --version
+```
+
+构建使用用户级 Bun `1.3.14`（缓存在 `~/.cache/aki/toolchain/`），补丁位于
+`patches/letta-code/`，版本与补丁哈希记录在 `vendor/letta-code.lock.json`。
+运行时安装到 `~/.local/lib/aki/letta-code/<version>/`，稳定入口是
+`~/.local/lib/aki/letta-code/current`；`bin/letta-aki` 负责解析该入口并以
+`/usr/bin/node` 启动。运行时缺失或版本不匹配时 akid fail-closed，不会回退到系统
+`letta`。`install-daemon.py` 会自动检查并在缺失时构建运行时。
+
 默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
 
 各成员的采样参数固定在该 profile 的 `[model.*] extra_body` 中，由本地代理合并进每次上游请求：
@@ -156,18 +175,16 @@ MiniMax key 填进 `[upstream.minimax] api_key`，再启动
 
 ### 上下文压缩阈值
 
-Letta 本地后端默认在 `context_window - 16,384` tokens 时触发 compaction。Aki 提供补丁脚本，
-把阈值改为窗口的 50%：
+vendored runtime 的 compaction 阈值由 `AKI_COMPACTION_RATIO` 控制，默认 `0.5`：
 
 ```bash
-sudo python3 scripts/patch-letta-compaction.py --ratio 0.5
-python3 scripts/patch-letta-compaction.py --status
-sudo python3 scripts/patch-letta-compaction.py --restore   # 恢复 Letta 原始逻辑
+systemctl --user edit akid@.service   # Environment="AKI_COMPACTION_RATIO=0.5"
 ```
 
-脚本会保留 `letta.js.aki-original` 备份，并且可以重复执行。升级或重装 Letta 后需要重新
-运行一次。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction；压缩完成后，
-`reflectionTrigger = compaction-event` 会继续触发 MemFS 记忆整理。
+该行为由 `patches/letta-code/0002-aki-compaction-policy.patch` 实现；修改比例后需要重新构建
+并重启对应服务（默认值已内置为 0.5，通常不需要显式设置）。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction；压缩完成后，
+`reflectionTrigger = compaction-event` 会继续触发 MemFS 记忆整理。旧的
+`scripts/patch-letta-compaction.py` 仅用于尚未迁移的外部 Letta 安装。
 
 也可以随时手动触发同一套流程：
 
@@ -178,11 +195,11 @@ akictl fuyu compact all           # 对 fuyu profile 执行
 akictl compact --timeout 1800     # 等待压缩与记忆整理的最长秒数
 ```
 
-该命令会先确认当前没有活动或排队中的 turn，然后短暂停止 akid 的 stream-json 后端，
-通过临时 Letta app server 执行官方 `/compact`，随后显式发起一次 manual `/reflect`
-记忆整理（即使项目设置关闭了自动 reflection），等待整理结束后再恢复后端。结果以 JSON
-输出，`reflection` 为 `completed`、`finished`、`up_to_date`、`unavailable`、
-`failed` 或 `timeout`；没有新的对话内容可整理时会是 `up_to_date`。
+该命令会先确认当前没有活动或排队中的 turn，然后通过长驻 Letta 进程的 `aki_compact`
+控制请求执行 compaction，再通过 `aki_reflect` 发起 manual reflection；不再启动临时
+app-server，也不停止 stream-json 后端。结果以 JSON 输出，`reflection` 为
+`completed`、`finished`、`up_to_date`、`unavailable`、`failed` 或 `timeout`；
+没有新的对话内容可整理时会是 `up_to_date`。
 
 ### 基础 system prompt
 
