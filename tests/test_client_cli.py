@@ -73,22 +73,11 @@ class ClientCliTests(unittest.TestCase):
             self.server.stderr.close()
         self.tempdir.cleanup()
 
-    def run_client(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
-        env = os.environ.copy()
-        env["AKI_SOCKET"] = str(self.socket)
-        return subprocess.run(
-            [sys.executable, str(ROOT / "bin" / "aki"), "--socket", str(self.socket), *args],
-            cwd=str(ROOT),
-            env=env,
-            input=stdin,
-            text=True,
-            capture_output=True,
-            timeout=20,
-        )
-
     def run_akictl(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["AKI_SOCKET"] = str(self.socket)
+        # Never let a CLI test resolve the operator's real ~/.aki/aki.conf.
+        env["AKI_CONFIG"] = str(self.root / "aki.conf")
         return subprocess.run(
             [sys.executable, str(ROOT / "bin" / "akictl"), *args],
             cwd=str(ROOT),
@@ -98,39 +87,6 @@ class ClientCliTests(unittest.TestCase):
             capture_output=True,
             timeout=30,
         )
-
-    def test_one_shot_streaming(self) -> None:
-        result = self.run_client("-p", "hello")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("echo: hello", result.stdout)
-
-    def test_json_ndjson_output(self) -> None:
-        result = self.run_client("--json", "-p", "hello")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
-        messages = [json.loads(line) for line in lines]
-        self.assertTrue(all(isinstance(message, dict) for message in messages))
-        event_types = [
-            message["params"]["type"]
-            for message in messages
-            if message.get("method") == "aki.event"
-        ]
-        self.assertIn("assistant_delta", event_types)
-        self.assertIn("turn_end", event_types)
-
-    def test_non_interactive_approval_denies(self) -> None:
-        result = self.run_client("-p", "dangerous", stdin="")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("denying tool", result.stderr)
-        self.assertIn("tool denied", result.stdout)
-
-    def test_akictl_chat_and_alias(self) -> None:
-        chat = self.run_akictl("-p", "hello", "--socket", str(self.socket))
-        self.assertEqual(chat.returncode, 0, chat.stderr)
-        self.assertIn("echo: hello", chat.stdout)
-        alias = self.run_client("-p", "hello")
-        self.assertEqual(alias.returncode, 0, alias.stderr)
-        self.assertIn("echo: hello", alias.stdout)
 
     def test_akictl_help_and_command_help(self) -> None:
         help_result = self.run_akictl("help")

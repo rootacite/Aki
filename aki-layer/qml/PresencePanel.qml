@@ -10,7 +10,7 @@ Item {
     property real clockMs: Date.now()
     property bool expanded: true
     property bool cardHovered: false
-    property bool tabHovered: false
+    property bool edgeHovered: false
     property bool expandGrace: false
     property int expandedWidth: 246
     property int autoCollapseMs: 7000
@@ -27,7 +27,7 @@ Item {
     readonly property real snapshotAtMs: Number(presence.sampledAtMs || receivedAtMs)
     readonly property bool stale: known && snapshotAtMs > 0
             && clockMs - snapshotAtMs > Math.max(45000, pollSeconds * 4000)
-    readonly property bool pointerInside: cardHovered || tabHovered
+    readonly property bool pointerInside: cardHovered || edgeHovered
     readonly property bool noInputKnown: known
             && (Number(presence.lastInputAtMs || 0) > 0
                 || (presence.noInputSeconds !== null
@@ -49,13 +49,6 @@ Item {
             : active
               ? "活跃"
               : "非活跃"
-    readonly property string shortStateText: !known
-            ? "等待"
-            : away
-              ? "离开"
-              : active
-                ? "活跃"
-                : "非活跃"
     readonly property string awayText: !known ? "--" : away ? "是" : "否"
     readonly property string activeDurationText: known
             ? formatDuration(liveActiveSeconds)
@@ -344,98 +337,21 @@ Item {
         }
     }
 
-    Rectangle {
-        id: collapsedTab
-        anchors.right: parent.right
+    // The collapsed card leaves no visible tab. A transparent strip along the
+    // right screen edge remains as the hover target that brings it back.
+    Item {
+        id: edgeSensor
+        x: panel.width + 24 - width
         anchors.verticalCenter: parent.verticalCenter
-        width: 68
-        height: 108
-        radius: 18
-        visible: !panel.expanded
-        opacity: visible ? 1 : 0
-        border.width: 1
-        border.color: panel.theme.border
-        property bool blocksInput: visible
-
-        gradient: Gradient {
-            GradientStop { position: 0.0; color: panel.theme.gradientTop }
-            GradientStop { position: 0.62; color: panel.theme.gradientMid }
-            GradientStop { position: 1.0; color: panel.theme.gradientBottom }
-        }
-
-        Behavior on opacity {
-            NumberAnimation { duration: 160; easing.type: Easing.OutCubic }
-        }
+        width: 8
+        height: 180
+        property bool blocksInput: true
 
         HoverHandler {
             onHoveredChanged: {
-                panel.tabHovered = hovered
+                panel.edgeHovered = hovered
                 if (hovered)
                     panel.expandPanel()
-            }
-        }
-
-        MouseArea {
-            anchors.fill: parent
-            onClicked: panel.expandPanel()
-        }
-
-        Column {
-            anchors.centerIn: parent
-            spacing: 4
-
-            Item {
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: 10
-                height: 10
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 15
-                    height: 15
-                    radius: 7.5
-                    color: panel.stateColor
-                    opacity: 0.15
-                }
-
-                Rectangle {
-                    anchors.centerIn: parent
-                    width: 8
-                    height: 8
-                    radius: 4
-                    color: panel.stateColor
-                }
-            }
-
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: panel.shortStateText
-                color: panel.stateColor
-                font.pixelSize: 10
-                font.weight: Font.DemiBold
-            }
-
-            Rectangle {
-                anchors.horizontalCenter: parent.horizontalCenter
-                width: 32
-                height: 1
-                color: panel.theme.border
-            }
-
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: "未输入"
-                color: panel.theme.text
-                font.pixelSize: 9
-                opacity: 0.58
-            }
-
-            Text {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: panel.noInputDurationText
-                color: panel.theme.text
-                font.pixelSize: 12
-                font.weight: Font.DemiBold
             }
         }
     }

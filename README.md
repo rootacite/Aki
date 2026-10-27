@@ -160,7 +160,9 @@ akictl haru chat
 | `akictl compact` | 压缩上下文并整理记忆 |
 | `akictl reset` | 重置当前会话（先备份） |
 
-更完整的 REPL 命令、服务管理和 legacy KDE widget 见 [进阶使用](docref/advanced-usage.md)。
+更完整的 REPL 命令和服务管理见 [进阶使用](docref/advanced-usage.md)。对话入口只有 MQTT；
+`akictl chat` 会以本机唯一的真人身份发送频道消息。`bin/aki`、`aki.chat.*` 和 KDE widget
+已移除。
 
 ---
 

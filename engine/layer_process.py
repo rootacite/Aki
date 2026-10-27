@@ -20,6 +20,35 @@ def default_layer_binary() -> Path:
     return Path(__file__).resolve().parent.parent / "aki-layer" / "build" / "aki-layer"
 
 
+def discover_wayland_display(
+    runtime_dir: str | Path | None = None,
+    *,
+    configured: str | None = None,
+) -> str | None:
+    """Return the configured display or the newest live Wayland socket."""
+    display = (configured or "").strip()
+    if display:
+        return display
+    runtime = Path(
+        runtime_dir or os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+    ).expanduser()
+    try:
+        sockets = [path for path in runtime.glob("wayland-*") if path.is_socket()]
+    except OSError:
+        return None
+    if not sockets:
+        return None
+
+    def socket_mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    sockets.sort(key=socket_mtime, reverse=True)
+    return sockets[0].name
+
+
 class LayerProcess:
     """Run and supervise the long-lived aki-layer GUI process."""
 

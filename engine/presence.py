@@ -357,7 +357,11 @@ class LogindActivityProvider(ActivityProvider):
                     input_active = (
                         clock - float(input_last) <= self.input_idle_seconds
                     )
-                if not input_active:
+                if input_active:
+                    # evdev observed real input; a stale logind IdleSinceHint
+                    # must not leak into the next idle transition.
+                    idle_since = None
+                else:
                     idle_since = input_last or idle_since
             if input_active is None:
                 active = session_active and not locked and not idle_hint
@@ -561,6 +565,7 @@ class PresenceMonitor:
             "last_return_at": None,
             "last_idle_started_at": None,
             "return_candidate_since": None,
+            "return_resume_idle_seconds": None,
             "return_suppressed": True,
             "last_saved_at": time.time(),
         }
@@ -582,6 +587,7 @@ class PresenceMonitor:
                     "next_work_threshold": float(self.work_warn_seconds),
                     "last_idle_started_at": None,
                     "return_candidate_since": None,
+                    "return_resume_idle_seconds": None,
                     "return_suppressed": True,
                 }
             )
@@ -638,18 +644,34 @@ class PresenceMonitor:
 
             idle_started = previous.get("last_idle_started_at")
             if idle_started:
-                idle_seconds = max(0.0, clock - float(idle_started))
+                # Freeze the idle duration at the moment activity resumes.
+                # A short pause must never become a "return" just because the
+                # user keeps working afterwards.
                 candidate = previous.get("return_candidate_since")
                 if candidate is None:
-                    previous["return_candidate_since"] = clock
-                elif initialized_before and idle_seconds >= self.return_idle_seconds:
-                    if clock - float(candidate) >= self.return_debounce_seconds:
+                    resume_idle_seconds = max(0.0, clock - float(idle_started))
+                    if resume_idle_seconds < self.return_idle_seconds:
+                        previous["last_idle_started_at"] = None
+                        previous["return_candidate_since"] = None
+                        previous["return_resume_idle_seconds"] = None
+                    else:
+                        previous["return_candidate_since"] = clock
+                        previous["return_resume_idle_seconds"] = resume_idle_seconds
+                elif initialized_before:
+                    resume_idle_seconds = float(
+                        previous.get("return_resume_idle_seconds")
+                        or max(0.0, clock - float(idle_started))
+                    )
+                    if (
+                        resume_idle_seconds >= self.return_idle_seconds
+                        and clock - float(candidate) >= self.return_debounce_seconds
+                    ):
                         if not bool(previous.get("return_suppressed")):
                             triggers.append(
                                 PresenceTrigger(
                                     "return",
                                     {
-                                        "idle_seconds": int(idle_seconds),
+                                        "idle_seconds": int(resume_idle_seconds),
                                         "idle_started_at": now_iso(float(idle_started)),
                                         "returned_at": now_iso(clock),
                                     },
@@ -660,11 +682,12 @@ class PresenceMonitor:
                             self.logger.info(
                                 "presence return suppressed after monitor startup "
                                 "idle_seconds=%s",
-                                int(idle_seconds),
+                                int(resume_idle_seconds),
                             )
                         previous["return_suppressed"] = False
                         previous["last_idle_started_at"] = None
                         previous["return_candidate_since"] = None
+                        previous["return_resume_idle_seconds"] = None
             elif not idle_started:
                 # The monitor may have restarted while the user was active.
                 # Clear the startup suppression on the first active sample so a
@@ -731,6 +754,7 @@ class PresenceMonitor:
             previous["active_seconds"] = 0.0
             previous["next_work_threshold"] = float(self.work_warn_seconds)
             previous["return_candidate_since"] = None
+            previous["return_resume_idle_seconds"] = None
             if not initialized_before:
                 previous["initialized"] = True
 

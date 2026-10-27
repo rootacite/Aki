@@ -9,7 +9,7 @@
 ## 功能
 
 - **Unix socket JSON-RPC 网关。** NDJSON，每行一个 JSON 对象，单行上限 1 MiB；
-  支持 `aki.hello`、`aki.chat.*`、`aki.approval.*`、`aki.memory.*`、`aki.fs.writable.*`、
+  支持 `aki.hello`、`aki.approval.*`（仅 MQTT turn）、`aki.memory.*`、`aki.fs.writable.*`、
   `aki.mqtt.*`、`aki.username.*`、`aki.conversation.reset`。
 - **长驻 Letta 监督。** 等待 `system/init` 后 ready；异常退出按 1/2/4/8/16/30 秒退避重启；
   当前 turn 标记失败，队列保留。
@@ -22,8 +22,8 @@
   `akid.v1` 结构化事件。
 - **tokifactor GUI（首选）。** 通过 control 主题自动发现同一频道里的多个智能体；
   顶部成员栏显示在线成员，选中成员的状态行显示模型、reasoning、上下文占用、队列与审批。
-- **KDE Plasma 6 widget（legacy）。** 保留历史分页、流式输出、Markdown、工具调用卡片、
-  GUI 审批卡和系统通知，但不再推荐安装。
+- **唯一对话入口。** 真人消息只通过 MQTT `kind=message` 进入；`aki.chat.*`、`bin/aki`、
+  KDE widget 和 GUI bridge 已移除。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
 - **多成员 profiles。** 每个 profile 有独立的 agent、conversation、socket、频道身份、
   proxy 端口与 userdata；Aki、Fuyu 和 Haru 已上线，Natsu 作为 Coming Soon 预留。
@@ -270,8 +270,8 @@ aki-layer 右侧垂直中部会显示一张用户状态卡，数据直接来自�
 活跃还是非活跃、连续活跃了多长时间、连续多久没有键盘/鼠标输入，以及空闲是否已达到
 `return_idle_seconds`（默认 45 分钟）的离开阈值。akid 每轮采样后通过 `aki-layer.sock`
 推送快照，前端在采样间隔内本地走秒；快照过期后会显示“状态已过期”，避免把旧状态当成当前
-状态。卡片 7 秒没有指针悬停时会自动向右收起，只留下显示状态和无输入计时的窄边条；悬停或
-点击边条即可重新展开。
+状态。卡片 7 秒没有指针悬停时会整体向右滑出屏幕外，不留下可见边条；把指针移到屏幕右缘
+中部即可让它滑回来。
 
 执行锁规则只存在于基座 prompt，不再生成 `<execution-lock>` 动态块。动态块按标签原地
 更新；即使 transcript 在 turn 之间单独刷新，也不会跑到 live context 后面。
@@ -302,65 +302,31 @@ magic = <shared-magic>
 发布一次 status，tokifactor 顶部因此出现两行状态栏。信道里没有 Aki 时，tokifactor 只显示
 普通聊天界面，旧 tokifactor 客户端也会忽略控制主题继续聊天。
 
-### Legacy: KDE Plasma Widget (deprecated)
+### KDE Plasma Widget / GUI bridge
 
-KDE Plasma widget 已弃用，保留代码仅为兼容和参考；新用户请使用 tokifactor。
-安装器只有在显式传入 `--allow-deprecated` 时才会安装。
-
-```bash
-python3 install-widget.py --allow-deprecated --dry-run   # 预览 legacy unit 和安装路径
-python3 install-widget.py --allow-deprecated             # 安装 legacy widget + GUI 桥接
-python3 install-widget.py --status                       # --status 不受弃用限制
-python3 install-widget.py --uninstall                    # 保留 akid、MemFS 和聊天历史
-```
-
-安装后右键底部面板 →“添加组件”→ 搜索 `Aki`。widget 平时显示 Aki 头像，
-点击后在面板弹窗中聊天；当前实现只使用现有 `default` 会话，输入只支持文本，
-工具审批是单次 allow/deny。
-
-架构：
-
-```text
-Plasma QML widget
-        │  WebSocket (JSON-RPC)
-        ▼
-akid-gui.service (127.0.0.1:8765)
-        │  NDJSON
-        ▼
-akid Unix socket
-```
-
-QML 不能直接连接 Unix socket，因此 `akid-gui.service` 做透明代理：一个
-WebSocket 文本帧对应一个 JSON-RPC 对象，桥接只在转发到 akid 时补换行。
-桥接不解析、不记录消息正文。
-
-- token 位于 `~/.local/share/aki/gui-token`（`0600`），连接 URL 必须带
-  `?token=`；桥接只绑定 `127.0.0.1`。
-- `~/.local/share/aki/gui-bridge.json`（`0600`）记录 host、port 和 URL，方便
-  未来其他本地 GUI/接口复用。
-- widget 支持历史分页、流式输出、Markdown 与 fenced code block、工具调用卡片、
-  GUI 审批卡、停止/排队状态、错误提示和 KDE 系统通知。
-- 聊天框关闭时收到审批请求会发送 High urgency 的持久通知，并把面板图标设为
-  需要注意状态；点击通知会打开聊天框。
-- 断开桥接或 akid 时会显示错误并按退避重连。
+已整体移除。聊天与 GUI 入口统一走 tokifactor MQTT；`aki-layer` 只保留通知与状态展示，
+不提供本地对话入口。
 
 ---
 
 ## 客户端
 
 ```bash
-akictl -p "你好"                  # 单次流式输入（默认 profile aki）
-akictl -p "你好" --json           # 原始 NDJSON 服务端输出
-akictl                            # 流式 REPL
+akictl -p "你好"                  # 以唯一真人身份发 MQTT 消息（默认 profile aki）
+akictl -p "你好" --json           # 输出收到的频道事件 JSON
+akictl                            # MQTT REPL
 akictl fuyu chat                  # 与 fuyu profile 对话
 akictl --profile fuyu -p "你好"   # 显式 profile
-bin/aki -p "你好"                 # 兼容别名
+akictl history 50                 # 读本地频道历史
+akictl history --solo             # 读独处历史
 ```
 
 REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
 `/set-username <name>`、`/recompile`、`/reset`、`/quit`。
-危险工具会显示工具名与参数并询问 `y/N`；非交互 stdin 默认拒绝。`Ctrl-C` 取消当前 turn。
+CLI 只使用 `~/.aki/identities.json` 中唯一的 `kind=user` 身份；没有或多个真人身份时直接报错。
+`Ctrl-C` 发送 MQTT `kind=cancel`，只允许 turn 发起者取消。`/history` 读取本地
+`~/.aki/channel-history/<channel-key>/<profile>.jsonl`，不再走 `aki.chat.history`。
 使用 `akictl help` 查看总帮助，或 `akictl help model` 查看单个命令帮助。
 
 重置 `default` 会话：

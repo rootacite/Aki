@@ -124,6 +124,32 @@ class PresenceTests(unittest.TestCase):
         triggers = self.monitor.process_sample(active(return_at + 10), now=return_at + 10)
         self.assertFalse([item for item in triggers if item.kind == "return"])
 
+    def test_resume_idle_is_frozen_at_activity_resumption(self) -> None:
+        start = local_epoch(2026, 10, 24, 8, 0)
+        self.monitor.process_sample(active(start), now=start)
+        idle_start = start + 60
+        self.monitor.process_sample(idle(idle_start), now=idle_start)
+
+        # The user was away for 30 minutes, then worked for 20 more. The
+        # original idle duration must not keep growing into a fake return.
+        return_at = idle_start + 30 * 60
+        self.monitor.process_sample(active(return_at), now=return_at)
+        current, triggers = self._advance_active(return_at, 20 * 60)
+        self.assertFalse([item for item in triggers if item.kind == "return"])
+        self.assertIsNone(self.monitor.state["last_idle_started_at"])
+
+        # A genuinely long idle period must trigger once after debounce.
+        idle_again = current + 10
+        self.monitor.process_sample(idle(idle_again), now=idle_again)
+        long_return = idle_again + 45 * 60
+        self.monitor.process_sample(active(long_return), now=long_return)
+        triggers = self.monitor.process_sample(
+            active(long_return + 10), now=long_return + 10
+        )
+        returns = [item for item in triggers if item.kind == "return"]
+        self.assertEqual(len(returns), 1)
+        self.assertGreaterEqual(returns[0].facts["idle_seconds"], 2700)
+
     def test_startup_idle_suppresses_first_return(self) -> None:
         start = local_epoch(2026, 10, 24, 8, 0)
         self.monitor.process_sample(idle(start), now=start)

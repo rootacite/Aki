@@ -211,6 +211,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             channel_history_dir=self.root / "history",
             channel_media_dir=self.root / "media",
             solo_state=self.root / "solo.json",
+            solo_memory_path=self.root / "solo-memory.json",
             live_context_enabled=False,
             screenshot_enabled=False,
             camera_enabled=False,
@@ -312,6 +313,9 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当下你正在与Master独处", system)
         self.assertIn("group old", system)
         self.assertIn('frozen="true"', system)
+        self.assertLess(
+            system.index("<channel-transcript"), system.index("<solo-mode")
+        )
         self.assertTrue(any(item.get("kind") == "solo_ready" for item in self.channel.controls))
         conversation_prompt = json.loads(
             self.conversation_prompt_path.read_text(encoding="utf-8")
@@ -437,6 +441,84 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.server.channel_history_path = path
         self.server._persist_channel_history()
         self.assertIn('"seq":1', path.read_text(encoding="utf-8"))
+
+    async def test_solo_session_is_summarized_and_kept_out_of_group_memory(self) -> None:
+        await self.server._on_channel_control(
+            TextEnvelope(
+                sender="Master",
+                text="solo start",
+                sender_id="master",
+                metadata={
+                    "schema": "akid.v1",
+                    "kind": "solo_start",
+                    "protocolVersion": "1",
+                    "memberKind": "user",
+                    "soloId": "solo-memory-1",
+                    "soloTargetId": "legacy_aki",
+                    "soloTargetName": "Aki",
+                    "soloStartedAt": "2026-10-27T10:00:00Z",
+                },
+            )
+        )
+        self.assertIsNotNone(self.server._solo_session)
+        self.server._record_channel_message(
+            sender="Master",
+            sender_id="master",
+            text="这是独处里说的秘密",
+            from_agent=False,
+        )
+        self.server._record_channel_message(
+            sender="Aki",
+            sender_id="legacy_aki",
+            text="独处里的私密回复",
+            from_agent=True,
+        )
+        await self.server._refresh_channel_transcript()
+        active_prompt = json.loads(
+            self.conversation_prompt_path.read_text(encoding="utf-8")
+        )["content"]
+        # The in-progress session belongs to <solo-transcript>, not the
+        # historical <solo-memories> block.
+        self.assertNotIn("<solo-memories", active_prompt)
+
+        await self.server._on_channel_control(
+            TextEnvelope(
+                sender="Master",
+                text="solo end",
+                sender_id="master",
+                metadata={
+                    "schema": "akid.v1",
+                    "kind": "solo_end",
+                    "protocolVersion": "1",
+                    "memberKind": "user",
+                    "soloId": "solo-memory-1",
+                    "soloTargetId": "legacy_aki",
+                },
+            )
+        )
+        self.assertIsNone(self.server._solo_session)
+        self.assertEqual(len(self.server.solo_memory.sessions), 1)
+        session = self.server.solo_memory.sessions[0]
+        self.assertEqual(session.session_id, "solo-memory-1")
+        self.assertEqual(len(session.entries), 2)
+        self.assertEqual(session.summary_status, "fallback")
+        self.assertTrue(session.summary)
+
+        memories = dict(
+            json.loads(
+                (self.root / "solo-memory.json").read_text(encoding="utf-8")
+            )
+        )
+        self.assertEqual(len(memories["sessions"]), 1)
+        system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
+        self.assertIn("<solo-memories", system)
+        self.assertIn("这是独处里说的秘密", system)
+        self.assertIn("独处里的私密回复", system)
+        group_path = self.server.group_channel_history_path
+        if group_path.is_file():
+            group_text = group_path.read_text(encoding="utf-8")
+            self.assertNotIn("这是独处里说的秘密", group_text)
+            self.assertNotIn("独处里的私密回复", group_text)
 
 
 if __name__ == "__main__":

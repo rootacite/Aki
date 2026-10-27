@@ -28,6 +28,7 @@ from engine.akid import (
     unique_capture_path,
 )
 from engine.aki_config import ImageGeneration
+from engine.channel_history import read_channel_history
 from engine.letta_process import LettaProcess
 from engine.execution_policy import WAIT_OTHER_TOOL, WAIT_USER_TOOL as POLICY_WAIT_USER_TOOL
 from engine.live_context import (
@@ -64,6 +65,79 @@ async def wait_until(predicate, timeout: float = 5.0) -> None:
             return
         await asyncio.sleep(0.02)
     raise AssertionError("condition not reached before timeout")
+
+
+class ChannelSendResult:
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self.events = events
+
+    def events_of(self, kind: str) -> list[dict[str, Any]]:
+        return [event for event in self.events if event.get("kind") == kind]
+
+    def final_texts(self) -> list[str]:
+        return [
+            str(event.get("text") or "")
+            for event in self.events_of("turn")
+            if event.get("phase") == "final"
+        ]
+
+    @property
+    def final_text(self) -> str:
+        texts = self.final_texts()
+        return texts[-1] if texts else ""
+
+
+async def channel_send(
+    server: GatewayServer,
+    text: str,
+    *,
+    sender: str = "Master",
+    sender_id: str = "master",
+    metadata: dict[str, str] | None = None,
+    wait: bool = True,
+    timeout: float = 10.0,
+    client_message_id: str | None = None,
+) -> ChannelSendResult:
+    if server.channel is None:
+        server.channel = FakeChannel()
+    fake = server.channel
+    start = len(fake.events)
+    values = dict(metadata or {})
+    if client_message_id:
+        values["clientMessageId"] = client_message_id
+    await server._on_channel_text(sender, sender_id, text, values)
+    if wait:
+        await wait_until(
+            lambda: server.active is None and not server.queue, timeout=timeout
+        )
+    return ChannelSendResult(fake.events[start:])
+
+
+async def wait_for_approval(
+    server: GatewayServer, approval_id: str | None = None, *, timeout: float = 5.0
+) -> dict[str, Any]:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        for pending in server.approvals.values():
+            if approval_id is None or pending.approval_id == approval_id:
+                return {
+                    "approval_id": pending.approval_id,
+                    "tool_name": pending.tool_name,
+                }
+        await asyncio.sleep(0.02)
+    raise AssertionError("approval request not reached before timeout")
+
+
+async def respond_approval(
+    server: GatewayServer, approval_id: str, *, allow: bool, message: str = ""
+) -> None:
+    approval = server.approvals.get(approval_id)
+    if approval is None:
+        raise AssertionError(f"unknown approval: {approval_id}")
+    if not approval.future.done():
+        approval.future.set_result(
+            (allow, message or ("approved via test" if allow else "denied via test"))
+        )
 
 
 class FakeChannel:
@@ -447,39 +521,27 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         return client
 
     async def test_streaming_events_and_sequence(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        result = await client.call("aki.chat.send", {"message": "hello"})
-        self.assertEqual(result["state"], "started")
-        events = await client.collect_turn(result["turn_id"])
-        types = [event["type"] for event in events]
-        self.assertEqual(types[0], "turn_started")
-        self.assertIn("assistant_delta", types)
-        self.assertIn("usage", types)
-        self.assertEqual(types[-1], "turn_end")
-        seqs = [event["seq"] for event in events]
-        self.assertEqual(seqs, list(range(1, len(events) + 1)))
-        final = next(event for event in events if event["type"] == "assistant_message")
-        self.assertIn("echo: hello", final["data"]["content"])
-        end = events[-1]
-        self.assertEqual(end["data"]["reason"], "completed")
-        self.assertEqual(end["data"]["stop_reason"], "end_turn")
+        server = await self.start_server(channel=FakeChannel())
+        result = await channel_send(server, "hello", client_message_id="seq-1")
+        turns = result.events_of("turn")
+        phases = [event.get("phase") for event in turns]
+        self.assertEqual(phases[0], "started")
+        self.assertIn("final", phases)
+        self.assertEqual(phases[-1], "ended")
+        self.assertEqual(result.final_text, "channel reply")
+        self.assertTrue(
+            all(event.get("clientMessageId") == "seq-1" for event in turns)
+        )
+        history = read_channel_history(server.channel_history_path)
+        self.assertTrue(any(entry.get("text") == "channel reply" for entry in history))
 
-        history = await client.call("aki.chat.history", {"limit": 10})
-        self.assertEqual(history["messages"][0]["id"], "m1")
-
-    async def test_local_turn_notifies_layer_bubble(self) -> None:
-        await self.start_server()
-        assert self.server is not None
+    async def test_mqtt_turn_notifies_layer_bubble(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
         notifier = FakeLayerNotifier()
-        self.server._layer_notifier = notifier
-        client = await self.client()
-        await client.hello()
-        result = await client.call("aki.chat.send", {"message": "hello"})
-        events = await client.collect_turn(result["turn_id"])
-        final = next(event for event in events if event["type"] == "assistant_message")
-        self.assertEqual(notifier.messages, [("Aki", final["data"]["content"])])
+        server._layer_notifier = notifier
+        result = await channel_send(server, "hello")
+        self.assertEqual(result.final_text, "channel reply")
+        self.assertEqual(notifier.messages, [("Aki", result.final_text)])
 
     async def test_channel_agent_final_notifies_layer_bubble(self) -> None:
         server = await self.start_server(channel=FakeChannel())
@@ -521,18 +583,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_channel.final_texts(), ["final reply"])
 
     async def test_internal_task_notification_result_does_not_end_turn(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        result = await client.call("aki.chat.send", {"message": "INTERNAL_RESULT_RACE"})
-        events = await client.collect_turn(result["turn_id"])
-        self.assertEqual([event["type"] for event in events].count("turn_end"), 1)
-        self.assertEqual(events[-1]["data"]["reason"], "completed")
-        assistant = next(
-            event for event in events if event["type"] == "assistant_message"
-        )
-        self.assertIn("real reply", assistant["data"]["content"])
-        self.assertNotIn("internal notification reply", assistant["data"]["content"])
+        server = await self.start_server(channel=FakeChannel())
+        result = await channel_send(server, "INTERNAL_RESULT_RACE")
+        ended = [
+            event
+            for event in result.events_of("turn")
+            if event.get("phase") in ("ended", "no_reply")
+        ]
+        self.assertEqual(len(ended), 1)
+        self.assertIn("real reply", result.final_text)
+        self.assertNotIn("internal notification reply", result.final_text)
 
     async def test_mcp_tool_discovery_builds_native_specs(self) -> None:
         await self.start_server(mcp_native_tools_enabled=False)
@@ -741,7 +801,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(read_mcp_excluded(state_path), ("local",))
 
     async def test_native_mcp_tool_call_uses_external_tool_path(self) -> None:
-        server = await self.start_server(mcp_native_tools_enabled=False)
+        server = await self.start_server(
+            channel=FakeChannel(), mcp_native_tools_enabled=False
+        )
         server._mcp_tools = [
             {
                 "name": "mcp__tavily__tavily_search",
@@ -750,34 +812,32 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
         server._mcp_tool_names = {"mcp__tavily__tavily_search"}
-        client = await self.client()
-        await client.hello()
-
         with mock.patch.object(
             server,
             "_call_mcp_tool",
             new=mock.AsyncMock(return_value=("native search result", False)),
         ) as call_mcp:
-            result = await client.call("aki.chat.send", {"message": "NATIVE_MCP_TOOL"})
-            events = await client.collect_turn(result["turn_id"])
+            result = await channel_send(server, "NATIVE_MCP_TOOL")
 
         call_mcp.assert_awaited_once_with(
             "mcp__tavily__tavily_search", {"query": "native search"}
         )
-        tool_calls = [event for event in events if event["type"] == "tool_call"]
+        tool_calls = [
+            event
+            for event in result.events_of("tool")
+            if event.get("toolStatus") == "running"
+        ]
         self.assertEqual(len(tool_calls), 1)
         self.assertEqual(
-            tool_calls[0]["data"]["name"], "mcp__tavily__tavily_search"
+            tool_calls[0]["toolName"], "mcp__tavily__tavily_search"
         )
-        tool_result = next(
-            event for event in events if event["type"] == "tool_result"
-        )
-        self.assertEqual(tool_result["data"]["status"], "success")
-        self.assertEqual(tool_result["data"]["tool_return"], "native search result")
-        assistant = next(
-            event for event in events if event["type"] == "assistant_message"
-        )
-        self.assertIn("native search result", assistant["data"]["content"])
+        tool_result = [
+            event
+            for event in result.events_of("tool")
+            if event.get("toolStatus") == "success"
+        ]
+        self.assertTrue(tool_result)
+        self.assertIn("native search result", result.final_text)
 
     def test_mcp_result_normalization(self) -> None:
         text, is_error = _normalize_mcp_result(
@@ -829,20 +889,74 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["timeout"], 120.0)
 
     async def test_conversation_compact_rejects_invalid_mode_and_busy_turn(self) -> None:
-        await self.start_server()
+        server = await self.start_server(channel=FakeChannel())
         client = await self.client()
         await client.hello()
         with self.assertRaises(RpcError) as invalid:
             await client.call("aki.conversation.compact", {"mode": "bad"})
         self.assertEqual(invalid.exception.code, ErrorCode.INVALID_PARAMS)
 
-        active = await client.call("aki.chat.send", {"message": "slow"})
-        await client.wait_event(active["turn_id"], "turn_started")
+        await server._on_channel_text(
+            "Master",
+            "master",
+            "slow",
+            {"clientMessageId": "compact-busy"},
+        )
+        await wait_until(lambda: server.active is not None)
         with self.assertRaises(RpcError) as busy:
             await client.call("aki.conversation.compact", {})
         self.assertEqual(busy.exception.code, ErrorCode.COMPACT_FAILED)
         self.assertIn("active or queued", busy.exception.message)
-        await client.call("aki.chat.cancel", {"turn_id": active["turn_id"]})
+        await server._on_channel_text(
+            "Master",
+            "master",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "cancel",
+                "clientMessageId": "compact-busy",
+            },
+        )
+        await wait_until(lambda: server.active is None)
+
+    async def test_mqtt_cancel_only_accepts_the_original_human_sender(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        await server._on_channel_text(
+            "Master",
+            "master",
+            "slow",
+            {"clientMessageId": "cancel-owner"},
+        )
+        await wait_until(lambda: server.active is not None)
+        await server._on_channel_text(
+            "Other",
+            "other",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "cancel",
+                "clientMessageId": "cancel-owner",
+            },
+        )
+        self.assertIsNotNone(server.active)
+        await wait_until(
+            lambda: any(
+                kind == "notice" and "only the human" in text
+                for kind, text in fake_channel.published
+            )
+        )
+        await server._on_channel_text(
+            "Master",
+            "master",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "cancel",
+                "clientMessageId": "cancel-owner",
+            },
+        )
+        await wait_until(lambda: server.active is None)
 
     async def test_username_get_and_set(self) -> None:
         repo = self.root / "repo"
@@ -979,10 +1093,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.server._channel_control_metadata()["contextTokens"], "0")
 
     async def test_conversation_reset_interrupts_active_and_drops_queue(self) -> None:
-        await self.start_server()
-        assert self.server is not None
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
         conversation_dir = (
-            self.server.config.backend_dir
+            server.config.backend_dir
             / "conversations"
             / _b64url("default:test-agent")
         )
@@ -1006,187 +1120,80 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         (conversation_dir / "messages.jsonl").write_text("", encoding="utf-8")
         client = await self.client()
         await client.hello()
-        active = await client.call("aki.chat.send", {"message": "slow"})
-        await client.wait_event(active["turn_id"], "turn_started")
-        queued = await client.call("aki.chat.send", {"message": "queued"})
-        self.assertEqual(queued["state"], "queued")
-        result = await client.call("aki.conversation.reset", {})
-        self.assertEqual(result["interrupted_turn_id"], active["turn_id"])
-        self.assertEqual(result["dropped_turn_ids"], [queued["turn_id"]])
-        active_events = await client.collect_turn(active["turn_id"])
-        self.assertIn(
-            "CONVERSATION_RESET",
-            [event["data"].get("code") for event in active_events if event["type"] == "error"],
+        await server._on_channel_text("Master", "master", "slow")
+        await wait_until(lambda: server.active is not None)
+        active = server.active
+        server._enqueue_channel_turn(
+            "Fuyu",
+            "fuyu",
+            "queued",
+            origin_is_agent=True,
         )
-        self.assertEqual(active_events[-1]["data"]["reason"], "conversation_reset")
-        queued_events = await client.collect_turn(queued["turn_id"])
-        self.assertEqual(queued_events[-1]["data"]["reason"], "conversation_reset")
+        await wait_until(lambda: bool(server.queue))
+        queued = server.queue[0]
+        result = await client.call("aki.conversation.reset", {})
+        self.assertEqual(result["interrupted_turn_id"], active.turn_id)
+        self.assertEqual(result["dropped_turn_ids"], [queued.turn_id])
+        self.assertTrue(
+            any(
+                event.get("kind") == "error"
+                and "conversation reset" in str(event.get("text") or "")
+                for event in fake_channel.events
+            )
+        )
+        ended = [
+            event
+            for event in fake_channel.events
+            if event.get("kind") == "turn"
+            and event.get("phase") == "ended"
+            and event.get("turnId") in {active.turn_id, queued.turn_id}
+        ]
+        self.assertEqual(len(ended), 2)
         self.assertTrue((conversation_dir / "messages.jsonl").read_bytes() == b"")
         self.assertTrue(Path(result["backup_path"]).is_dir())
 
-    async def test_history_omits_large_image_payloads(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"FAKE_LETTA_HISTORY_IMAGE_BYTES": str(2 * 1024 * 1024)}
-        ):
-            await self.start_server()
-            client = await self.client()
-            await client.hello()
-            history = await client.call("aki.chat.history", {"limit": 10})
-        dumped = json.dumps(history)
-        self.assertNotIn("A" * 1000, dumped)
-        self.assertIn("[image data omitted from history]", dumped)
-        self.assertEqual(history["messages"][0]["id"], "m-image")
-
-    async def test_multi_client_isolation_queue_and_disconnect(self) -> None:
-        await self.start_server()
-        a = await self.client()
-        await a.hello()
-        a_turn = await a.call("aki.chat.send", {"message": "slow"})
-        await a.wait_event(a_turn["turn_id"], "turn_started")
-        a_queued = await a.call(
-            "aki.chat.send", {"message": "queued from a", "client_message_id": "a-q"}
-        )
-        self.assertEqual(a_queued["state"], "queued")
-
-        b = await self.client()
-        await b.hello()
-        status = await b.call("aki.status", {})
-        self.assertEqual(status["active_turn"]["turn_id"], a_turn["turn_id"])
-        b_turn = await b.call("aki.chat.send", {"message": "from b"})
-        self.assertEqual(b_turn["state"], "queued")
-        self.assertEqual(b_turn["queue_position"], 2)
-        queued_event = await b.wait_event(b_turn["turn_id"], "turn_queued")
-        self.assertEqual(queued_event["data"]["queue_position"], 2)
-        self.assertIsNone(await b.next_event(timeout=0.3))
-
-        await a.close()
-        await b.wait_event(b_turn["turn_id"], "turn_started")
-        events = await b.collect_turn(b_turn["turn_id"])
-        self.assertEqual(events[-1]["type"], "turn_end")
-        self.assertEqual(events[-1]["data"]["reason"], "completed")
-        self.assertTrue(all(event["turn_id"] == b_turn["turn_id"] for event in events))
-
-    async def test_queue_limit_and_idempotency(self) -> None:
-        await self.start_server(queue_max=2)
-        client = await self.client()
-        await client.hello()
-        active = await client.call("aki.chat.send", {"message": "slow"})
-        await client.wait_event(active["turn_id"], "turn_started")
-        first = await client.call(
-            "aki.chat.send", {"message": "q1", "client_message_id": "same"}
-        )
-        duplicate = await client.call(
-            "aki.chat.send", {"message": "q1", "client_message_id": "same"}
-        )
-        self.assertEqual(first, duplicate)
-        second = await client.call("aki.chat.send", {"message": "q2"})
-        self.assertEqual(second["queue_position"], 2)
-        with self.assertRaises(RpcError) as ctx:
-            await client.call("aki.chat.send", {"message": "q3"})
-        self.assertEqual(ctx.exception.code, ErrorCode.QUEUE_FULL)
-
     async def test_approval_allow_deny_and_safe_tool(self) -> None:
-        await self.start_server(approval_timeout=2.0)
-        client = await self.client()
-        await client.hello()
-
-        allowed_turn = await client.call("aki.chat.send", {"message": "dangerous"})
-        approval = await client.wait_event(allowed_turn["turn_id"], "approval_request")
-        await client.call(
-            "aki.approval.respond",
-            {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
+        server = await self.start_server(
+            channel=FakeChannel(), approval_timeout=2.0
         )
-        events = await client.collect_turn(allowed_turn["turn_id"])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "success")
 
-        denied_turn = await client.call("aki.chat.send", {"message": "dangerous"})
-        approval = await client.wait_event(denied_turn["turn_id"], "approval_request")
-        await client.call(
-            "aki.approval.respond",
-            {
-                "approval_id": approval["data"]["approval_id"],
-                "decision": "deny",
-                "message": "nope",
-            },
+        allowed_task = asyncio.create_task(channel_send(server, "dangerous"))
+        approval = await wait_for_approval(server)
+        await respond_approval(
+            server, approval["approval_id"], allow=True
         )
-        events = await client.collect_turn(denied_turn["turn_id"])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "error")
+        allowed = await allowed_task
+        self.assertIn("success", [event.get("toolStatus") for event in allowed.events_of("tool")])
 
-        safe_turn = await client.call("aki.chat.send", {"message": "safe"})
-        events = await client.collect_turn(safe_turn["turn_id"])
-        self.assertNotIn("approval_request", [event["type"] for event in events])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "success")
+        denied_task = asyncio.create_task(channel_send(server, "dangerous"))
+        approval = await wait_for_approval(server)
+        await respond_approval(
+            server, approval["approval_id"], allow=False, message="nope"
+        )
+        denied = await denied_task
+        self.assertIn("error", [event.get("toolStatus") for event in denied.events_of("tool")])
+
+        safe = await channel_send(server, "safe")
+        self.assertFalse(safe.events_of("approval"))
+        self.assertIn("success", [event.get("toolStatus") for event in safe.events_of("tool")])
 
     async def test_bash_auto_allowed_when_sandbox_enabled(self) -> None:
-        await self.start_server(approval_timeout=2.0)
-        assert self.server is not None
-        self.server.config.sandbox_enabled = True
-        self.server._sandbox_blocked_reason = None
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "dangerous"})
-        events = await client.collect_turn(turn["turn_id"])
-        self.assertNotIn("approval_request", [event["type"] for event in events])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "success")
+        server = await self.start_server(
+            channel=FakeChannel(), approval_timeout=2.0
+        )
+        server.config.sandbox_enabled = True
+        server._sandbox_blocked_reason = None
+        result = await channel_send(server, "dangerous")
+        self.assertFalse(result.events_of("approval"))
+        self.assertIn("success", [event.get("toolStatus") for event in result.events_of("tool")])
 
     async def test_approval_timeout_denies_and_turn_continues(self) -> None:
-        await self.start_server(approval_timeout=0.25)
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "timeout"})
-        events = await client.collect_turn(turn["turn_id"])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "error")
-        self.assertEqual(events[-1]["data"]["reason"], "completed")
-
-    async def test_disconnect_during_approval_recovers(self) -> None:
-        await self.start_server(approval_timeout=5.0)
-        owner = await self.client()
-        await owner.hello()
-        turn = await owner.call("aki.chat.send", {"message": "dangerous"})
-        await owner.wait_event(turn["turn_id"], "approval_request")
-        await owner.close()
-
-        replacement = await self.client()
-        await replacement.hello()
-        next_turn = await replacement.call("aki.chat.send", {"message": "after disconnect"})
-        events = await replacement.collect_turn(next_turn["turn_id"])
-        self.assertEqual(events[-1]["data"]["reason"], "completed")
-
-    async def test_compaction_events_are_normalized(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "compact"})
-        events = await client.collect_turn(turn["turn_id"])
-        compactions = [event for event in events if event["type"] == "compaction"]
-        self.assertGreaterEqual(len(compactions), 2)
-        self.assertEqual(compactions[0]["data"]["trigger"], "context_pressure")
-        self.assertIn("condensed", compactions[1]["data"]["summary"])
-
-    async def test_non_initiator_cannot_approve(self) -> None:
-        await self.start_server(approval_timeout=3.0)
-        owner = await self.client()
-        other = await self.client()
-        await owner.hello()
-        await other.hello()
-        turn = await owner.call("aki.chat.send", {"message": "dangerous"})
-        approval = await owner.wait_event(turn["turn_id"], "approval_request")
-        with self.assertRaises(RpcError) as ctx:
-            await other.call(
-                "aki.approval.respond",
-                {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
-            )
-        self.assertEqual(ctx.exception.code, ErrorCode.NOT_INITIATOR)
-        await owner.call(
-            "aki.approval.respond",
-            {"approval_id": approval["data"]["approval_id"], "decision": "deny"},
+        server = await self.start_server(
+            channel=FakeChannel(), approval_timeout=0.25
         )
-        await owner.collect_turn(turn["turn_id"])
+        result = await channel_send(server, "timeout")
+        self.assertIn("error", [event.get("toolStatus") for event in result.events_of("tool")])
+        self.assertEqual(result.events_of("turn")[-1].get("phase"), "ended")
 
     async def test_memory_read_only_and_path_safety(self) -> None:
         await self.start_server()
@@ -1209,22 +1216,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.exception.code, ErrorCode.INVALID_PATH, path)
 
     async def test_backend_crash_marks_turn_and_recovers(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "crash"})
-        events = await client.collect_turn(turn["turn_id"])
-        types = [event["type"] for event in events]
-        self.assertIn("error", types)
-        self.assertEqual(events[-1]["data"]["reason"], "backend_error")
+        server = await self.start_server(channel=FakeChannel())
+        crashed = await channel_send(server, "crash")
+        self.assertTrue(crashed.events_of("error"))
+        self.assertEqual(crashed.events_of("turn")[-1].get("phase"), "ended")
 
-        assert self.server is not None
-        self.assertTrue(await self.server.backend.wait_ready(5.0))
-        next_turn = await client.call("aki.chat.send", {"message": "after crash"})
-        events = await client.collect_turn(next_turn["turn_id"])
-        self.assertEqual(events[-1]["data"]["reason"], "completed")
-        final = next(event for event in events if event["type"] == "assistant_message")
-        self.assertIn("after crash", final["data"]["content"])
+        self.assertTrue(await server.backend.wait_ready(5.0))
+        result = await channel_send(server, "after crash")
+        self.assertEqual(result.final_text, "channel reply")
 
     async def test_handshake_required_and_protocol_mismatch(self) -> None:
         await self.start_server()
@@ -1611,6 +1610,70 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("USER_MESSAGE_WHILE_BUSY", server.queue[0].message)
         server.active = None
         server.queue.clear()
+
+    async def test_bridge_busy_message_refreshes_overlay_and_interjection(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_LETTA_AKI_BRIDGE": "1"}, clear=False):
+            server = await self.start_server(channel=FakeChannel())
+        updates: list[dict[str, Any]] = []
+        original_update = server.backend.update_aki_turn
+
+        async def capture_update(turn_id: str, overlay: dict[str, Any], **kwargs: Any):
+            updates.append({"turn_id": turn_id, "overlay": overlay})
+            return await original_update(turn_id, overlay, **kwargs)
+
+        with mock.patch.object(server.backend, "update_aki_turn", side_effect=capture_update):
+            task = asyncio.create_task(
+                channel_send(
+                    server,
+                    "slow",
+                    client_message_id="busy-bridge",
+                    timeout=20.0,
+                )
+            )
+            await wait_until(lambda: server.active is not None)
+            await server._on_channel_text("Master", "master", "补充一下")
+            await wait_until(lambda: bool(updates))
+            overlay_text = json.dumps(updates[0]["overlay"], ensure_ascii=False)
+            self.assertIn('during-work=\\"true\\"', overlay_text)
+            interjection = updates[0]["overlay"].get("interjection")
+            self.assertIsNotNone(interjection)
+            content = interjection["user_messages"][0]["content"]
+            self.assertIn("<during-work-note>", content)
+            self.assertIn('sender_id="', content)
+            self.assertIn('source="user"', content)
+            self.assertIn("补充一下", content)
+            await server._on_channel_text(
+                "Master",
+                "master",
+                "",
+                {
+                    "schema": "akid.v1",
+                    "kind": "cancel",
+                    "clientMessageId": "busy-bridge",
+                },
+            )
+            await task
+
+    async def test_bridge_user_turn_does_not_capture_or_strip_channel_prompt(self) -> None:
+        with mock.patch.dict(os.environ, {"FAKE_LETTA_AKI_BRIDGE": "1"}, clear=False):
+            server = await self.start_server(channel=FakeChannel())
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "messages.jsonl").write_text(
+            '{"type":"session"}\n', encoding="utf-8"
+        )
+        (directory / "conversation.json").write_text(
+            '{"id":"default"}\n', encoding="utf-8"
+        )
+        with mock.patch(
+            "engine.akid.capture_conversation_boundary"
+        ) as capture, mock.patch(
+            "engine.akid.strip_persisted_channel_prompt"
+        ) as strip:
+            await channel_send(server, "bridge hello")
+        capture.assert_not_called()
+        strip.assert_not_called()
+        self.assertFalse(server.channel_prompt_journal_path.exists())
 
     async def test_busy_user_message_is_consumed_by_later_tool_call(self) -> None:
         fake_channel = FakeChannel()
@@ -2352,11 +2415,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         agent_path = self._write_test_agent(
             "BASE PROMPT\n\n<execution-lock authorized=\"true\">old</execution-lock>\n"
         )
-        server = await self.start_server()
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "hello"})
-        await client.collect_turn(turn["turn_id"])
+        server = await self.start_server(channel=FakeChannel())
+        await channel_send(server, "hello")
         system = self._agent_system(agent_path)
         self.assertIn("BASE PROMPT", system)
         self.assertNotIn("<execution-lock", system)
@@ -2435,90 +2495,66 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_execution_lock_tools_acquire_and_auto_release(self) -> None:
-        await self.start_server()
-        assert self.server is not None
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE"})
-        events = await client.collect_turn(turn["turn_id"])
-        text = "".join(
-            str(event["data"].get("text") or "")
-            for event in events
-            if event["type"] == "assistant_message"
-        )
-        self.assertIn("EXECUTION_LOCK_ACQUIRED", text)
-        await wait_until(lambda: not self.server.execution_lock.status()["held"])
+        server = await self.start_server(channel=FakeChannel())
+        result = await channel_send(server, "LOCK_ACQUIRE")
+        self.assertIn("EXECUTION_LOCK_ACQUIRED", result.final_text)
+        await wait_until(lambda: not server.execution_lock.status()["held"])
 
-        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE_RELEASE"})
-        events = await client.collect_turn(turn["turn_id"])
-        text = "".join(
-            str(event["data"].get("text") or "")
-            for event in events
-            if event["type"] == "assistant_message"
-        )
-        self.assertIn("EXECUTION_LOCK_ACQUIRED", text)
-        self.assertIn("EXECUTION_LOCK_RELEASED", text)
-        self.assertFalse(self.server.execution_lock.status()["held"])
+        result = await channel_send(server, "LOCK_ACQUIRE_RELEASE")
+        self.assertIn("EXECUTION_LOCK_ACQUIRED", result.final_text)
+        self.assertIn("EXECUTION_LOCK_RELEASED", result.final_text)
+        self.assertFalse(server.execution_lock.status()["held"])
 
     async def test_execution_lock_contention_returns_owner_and_ends_turn(self) -> None:
-        await self.start_server()
-        assert self.server is not None
-        holder = self.server.execution_lock
+        server = await self.start_server(channel=FakeChannel())
+        holder = server.execution_lock
         acquired, _ = holder.acquire(
             profile="fuyu", agent_id="fuyu-agent", turn_id="foreign-turn"
         )
         self.assertTrue(acquired)
         try:
-            client = await self.client()
-            await client.hello()
-            turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE"})
-            events = await client.collect_turn(turn["turn_id"])
-            text = "".join(
-                str(event["data"].get("text") or "")
-                for event in events
-                if event["type"] == "assistant_message"
-            )
-            self.assertIn("EXECUTION_LOCK_UNAVAILABLE", text)
-            self.assertIn("fuyu", text)
+            result = await channel_send(server, "LOCK_ACQUIRE")
+            self.assertIn("EXECUTION_LOCK_UNAVAILABLE", result.final_text)
+            self.assertIn("fuyu", result.final_text)
             self.assertTrue(holder.status()["held"])
         finally:
             holder.release(profile="fuyu", turn_id="foreign-turn")
 
     async def test_execution_lock_is_released_when_turn_is_cancelled(self) -> None:
-        await self.start_server()
-        assert self.server is not None
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "LOCK_ACQUIRE_SLOW"})
-        await wait_until(lambda: self.server.execution_lock.status()["held"])
-        await client.call("aki.chat.cancel", {"turn_id": turn["turn_id"]})
-        await wait_until(lambda: not self.server.execution_lock.status()["held"])
+        server = await self.start_server(channel=FakeChannel())
+        task = asyncio.create_task(
+            channel_send(server, "LOCK_ACQUIRE_SLOW", client_message_id="lock-slow")
+        )
+        await wait_until(lambda: server.execution_lock.status()["held"])
+        await server._on_channel_text(
+            "Master",
+            "master",
+            "",
+            {
+                "schema": "akid.v1",
+                "kind": "cancel",
+                "clientMessageId": "lock-slow",
+            },
+        )
+        await task
+        await wait_until(lambda: not server.execution_lock.status()["held"])
 
     async def test_unlocked_non_read_only_tool_is_denied(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "unlocked-bash"})
-        events = await client.collect_turn(turn["turn_id"])
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "error")
-        self.assertIn("EXECUTION_LOCK_REQUIRED", str(tool_result["data"]["tool_return"]))
+        server = await self.start_server(channel=FakeChannel())
+        result = await channel_send(server, "unlocked-bash")
+        self.assertIn(
+            "error", [event.get("toolStatus") for event in result.events_of("tool")]
+        )
+        self.assertIn("tool denied", result.final_text)
 
     async def test_release_tool_is_auto_denied_without_approval(self) -> None:
-        await self.start_server()
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "release-tool"})
-        events = await client.collect_turn(turn["turn_id"])
-        self.assertNotIn(
-            "approval_request", [event["type"] for event in events]
-        )
-        tool_result = next(event for event in events if event["type"] == "tool_result")
-        self.assertEqual(tool_result["data"]["status"], "error")
+        server = await self.start_server(channel=FakeChannel())
+        result = await channel_send(server, "release-tool")
+        self.assertFalse(result.events_of("approval"))
         self.assertIn(
-            "manual lock release is not available",
-            str(tool_result["data"]["tool_return"]),
+            "error", [event.get("toolStatus") for event in result.events_of("tool")]
         )
+        self.assertIn("manual lock release is not available", result.final_text)
 
     async def test_user_channel_message_stays_user_and_enters_transcript(self) -> None:
         agent_path = self._write_test_agent()
@@ -2535,12 +2571,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('new="true"', system)
         client = await self.client()
         await client.hello()
-        local = await client.call("aki.chat.send", {"message": "local hello"})
-        await client.collect_turn(local["turn_id"])
-        local_system = self._agent_system(agent_path)
-        self.assertNotIn("<channel-transcript", local_system)
-        self.assertIn("<channel-identity", local_system)
-        self.assertIn('kind="agent"', local_system)
+        for method in ("aki.chat.send", "aki.chat.cancel", "aki.chat.history"):
+            with self.assertRaises(RpcError) as removed:
+                await client.call(method, {"message": "local hello"})
+            self.assertEqual(removed.exception.code, ErrorCode.METHOD_NOT_FOUND)
 
     async def test_human_member_kind_does_not_count_as_agent(self) -> None:
         fake_channel = FakeChannel()
@@ -2704,6 +2738,102 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.server._channel_transcript_status.get("ephemeral_turns"), 1
         )
 
+    async def test_rollback_keeps_human_messages_before_the_temporary_turn(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        directory = self.server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        rows = [
+            {"type": "session"},
+            {
+                "type": "message",
+                "id": "human-a",
+                "message": {
+                    "id": "ui-a",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "A"}],
+                },
+            },
+            {
+                "type": "message",
+                "id": "human-b",
+                "message": {
+                    "id": "ui-b",
+                    "role": "user",
+                    "content": [{"type": "text", "text": "B"}],
+                },
+            },
+        ]
+        messages.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
+            encoding="utf-8",
+        )
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        keep = messages.read_bytes()
+        snapshot = self.server._snapshot_conversation("temporary C")
+        self.assertIsNotNone(snapshot)
+        self.assertEqual(snapshot["last_entry_id"], "human-b")
+        c_row = {
+            "type": "message",
+            "id": "temporary-c",
+            "message": {
+                "id": "ui-c",
+                "role": "user",
+                "content": [{"type": "text", "text": "temporary C"}],
+            },
+        }
+        with messages.open("ab") as handle:
+            handle.write((json.dumps(c_row, ensure_ascii=False) + "\n").encode())
+            handle.write(
+                (
+                    json.dumps(
+                        {
+                            "type": "message",
+                            "id": "temporary-c-reply",
+                            "message": {
+                                "id": "ui-c-reply",
+                                "role": "assistant",
+                                "content": [{"type": "text", "text": "C reply"}],
+                            },
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+        await self.server._restore_conversation_snapshot(snapshot)
+        self.assertEqual(messages.read_bytes(), keep)
+        self.assertIn(b'"id": "human-a"', keep)
+        self.assertIn(b'"id": "human-b"', keep)
+        self.assertNotIn(b"temporary-c", messages.read_bytes())
+
+    async def test_rollback_refuses_when_boundary_prompt_does_not_match(self) -> None:
+        await self.start_server()
+        assert self.server is not None
+        directory = self.server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        messages = directory / "messages.jsonl"
+        conversation = directory / "conversation.json"
+        messages.write_text(
+            '{"type":"session"}\n'
+            '{"type":"message","id":"human-a","message":{"id":"ui-a","role":"user","content":[{"type":"text","text":"A"}]}}\n',
+            encoding="utf-8",
+        )
+        conversation.write_text('{"id":"default"}\n', encoding="utf-8")
+        snapshot = self.server._snapshot_conversation("temporary C")
+        self.assertIsNotNone(snapshot)
+        with messages.open("ab") as handle:
+            handle.write(
+                b'{"type":"message","id":"human-b","message":{"id":"ui-b","role":"user","content":[{"type":"text","text":"B"}]}}\n'
+            )
+        before = messages.read_bytes()
+        await self.server._restore_conversation_snapshot(snapshot)
+        self.assertEqual(messages.read_bytes(), before)
+        self.assertIsNotNone(
+            self.server._channel_transcript_status.get("last_restore_error")
+        )
+
     async def test_user_channel_turn_persists_conversation_messages(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
@@ -2831,10 +2961,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         original_send_user = server.backend.send_user
 
         async def append_and_send(content: str) -> None:
+            row = {
+                "type": "message",
+                "id": f"ephemeral-{len(messages.read_text().splitlines())}",
+                "message": {
+                    "role": "user",
+                    "content": content
+                    if isinstance(content, list)
+                    else [{"type": "text", "text": content}],
+                },
+            }
             with messages.open("ab") as handle:
-                handle.write(
-                    b'{"type":"message","message":{"role":"user","content":"ephemeral"}}\n'
-                )
+                handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
             await original_send_user(content)
 
         with mock.patch.object(
@@ -3115,12 +3253,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         original_send_user = server.backend.send_user
 
         async def append_multimodal_and_send(content: object) -> None:
+            row_content = (
+                content
+                if isinstance(content, list)
+                else [{"type": "text", "text": str(content)}]
+            )
+            row = {
+                "type": "message",
+                "id": f"ephemeral-multimodal-{len(messages.read_text().splitlines())}",
+                "message": {"role": "user", "content": row_content},
+            }
             with messages.open("ab") as handle:
-                handle.write(
-                    b'{"type":"message","message":{"role":"user","content":['
-                    b'{"type":"text","text":"look"},{"type":"image","source":'
-                    b'{"type":"base64","media_type":"image/png","data":"QUJD"}}]}}\n'
-                )
+                handle.write((json.dumps(row, ensure_ascii=False) + "\n").encode())
             await original_send_user(content)
 
         with mock.patch.object(
@@ -3654,9 +3798,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(command[command.index("--permission-mode") + 1], "standard")
 
     async def test_channel_message_gets_agent_reply(self) -> None:
-        server = await self.start_server()
         fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
+        server = await self.start_server(channel=fake_channel)
         await server._on_channel_text("alice", "alice-1", "hello channel")
         await wait_until(
             lambda: any("channel reply" in text for text in fake_channel.final_texts())
@@ -3701,9 +3844,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("@Aki backlog message", entry.text)
 
     async def test_channel_no_reply_marker_is_suppressed(self) -> None:
-        server = await self.start_server()
         fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
+        server = await self.start_server(channel=fake_channel)
         await server._on_channel_text("alice", "alice-1", "please no-reply")
         await wait_until(lambda: server.active is None and not server.queue)
         await asyncio.sleep(0.1)
@@ -3846,9 +3988,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_channel.final_texts(), ["拍好了。"])
 
     async def test_channel_approval_commands_allow_and_deny(self) -> None:
-        server = await self.start_server(approval_timeout=5.0)
         fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
+        )
 
         await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
         await wait_until(lambda: bool(fake_channel.events_of("approval")))
@@ -3893,9 +4036,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_channel_only_original_sender_can_approve(self) -> None:
-        server = await self.start_server(approval_timeout=5.0)
         fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
+        )
 
         await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
         await wait_until(lambda: bool(fake_channel.events_of("approval")))
@@ -3936,9 +4080,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake_channel.events, [])
 
     async def test_agent_origin_channel_approval_belongs_to_user(self) -> None:
-        server = await self.start_server(approval_timeout=5.0)
         fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
+        )
         now = time.monotonic()
         for member_id, name, kind in (
             ("fuyu", "Fuyu", "agent"),
@@ -4054,24 +4199,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             for sock in sockets:
                 sock.close()
 
-    async def test_channel_cannot_approve_local_turn(self) -> None:
-        server = await self.start_server(approval_timeout=5.0)
-        fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
-        client = await self.client()
-        await client.hello()
-        turn = await client.call("aki.chat.send", {"message": "dangerous"})
-        approval = await client.wait_event(turn["turn_id"], "approval_request")
-        await server._on_channel_text("alice", "alice-1", "akid-approve")
-        await wait_until(
-            lambda: any(kind == "notice" and "local client" in text for kind, text in fake_channel.published)
-        )
-        await client.call(
-            "aki.approval.respond",
-            {"approval_id": approval["data"]["approval_id"], "decision": "deny"},
-        )
-        await client.collect_turn(turn["turn_id"])
-
     async def test_writable_api_restarts_backend_and_persists(self) -> None:
         state = self.root / "writable.json"
         allowed = Path(tempfile.mkdtemp(prefix="akid-gw-allow-", dir=str(Path.home() / ".local" / "share")))
@@ -4102,34 +4229,38 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         state = self.root / "writable.json"
         allowed = Path(tempfile.mkdtemp(prefix="akid-gw-allow-", dir=str(Path.home() / ".local" / "share")))
         try:
-            await self.start_server(sandbox_enabled=True, writable_state=state)
+            server = await self.start_server(
+                channel=FakeChannel(),
+                sandbox_enabled=True,
+                writable_state=state,
+            )
             client = await self.client()
             await client.hello()
-            slow = await client.call("aki.chat.send", {"message": "slow"})
-            await client.wait_event(slow["turn_id"], "turn_started")
-            queued = await client.call("aki.chat.send", {"message": "after policy"})
-            self.assertEqual(queued["state"], "queued")
+            await server._on_channel_text("Master", "master", "slow")
+            await wait_until(lambda: server.active is not None)
+            slow = server.active
+            server._enqueue_channel_turn(
+                "Fuyu", "fuyu", "after policy", origin_is_agent=True
+            )
+            await wait_until(lambda: bool(server.queue))
+            queued = server.queue[0]
 
             added = await client.call("aki.fs.writable.add", {"path": str(allowed)})
-            self.assertEqual(added["interrupted_turn_id"], slow["turn_id"])
-
-            slow_events = await client.collect_turn(slow["turn_id"])
-            errors = [event for event in slow_events if event["type"] == "error"]
-            self.assertTrue(errors)
-            self.assertEqual(errors[0]["data"]["code"], "SANDBOX_POLICY_CHANGED")
-            self.assertEqual(slow_events[-1]["data"]["reason"], "sandbox_restart")
-
-            queued_events = await client.collect_turn(queued["turn_id"], timeout=10.0)
-            self.assertEqual(queued_events[-1]["data"]["reason"], "completed")
-            final = next(
-                event for event in queued_events if event["type"] == "assistant_message"
+            self.assertEqual(added["interrupted_turn_id"], slow.turn_id)
+            await wait_until(lambda: server.active is None and not server.queue, timeout=15.0)
+            self.assertTrue(
+                any(
+                    event.get("kind") == "error"
+                    for event in server.channel.events
+                )
             )
-            self.assertIn("after policy", final["data"]["content"])
+            self.assertEqual(server.channel.final_texts()[-1], "channel reply")
         finally:
             await asyncio.to_thread(__import__("shutil").rmtree, allowed, True)
 
     async def test_sandbox_unavailable_blocks_backend(self) -> None:
-        await self.start_server(
+        server = await self.start_server(
+            channel=FakeChannel(),
             sandbox_enabled=True,
             bwrap_bin="/definitely/missing/bwrap",
             writable_state=self.root / "writable.json",
@@ -4140,17 +4271,17 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         health = await client.call("aki.health", {})
         self.assertFalse(health["sandbox"]["available"])
         self.assertFalse(health["ready"])
-        with self.assertRaises(RpcError) as ctx:
-            await client.call("aki.chat.send", {"message": "hello"})
-        self.assertEqual(ctx.exception.code, ErrorCode.BACKEND_UNAVAILABLE)
+        await server._on_channel_text("Master", "master", "hello")
+        self.assertIsNone(server.active)
+        self.assertEqual(len(server.queue), 1)
 
     async def test_channel_text_cannot_manage_writable_dirs(self) -> None:
+        fake_channel = FakeChannel()
         server = await self.start_server(
+            channel=fake_channel,
             sandbox_enabled=True,
             writable_state=self.root / "writable.json",
         )
-        fake_channel = FakeChannel()
-        server.channel = fake_channel  # type: ignore[assignment]
         target = Path.home() / ".local" / "share" / "should-not-be-registered"
         await server._on_channel_text("alice", "alice-1", f"akid-register {target}")
         await wait_until(
@@ -4163,31 +4294,23 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         await wait_until(lambda: server._external_tools_registered)
-        client = await self.client()
-        await client.hello()
         image_path = self.root / "pixel.png"
         image_path.write_bytes(
             __import__("base64").b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
             )
         )
-        turn = await client.call(
-            "aki.chat.send", {"message": f"EXTERNAL_IMAGE:{image_path}"}
-        )
-        events = await client.collect_turn(turn["turn_id"])
-        self.assertNotIn("approval_request", [event["type"] for event in events])
+        result = await channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
+        self.assertFalse(result.events_of("approval"))
         self.assertEqual(len(fake_channel.images), 1)
         self.assertEqual(fake_channel.images[0]["caption"], "fake caption")
         self.assertEqual(fake_channel.images[0]["mime"], "image/png")
-        final = next(event for event in events if event["type"] == "assistant_message")
-        self.assertIn("external tool result: sent tokifactor image", final["data"]["content"])
+        self.assertIn("external tool result: sent tokifactor image", result.final_text)
 
     async def test_tokifactor_image_external_tool_rejects_unregistered_source(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         await wait_until(lambda: server._external_tools_registered)
-        client = await self.client()
-        await client.hello()
         outside = Path(tempfile.mkdtemp(prefix="akid-no-image-", dir=str(Path.home() / ".local" / "share")))
         image_path = outside / "pixel.png"
         image_path.write_bytes(
@@ -4196,13 +4319,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         try:
-            turn = await client.call(
-                "aki.chat.send", {"message": f"EXTERNAL_IMAGE:{image_path}"}
-            )
-            events = await client.collect_turn(turn["turn_id"])
+            result = await channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
             self.assertEqual(fake_channel.images, [])
-            final = next(event for event in events if event["type"] == "assistant_message")
-            self.assertIn("registered writable directory", final["data"]["content"])
+            self.assertIn("registered writable directory", result.final_text)
         finally:
             await asyncio.to_thread(__import__("shutil").rmtree, outside, True)
 
@@ -4210,24 +4329,19 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel, image_require_approval=True)
         await wait_until(lambda: server._external_tools_registered)
-        client = await self.client()
-        await client.hello()
         image_path = self.root / "pixel-approval.png"
         image_path.write_bytes(
             __import__("base64").b64decode(
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
             )
         )
-        turn = await client.call(
-            "aki.chat.send", {"message": f"EXTERNAL_IMAGE:{image_path}"}
+        task = asyncio.create_task(
+            channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
         )
-        approval = await client.wait_event(turn["turn_id"], "approval_request")
-        self.assertEqual(approval["data"]["tool_name"], "tokifactor_send_image")
-        await client.call(
-            "aki.approval.respond",
-            {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
-        )
-        await client.collect_turn(turn["turn_id"])
+        approval = await wait_for_approval(server)
+        self.assertEqual(approval["tool_name"], "tokifactor_send_image")
+        await respond_approval(server, approval["approval_id"], allow=True)
+        await task
         self.assertEqual(len(fake_channel.images), 1)
 
     def _fake_ffmpeg(self) -> Path:
@@ -4351,28 +4465,19 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             ):
                 output_dir = self.root / "screenshots"
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     grim_bin=str(self._fake_grim()),
                     spectacle_bin="/definitely/missing/spectacle",
                     screenshot_output_dir=output_dir,
                     screenshot_wayland_display="wayland-1",
                 )
                 await wait_until(lambda: server._external_tools_registered)
-                client = await self.client()
-                await client.hello()
-                turn = await client.call(
-                    "aki.chat.send", {"message": "EXTERNAL_SCREENSHOT"}
-                )
-                events = await client.collect_turn(turn["turn_id"])
-                self.assertNotIn(
-                    "approval_request", [event["type"] for event in events]
-                )
-                final = next(
-                    event for event in events if event["type"] == "assistant_message"
-                )
-                self.assertIn("screenshot captured path=", final["data"]["content"])
-                self.assertIn("display=wayland-2", final["data"]["content"])
-                self.assertIn("backend=grim", final["data"]["content"])
-                self.assertIn("width=1 height=1", final["data"]["content"])
+                result = await channel_send(server, "EXTERNAL_SCREENSHOT")
+                self.assertFalse(result.events_of("approval"))
+                self.assertIn("screenshot captured path=", result.final_text)
+                self.assertIn("display=wayland-2", result.final_text)
+                self.assertIn("backend=grim", result.final_text)
+                self.assertIn("width=1 height=1", result.final_text)
             files = list(output_dir.glob("*.png"))
             self.assertEqual(len(files), 1)
             self.assertTrue(files[0].read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
@@ -4397,6 +4502,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     grim_bin=str(self._fake_grim()),
                     spectacle_bin="/definitely/missing/spectacle",
                     screenshot_output_dir=self.root / "screenshots-approval",
@@ -4404,27 +4510,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     screenshot_require_approval=True,
                 )
                 await wait_until(lambda: server._external_tools_registered)
-                client = await self.client()
-                await client.hello()
-                turn = await client.call(
-                    "aki.chat.send", {"message": "EXTERNAL_SCREENSHOT"}
+                task = asyncio.create_task(
+                    channel_send(server, "EXTERNAL_SCREENSHOT")
                 )
-                approval = await client.wait_event(turn["turn_id"], "approval_request")
+                approval = await wait_for_approval(server)
                 self.assertEqual(
-                    approval["data"]["tool_name"], "desktop_take_screenshot"
+                    approval["tool_name"], "desktop_take_screenshot"
                 )
-                await client.call(
-                    "aki.approval.respond",
-                    {
-                        "approval_id": approval["data"]["approval_id"],
-                        "decision": "allow",
-                    },
-                )
-                events = await client.collect_turn(turn["turn_id"])
-                final = next(
-                    event for event in events if event["type"] == "assistant_message"
-                )
-                self.assertIn("screenshot captured path=", final["data"]["content"])
+                await respond_approval(server, approval["approval_id"], allow=True)
+                result = await task
+                self.assertIn("screenshot captured path=", result.final_text)
         finally:
             for sock in sockets:
                 sock.close()
@@ -4452,6 +4547,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 aigc_watermark=False,
             )
             server = await self.start_server(
+                channel=FakeChannel(),
                 profile="haru",
                 camera_enabled=False,
                 screenshot_enabled=False,
@@ -4466,24 +4562,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 health["external_tools"]["image_generation"]["model"], "image-01"
             )
 
-            client = await self.client()
-            await client.hello()
-            turn = await client.call(
-                "aki.chat.send", {"message": "EXTERNAL_IMAGE_GENERATION"}
+            task = asyncio.create_task(
+                channel_send(server, "EXTERNAL_IMAGE_GENERATION")
             )
-            approval = await client.wait_event(turn["turn_id"], "approval_request")
-            self.assertEqual(approval["data"]["tool_name"], "generate_image")
-            self.assertEqual(approval["data"]["channel"], "image")
-            await client.call(
-                "aki.approval.respond",
-                {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
-            )
-            events = await client.collect_turn(turn["turn_id"])
-            final = next(
-                event for event in events if event["type"] == "assistant_message"
-            )
-            self.assertIn("image generated", final["data"]["content"])
-            self.assertIn("tokifactor_send_image", final["data"]["content"])
+            approval = await wait_for_approval(server)
+            self.assertEqual(approval["tool_name"], "generate_image")
+            await respond_approval(server, approval["approval_id"], allow=True)
+            result = await task
+            self.assertIn("image generated", result.final_text)
+            self.assertIn("tokifactor_send_image", result.final_text)
             files = list(output_dir.glob("image-*.png"))
             self.assertEqual(len(files), 1)
             self.assertEqual(files[0].read_bytes(), PNG_1X1)
@@ -4506,23 +4593,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     grim_bin="/definitely/missing/grim",
                     spectacle_bin=str(self._fake_spectacle(PNG_1X1)),
                     screenshot_output_dir=self.root / "screenshots-kde",
                     screenshot_wayland_display="wayland-1",
                 )
                 await wait_until(lambda: server._external_tools_registered)
-                client = await self.client()
-                await client.hello()
-                turn = await client.call(
-                    "aki.chat.send", {"message": "EXTERNAL_SCREENSHOT"}
-                )
-                events = await client.collect_turn(turn["turn_id"])
-                final = next(
-                    event for event in events if event["type"] == "assistant_message"
-                )
-                self.assertIn("backend=spectacle", final["data"]["content"])
-                self.assertIn("display=wayland-1", final["data"]["content"])
+                result = await channel_send(server, "EXTERNAL_SCREENSHOT")
+                self.assertIn("backend=spectacle", result.final_text)
+                self.assertIn("display=wayland-1", result.final_text)
         finally:
             for sock in sockets:
                 sock.close()
@@ -4540,23 +4620,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     grim_bin=str(self._fake_grim()),
                     spectacle_bin=str(self._fake_spectacle(PNG_1X1_BLACK)),
                     screenshot_output_dir=self.root / "screenshots-kde-fallback",
                     screenshot_wayland_display="wayland-1",
                 )
                 await wait_until(lambda: server._external_tools_registered)
-                client = await self.client()
-                await client.hello()
-                turn = await client.call(
-                    "aki.chat.send", {"message": "EXTERNAL_SCREENSHOT"}
-                )
-                events = await client.collect_turn(turn["turn_id"])
-                final = next(
-                    event for event in events if event["type"] == "assistant_message"
-                )
-                self.assertIn("black screenshot", final["data"]["content"])
-                self.assertNotIn("backend=grim", final["data"]["content"])
+                result = await channel_send(server, "EXTERNAL_SCREENSHOT")
+                self.assertIn("black screenshot", result.final_text)
+                self.assertNotIn("backend=grim", result.final_text)
                 self.assertEqual(
                     list((self.root / "screenshots-kde-fallback").glob("*.png")), []
                 )
@@ -4585,6 +4658,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     live_context_enabled=True,
                     ps_bin=str(self._fake_ps()),
                     zsh_history_path=history,
@@ -4593,19 +4667,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     screenshot_wayland_display="wayland-1",
                     live_context_timeout=2.0,
                 )
-                client = await self.client()
-                await client.hello()
-                first = await client.call("aki.chat.send", {"message": "hello"})
-                first_events = await client.collect_turn(first["turn_id"])
-                self.assertNotIn(
-                    "approval_request", [event["type"] for event in first_events]
-                )
-                first_final = next(
-                    event
-                    for event in first_events
-                    if event["type"] == "assistant_message"
-                )
-                self.assertIn("echo: hello", first_final["data"]["content"])
+                first_result = await channel_send(server, "hello")
+                self.assertFalse(first_result.events_of("approval"))
+                self.assertEqual(first_result.final_text, "channel reply")
                 first_system = self._agent_system(agent_path)
                 self.assertEqual(first_system.count("<live-context"), 1)
                 self.assertEqual(first_system.count("</live-context>"), 1)
@@ -4622,18 +4686,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(live_files), 1)
 
                 await asyncio.sleep(1.05)
-                second = await client.call("aki.chat.send", {"message": "again"})
-                second_events = await client.collect_turn(second["turn_id"])
-                second_final = next(
-                    event
-                    for event in second_events
-                    if event["type"] == "assistant_message"
-                )
-                self.assertIn("echo: again", second_final["data"]["content"])
+                second_result = await channel_send(server, "again")
+                self.assertEqual(second_result.final_text, "channel reply")
                 second_system = self._agent_system(agent_path)
                 self.assertEqual(second_system.count("<live-context"), 1)
                 self.assertEqual(second_system.count("</live-context>"), 1)
                 self.assertNotEqual(first_system, second_system)
+                client = await self.client()
+                await client.hello()
                 health = await client.call("aki.status", {})
                 self.assertTrue(health["live_context"]["updated"])
                 self.assertTrue(health["live_context"]["last_sections"]["screenshot"])
@@ -4678,6 +4738,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     live_context_enabled=True,
                     ps_bin=str(self._fake_ps()),
                     zsh_history_path=history,
@@ -4686,17 +4747,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     screenshot_wayland_display="wayland-1",
                     live_context_timeout=2.0,
                 )
-                client = await self.client()
-                await client.hello()
-                turn = await client.call("aki.chat.send", {"message": "hello"})
-                events = await client.collect_turn(turn["turn_id"])
-                self.assertNotIn(
-                    "approval_request", [event["type"] for event in events]
-                )
+                await channel_send(server, "hello")
                 system = self._agent_system(agent_path)
                 self.assertIn("<live-context", system)
                 self.assertNotIn("<screenshot", system)
                 self.assertIn("echo hi", system)
+                client = await self.client()
+                await client.hello()
                 status = await client.call("aki.status", {})
                 self.assertFalse(status["live_context"]["last_sections"]["screenshot"])
                 self.assertTrue(status["live_context"]["last_sections"]["processes"])
@@ -4729,6 +4786,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 clear=False,
             ):
                 server = await self.start_server(
+                    channel=FakeChannel(),
                     live_context_enabled=True,
                     live_context_budget_tokens=2048,
                     ps_bin=str(self._fake_ps()),
@@ -4738,10 +4796,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     screenshot_wayland_display="wayland-1",
                     live_context_timeout=2.0,
                 )
-                client = await self.client()
-                await client.hello()
-                turn = await client.call("aki.chat.send", {"message": "hello"})
-                await client.collect_turn(turn["turn_id"])
+                await channel_send(server, "hello")
                 system = self._agent_system(agent_path)
                 block = system[
                     system.index("<live-context") : system.index(
@@ -4757,13 +4812,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await server.stop()
                 self.server = None
-                server = await self.start_server(live_context_enabled=False)
+                server = await self.start_server(
+                    channel=FakeChannel(), live_context_enabled=False
+                )
                 cleared = self._agent_system(disabled_path)
                 self.assertNotIn("<live-context", cleared)
-                client = await self.client()
-                await client.hello()
-                turn = await client.call("aki.chat.send", {"message": "hello"})
-                await client.collect_turn(turn["turn_id"])
+                await channel_send(server, "hello")
                 self.assertNotIn(
                     "<live-context", self._agent_system(disabled_path)
                 )
@@ -4806,33 +4860,30 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_camera_external_tool_requires_approval_and_captures(self) -> None:
         output_dir = self.root / "camera"
-        server = await self.start_server(
-            camera_output_dir=output_dir,
-            ffmpeg_bin=str(self._fake_ffmpeg()),
-            ffprobe_bin=None,
-        )
+        fake_device = self.root / "fake-video0"
+        fake_device.write_text("device placeholder", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ,
+            {"FAKE_LETTA_CAMERA_DEVICE": str(fake_device)},
+            clear=False,
+        ):
+            server = await self.start_server(
+                channel=FakeChannel(),
+                camera_output_dir=output_dir,
+                camera_device=str(fake_device),
+                ffmpeg_bin=str(self._fake_ffmpeg()),
+                ffprobe_bin=None,
+            )
         with mock.patch("engine.akid._is_video_device", return_value=True):
             await wait_until(lambda: server._external_tools_registered)
-            client = await self.client()
-            await client.hello()
-            turn = await client.call("aki.chat.send", {"message": "EXTERNAL_CAMERA"})
-            approval = await client.wait_event(turn["turn_id"], "approval_request")
-            self.assertEqual(approval["data"]["tool_name"], "camera_take_photo")
-            self.assertEqual(approval["data"]["channel"], "camera")
-            await client.call(
-                "aki.approval.respond",
-                {"approval_id": approval["data"]["approval_id"], "decision": "allow"},
-            )
-            events = await client.collect_turn(turn["turn_id"])
-            approvals = [approval] + [
-                event for event in events if event["type"] == "approval_request"
-            ]
-            self.assertEqual(len(approvals), 1)
-            self.assertTrue(
-                approvals[0]["data"]["approval_id"].startswith("external-")
-            )
-            final = next(event for event in events if event["type"] == "assistant_message")
-            self.assertIn("photo captured path=", final["data"]["content"])
+            task = asyncio.create_task(channel_send(server, "EXTERNAL_CAMERA"))
+            approval = await wait_for_approval(server)
+            self.assertEqual(approval["tool_name"], "camera_take_photo")
+            self.assertTrue(approval["approval_id"].startswith("external-"))
+            await respond_approval(server, approval["approval_id"], allow=True)
+            result = await task
+            self.assertEqual(len(result.events_of("approval")), 1)
+            self.assertIn("photo captured path=", result.final_text)
         files = list(output_dir.glob("*.jpg"))
         self.assertEqual(len(files), 1)
         self.assertTrue(files[0].read_bytes().startswith(b"\xff\xd8\xff"))
@@ -4841,28 +4892,32 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_camera_external_tool_deny_does_not_capture(self) -> None:
         output_dir = self.root / "camera-denied"
-        server = await self.start_server(
-            camera_output_dir=output_dir,
-            ffmpeg_bin=str(self._fake_ffmpeg()),
-            ffprobe_bin=None,
-        )
+        fake_device = self.root / "fake-video0-denied"
+        fake_device.write_text("device placeholder", encoding="utf-8")
+        with mock.patch.dict(
+            os.environ,
+            {"FAKE_LETTA_CAMERA_DEVICE": str(fake_device)},
+            clear=False,
+        ):
+            server = await self.start_server(
+                channel=FakeChannel(),
+                camera_output_dir=output_dir,
+                camera_device=str(fake_device),
+                ffmpeg_bin=str(self._fake_ffmpeg()),
+                ffprobe_bin=None,
+            )
         with mock.patch("engine.akid._is_video_device", return_value=True):
             await wait_until(lambda: server._external_tools_registered)
-            client = await self.client()
-            await client.hello()
-            turn = await client.call("aki.chat.send", {"message": "EXTERNAL_CAMERA"})
-            approval = await client.wait_event(turn["turn_id"], "approval_request")
-            await client.call(
-                "aki.approval.respond",
-                {
-                    "approval_id": approval["data"]["approval_id"],
-                    "decision": "deny",
-                    "message": "not now",
-                },
+            task = asyncio.create_task(channel_send(server, "EXTERNAL_CAMERA"))
+            approval = await wait_for_approval(server)
+            await respond_approval(
+                server,
+                approval["approval_id"],
+                allow=False,
+                message="not now",
             )
-            events = await client.collect_turn(turn["turn_id"])
-            final = next(event for event in events if event["type"] == "assistant_message")
-            self.assertIn("camera photo not taken", final["data"]["content"])
+            result = await task
+            self.assertIn("camera photo not taken", result.final_text)
         self.assertEqual(list(output_dir.glob("*.jpg")), [])
 
     async def test_mqtt_set_persists_and_reconnects(self) -> None:

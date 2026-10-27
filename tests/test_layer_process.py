@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import socket
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
-from engine.layer_process import LayerProcess, default_layer_binary
+from engine.layer_process import (
+    LayerProcess,
+    default_layer_binary,
+    discover_wayland_display,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -77,3 +83,33 @@ class LayerProcessTests(unittest.IsolatedAsyncioTestCase):
             default_layer_binary(),
             ROOT / "aki-layer" / "build" / "aki-layer",
         )
+
+    def test_discover_wayland_display_prefers_configuration(self) -> None:
+        self.assertEqual(
+            discover_wayland_display(configured="wayland-9"),
+            "wayland-9",
+        )
+
+    def test_discover_wayland_display_finds_newest_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            runtime = Path(tempdir)
+            sockets = []
+            for index, mtime in ((1, 10.0), (2, 20.0)):
+                path = runtime / f"wayland-{index}"
+                sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                sock.bind(str(path))
+                sockets.append(sock)
+                os.utime(path, (mtime, mtime))
+            (runtime / "wayland-notes").write_text("not a socket", encoding="utf-8")
+            try:
+                self.assertEqual(
+                    discover_wayland_display(runtime),
+                    "wayland-2",
+                )
+            finally:
+                for sock in sockets:
+                    sock.close()
+
+    def test_discover_wayland_display_returns_none_without_socket(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            self.assertIsNone(discover_wayland_display(tempdir))

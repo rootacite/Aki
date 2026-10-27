@@ -119,6 +119,16 @@ class FakeLetta:
     def run_turn(self, content: str) -> None:
         self.turn_number += 1
         number = self.turn_number
+        is_channel = content.startswith("[akid MQTT channel message]")
+        turn_content = content
+        if is_channel:
+            marker = "\nmessage:\n"
+            if marker in content:
+                body = content.split(marker, 1)[1]
+                for suffix in ("\nattachment-names:", "\nmultimodal-note:"):
+                    body = body.split(suffix, 1)[0]
+                turn_content = body.strip()
+        content = turn_content
         if "INTERNAL_RESULT_RACE" in content:
             emit(
                 {
@@ -247,7 +257,6 @@ class FakeLetta:
                 }
             )
             return
-        is_channel = content.startswith("[akid MQTT channel message]")
         if content in ("LOCK_ACQUIRE", "LOCK_ACQUIRE_RELEASE"):
             acquired = self.call_external_tool(
                 "acquire_execution_lock", {}, f"lock-acquire-{number}"
@@ -387,9 +396,12 @@ class FakeLetta:
             return
         if "EXTERNAL_CAMERA" in content:
             tool_call_id = f"camera-tool-{number}"
+            camera_device = os.environ.get(
+                "FAKE_LETTA_CAMERA_DEVICE", "/dev/video0"
+            )
             self.request_tool(
                 "camera_take_photo",
-                {"device": "/dev/video0", "width": 320, "height": 240},
+                {"device": camera_device, "width": 320, "height": 240},
                 tool_call_id,
             )
             emit(
@@ -400,7 +412,11 @@ class FakeLetta:
                         "subtype": "execute_external_tool",
                         "tool_call_id": tool_call_id,
                         "tool_name": "camera_take_photo",
-                        "input": {"device": "/dev/video0", "width": 320, "height": 240},
+                        "input": {
+                            "device": camera_device,
+                            "width": 320,
+                            "height": 240,
+                        },
                     },
                 }
             )
@@ -503,12 +519,56 @@ class FakeLetta:
             )
             return
         if is_channel:
-            if "dangerous" in content:
+            if content == "crash":
+                os._exit(7)
+            if content == "slow":
+                emit_chunk(
+                    {
+                        "message_type": "assistant_message",
+                        "content": [{"type": "text", "text": "working"}],
+                    }
+                )
+                if self.interrupt.wait(20.0):
+                    emit(
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "stop_reason": "cancelled",
+                            "result": "cancelled",
+                        }
+                    )
+                else:
+                    emit_chunk(
+                        {
+                            "message_type": "assistant_message",
+                            "content": [{"type": "text", "text": "done"}],
+                        }
+                    )
+                    emit(
+                        {
+                            "type": "result",
+                            "subtype": "success",
+                            "stop_reason": "end_turn",
+                            "result": "done",
+                        }
+                    )
+                return
+            if (
+                content in ("dangerous", "timeout", "safe", "unlocked-bash")
+                or "dangerous" in content
+            ):
                 emit_chunk(
                     {"message_type": "assistant_message", "content": [{"type": "text", "text": "checking channel tool\n"}]}
                 )
-                self.acquire_execution_lock(number)
-                response = self.request_tool("Bash", {"command": "echo channel-unsafe"}, f"tool-ch-{number}")
+                if content not in ("safe",):
+                    self.acquire_execution_lock(number)
+                tool_name = "Read" if content == "safe" else "Bash"
+                tool_input = (
+                    {"path": "MEMORY.md"}
+                    if content == "safe"
+                    else {"command": "echo channel-unsafe"}
+                )
+                response = self.request_tool(tool_name, tool_input, f"tool-ch-{number}")
                 body = (response or {}).get("response") or {}
                 allowed = body.get("behavior") == "allow"
                 emit(

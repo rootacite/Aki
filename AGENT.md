@@ -320,18 +320,27 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `<solo-transcript>`，使用 `[solo] transcript_budget_tokens`。独处回复强制
   `wake=user`、移除成员 `@`、禁用 `wait_other`。目标成员自己的独处历史写入
   `<profile>.solo.jsonl`；退出后不广播、不混入群 transcript。
+- 独处记忆：退出独处时把本次 `aki.solo.jsonl` 中的最终消息保存到
+  `~/.aki/solo-memory/<profile>.json`（0600，原子写）。摘要通过该 profile 的
+  loopback LLM proxy 生成，超时 200 秒；失败时写入确定性 fallback 并在下次启动重试。
+  历史独处会话以 `<solo-memories budget_tokens="65536">` 只注入本 Agent；超预算时由
+  独立人格 API 批量选择淘汰，原文归档到 MemFS `solo/<session_id>.md` 并提交 git。
+  API/JSON/ID 校验失败或淘汰后仍超预算时，不修改 active 存储，当前 prompt 只渲染预算内
+  最新内容。独处消息仍留在本 Agent 普通 conversation，不进入群 transcript。
 - 服务：`akid@<profile>.service` 管网关，`akid-proxy@<profile>.service` 管独立
   loopback LLM proxy；akid 进程本身不监听模型端口。
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
 - 上下文预算：500,000 tokens；达到 50%（250,000 tokens）触发 compaction。
-- 会话模型：单会话，固定使用 `default` conversation；启动入口为 `bin/aki`。
+- 会话模型：单会话，固定使用 `default` conversation。唯一对话入口是 MQTT 频道；
+  `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
+  `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
 - 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 采集一次桌面快照。bridge 模式下 `<live-context>` 作为 per-turn overlay 追加在实际 API 请求末尾，不写回持久 system prompt；旧后端才原地刷新持久块。截图只放路径与元数据，默认 64K token 上限。
 - 实际 API call 的 system prompt 固定顺序：`base → core memory → <tool-ownership> →
   <channel-policy> → <channel-wake-routing> → <channel-identity> →
   <channel-turn> → <channel-transcript> → <solo-mode> → <solo-transcript> →
-  <live-context>`。
+  <solo-memories> → <live-context>`。
   policy/wake routing/identity 写入持久 system prompt；bridge 模式下
   `<channel-turn>`、`<channel-transcript>`、channel roster、solo 块和 `<live-context>`
   只作为当前 turn 的
@@ -369,8 +378,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `@` 仅影响各智能体的回复判断，不阻止其他智能体启动 turn。
 - 每个智能体有默认 4 次“主动启动次数”：用户消息重置；其他智能体触发的 turn
   在第一次产生频道动作时扣 1，每 turn 最多 1 次；剩余次数写入 channel live context。
-- **KDE Plasma widget、`engine/gui_bridge.py` 和 `install-widget.py` 是 legacy。**
-  代码保留，但不属于推荐路径；安装必须显式传入 `--allow-deprecated`。
+- KDE Plasma widget、`engine/gui_bridge.py`、`install-widget.py` 和 `bin/aki`
+  已整体移除，不再保留兼容层。
 
 ### 13.1 透明桌面画布层
 
@@ -406,9 +415,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `aki.health` / `aki.status` 的 `layer.notifier` 暴露发送计数和错误。
 - 用户活跃状态卡由 `qml/PresencePanel.qml` 实现：显示 akid 判定的活跃/非活跃、连续活跃
   时长、连续未输入时长和是否达到离开阈值。akid 每次 presence 采样后推送快照；前端在两次
-  采样之间本地计时，超过采样周期或 45 秒未更新时把状态标记为已过期。卡片 7 秒无悬停后向右
-  收起成窄边条，边条仍显示状态与未输入计时；悬停或点击展开。收起时只保留边条的输入区域，
-  展开时使用卡片的最终矩形，不阻断其余桌面点击。
+  采样之间本地计时，超过采样周期或 45 秒未更新时把状态标记为已过期。卡片 7 秒无悬停后
+  整体向右滑出屏幕外，不保留可见边条；指针移到屏幕右缘中部时滑回。收起时只保留右缘不可见
+  悬停感应区的输入区域，展开时使用卡片的最终矩形，不阻断其余桌面点击。
 - `AKI_LAYER_NOTIFY_ENABLED=0` 可关闭后端推送；`AKI_LAYER_PREVIEW_CHARS` 控制预览长度；
   `AKI_LAYER_SOCKET` 同时覆盖画布控制 socket 和后端通知目标。
 

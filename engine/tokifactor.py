@@ -67,6 +67,7 @@ STRUCTURED_FIELDS = (
     "schema",
     "kind",
     "turnId",
+    "clientMessageId",
     "segment",
     "seq",
     "phase",

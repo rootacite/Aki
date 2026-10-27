@@ -3,8 +3,8 @@
 Transparent full-screen canvas for Aki, implemented with Qt Quick and
 LayerShellQt. It uses the layer-shell `overlay` layer, the highest layer
 available, so it stays above normal application windows. The surface itself is
-fully transparent; notification bubbles appear in the top-right corner, and a
-compact akid presence card sits at the right-center edge.
+fully transparent; notification bubbles appear in the top-right corner, and an
+akid presence card sits near the right-center edge.
 
 The full-screen surface is not allowed to swallow desktop input. `aki-layer`
 uses `QWindow::setMask()` (QtWayland maps this to
@@ -26,9 +26,9 @@ The frontend also includes notification bubbles in the top-right corner:
   It shows active/inactive, continuous active time, continuous no-input time, and
   the away decision. The elapsed times tick locally between samples; if updates
   stop, the card visibly marks the snapshot as expired instead of presenting it
-  as current. After seven seconds without pointer hover the card slides out to
-  the right, leaving a narrow tab with the status and no-input counter. Hovering
-  or clicking the tab expands it again.
+  as current. After seven seconds without pointer hover the card slides fully
+  off the right screen edge with no visible tab. Moving the pointer to the
+  right-center edge brings it back.
 - Multiple bubbles stack downward.
 - Hovering any bubble pauses every bubble's countdown and raises each remaining
   lifetime to at least 5 seconds.

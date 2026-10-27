@@ -301,11 +301,10 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/avatar.py`：接口无关的头像资源（路径、MIME、SHA-256）。
 - `engine/sandbox_exec.py`：在 bwrap 内启动 Letta 及其全部子进程。
 - `engine/protocol.py`：NDJSON、JSON-RPC 错误码与事件模型。
-- `engine/client.py`：同步客户端库与流式 REPL。
-- `engine/akictl.py`、`bin/akictl`：对话 + 本地管理 CLI。
-- `engine/gui_bridge.py`：legacy GUI 专用本地 WebSocket → akid Unix socket 桥接。
-- `install-widget.py`：安装 legacy Plasma widget 和 `akid-gui.service`（需 `--allow-deprecated`）。
-- `kde-widget/org.acite.aki.chat/`：legacy Plasma 6 QML 聊天组件。
+- `engine/client.py`：同步本地管理客户端库。
+- `engine/akictl.py`、`bin/akictl`：MQTT 对话客户端 + 本地管理 CLI。
+- `engine/channel_history.py`：akid 与 CLI 共用的频道历史 key/路径 helper。
+- `engine/solo_memory.py`：独处会话存储、摘要、预算淘汰与 MemFS 归档。
 - `aki-layer/`：Qt Quick + LayerShellQt 透明全屏画布层（overlay layer）。
 - `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装、vendored Letta 构建与 legacy 迁移。
 - `vendor/letta-code/`：固定版本的 Letta Code upstream submodule。
@@ -325,10 +324,12 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 
 - JSON-RPC 2.0，每行一个 JSON 对象，单行上限 1 MiB。
 - 客户端先调用 `aki.hello`；`aki.health` 可在握手前调用。
-- 方法：`aki.chat.send/cancel/history`、`aki.approval.respond`、
+- 方法：`aki.approval.respond`（仅用于 MQTT turn 审批）、
   `aki.memory.status/tokens/tree/read/search`、`aki.fs.writable.*`、
   `aki.mqtt.*`、`aki.username.get/set`、`aki.conversation.reset`、`aki.status`、
   `aki.admin.zero_initiation_budget`（仅同 UID，且 `source_profile=aki`）。
+- `aki.chat.send/cancel/history` 已移除；真人消息、取消和历史分别走 MQTT
+  `kind=message`、`kind=cancel` 与本地频道历史文件。
 - 事件为 `aki.event` 通知，携带 `turn_id`、单调递增 `seq`、`type`、`data`、
   `timestamp`，只发送给该 turn 的发起连接。
 - 长驻 Letta 在 `system/init.aki_bridge` 广告 bridge 能力；`akid` 通过
