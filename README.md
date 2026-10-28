@@ -125,13 +125,19 @@ python3 install-daemon.py --status    # 查看服务状态
 ```ini
 [mqtt]
 enabled = true
-host = <broker-host>
+host = 127.0.0.1
 port = 1883
 topic = tokifactor/text
 magic = <shared-magic>
 ```
 
-然后在 tokifactor 里填同样的 `host:port` 和 magic。更完整的 GUI、频道和审批说明见 [进阶使用](docref/advanced-usage.md)。
+默认连接本机 mosquitto（`127.0.0.1:1883`）。本机 broker 同时监听
+`0.0.0.0:1883`，外部 tokifactor 客户端填本机的 LAN/WireGuard 地址和同样的
+`host:port`、magic。更完整的 GUI、频道和审批说明见 [进阶使用](docref/advanced-usage.md)。
+
+本机 broker 参考配置在 `services/mosquitto-aki.conf`，安装为
+`/etc/mosquitto/conf.d/aki.conf` 并在 `/etc/mosquitto/mosquitto.conf` 中包含
+`include_dir /etc/mosquitto/conf.d`；随后执行 `sudo systemctl enable --now mosquitto`。
 
 ---
 

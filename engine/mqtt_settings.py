@@ -6,7 +6,7 @@ from pathlib import Path
 
 from engine.aki_config import default_config_path, read_mqtt, write_mqtt
 
-DEFAULT_MQTT_HOST = "192.168.3.1"
+DEFAULT_MQTT_HOST = "127.0.0.1"
 DEFAULT_MQTT_PORT = 1883
 
 

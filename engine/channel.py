@@ -32,6 +32,7 @@ from engine.tokifactor import (
     decode_single_payload,
     detect_image_mime,
     encode_avatar_have,
+    encode_avatar_want,
     encode_picture_abort,
     encode_picture_payloads,
     encode_text_payloads,
@@ -46,6 +47,8 @@ DEFAULT_MAGIC = "akid-default-channel"
 DEDUP_MAX_IDS = 4096
 CHANNEL_INBOX_MAX = 4096
 REPLAY_GRACE_SECONDS = 1.0
+AVATAR_WANT_TTL_SECONDS = 30.0
+AVATAR_HAVE_TTL_SECONDS = 2.0
 
 TextHandler = Callable[
     [str, str, str, Mapping[str, str], str, int, bool], Awaitable[None]
@@ -73,6 +76,7 @@ class TokifactorChannel:
         avatar_hash: str = "",
         avatar_mime: str = "",
         dedup_path: Path | None = None,
+        avatar_cache_path: Path | None = None,
         on_text: TextHandler,
         on_image: ImageHandler | None = None,
         on_control: ControlHandler | None = None,
@@ -117,6 +121,7 @@ class TokifactorChannel:
         self._image_assembler = ImageChunkAssembler(magic)
         self._recent: dict[str, float] = {}
         self.dedup_path = dedup_path
+        self.avatar_cache_path = avatar_cache_path
         self._seen_message_ids: list[str] = []
         self._seen_message_id_set: set[str] = set()
         self._duplicates_dropped = 0
@@ -139,8 +144,15 @@ class TokifactorChannel:
         self._avatar_last_error: str | None = None
         self._avatars_received = 0
         self._peer_avatars: dict[str, bytes] = {}
+        self._peer_avatar_hashes: dict[str, str] = {}
+        self._avatar_wants_sent: dict[tuple[str, str], float] = {}
+        self._avatar_haves_served: dict[str, float] = {}
+        self._avatar_wants_sent_count = 0
+        self._avatar_haves_received = 0
+        self._avatar_wants_received = 0
         self._control_received = 0
         self._control_sent = 0
+        self._load_peer_avatars()
 
     @property
     def connected(self) -> bool:
@@ -257,7 +269,6 @@ class TokifactorChannel:
                 self.logger.info(
                     "channel connected %s:%s topic=%s", self.host, self.port, self.topic
                 )
-                await self._publish_avatar_have(force=True)
                 if self.on_connected is not None:
                     try:
                         await self.on_connected()
@@ -317,6 +328,11 @@ class TokifactorChannel:
             return
         if envelope.sender_id and envelope.sender_id == self.sender_id:
             return
+        await self._note_peer_avatar(
+            envelope.sender_id,
+            envelope.avatar_hash,
+            replayed=replayed,
+        )
         if not envelope.text:
             return
         if self._is_duplicate(envelope):
@@ -361,6 +377,11 @@ class TokifactorChannel:
             return
         if str(chunk.get("sender_id") or "") == self.sender_id:
             return
+        await self._note_peer_avatar(
+            str(chunk.get("sender_id") or ""),
+            str(chunk.get("avatar_hash") or ""),
+            replayed=replayed,
+        )
         image = self._image_assembler.add(chunk)
         if image is None:
             return
@@ -396,6 +417,7 @@ class TokifactorChannel:
             return
         if envelope.sender_id and envelope.sender_id == self.sender_id:
             return
+        await self._note_peer_avatar(envelope.sender_id, envelope.avatar_hash)
         if not envelope.text:
             return
         self._control_received += 1
@@ -727,12 +749,15 @@ class TokifactorChannel:
             return
         if envelope.type == "want":
             if envelope.id == self.sender_id:
-                self._schedule_avatar_have()
+                self._avatar_wants_received += 1
+                self._schedule_avatar_have(envelope.hash)
             return
         if envelope.id == self.sender_id:
             return
         if not envelope.hash or not envelope.data:
             self._peer_avatars.pop(envelope.id, None)
+            self._peer_avatar_hashes.pop(envelope.id, None)
+            self._save_peer_avatars()
             return
         try:
             encrypted = base64.b64decode(envelope.data, validate=True)
@@ -747,7 +772,115 @@ class TokifactorChannel:
             self.logger.warning(self._avatar_last_error)
             return
         self._peer_avatars[envelope.id] = clear
+        self._peer_avatar_hashes[envelope.id] = envelope.hash.lower()
+        self._avatar_haves_received += 1
         self._avatars_received += 1
+        self._save_peer_avatars()
+
+    def _avatar_cache_index_path(self) -> Path | None:
+        if self.avatar_cache_path is None:
+            return None
+        return self.avatar_cache_path / "index.json"
+
+    def _avatar_cache_file(self, peer: str) -> Path:
+        assert self.avatar_cache_path is not None
+        name = hashlib.sha256(peer.encode("utf-8")).hexdigest() + ".img"
+        return self.avatar_cache_path / name
+
+    def _load_peer_avatars(self) -> None:
+        index = self._avatar_cache_index_path()
+        if index is None or not index.is_file():
+            return
+        try:
+            payload = json.loads(index.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        entries = payload.get("avatars") if isinstance(payload, dict) else None
+        if not isinstance(entries, dict):
+            return
+        root = self.avatar_cache_path
+        assert root is not None
+        for peer, item in entries.items():
+            if not isinstance(peer, str) or not isinstance(item, dict):
+                continue
+            digest = str(item.get("hash") or "").strip().lower()
+            filename = str(item.get("file") or "").strip()
+            if not digest or not filename or Path(filename).name != filename:
+                continue
+            try:
+                data = (root / filename).read_bytes()
+            except OSError:
+                continue
+            if hashlib.sha256(data).hexdigest() != digest:
+                continue
+            self._peer_avatars[peer] = data
+            self._peer_avatar_hashes[peer] = digest
+
+    def _save_peer_avatars(self) -> None:
+        root = self.avatar_cache_path
+        index = self._avatar_cache_index_path()
+        if root is None or index is None:
+            return
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+            entries: dict[str, dict[str, str]] = {}
+            for peer, digest in self._peer_avatar_hashes.items():
+                data = self._peer_avatars.get(peer)
+                if data is None:
+                    continue
+                target = self._avatar_cache_file(peer)
+                temp = target.with_name(target.name + ".tmp")
+                temp.write_bytes(data)
+                temp.replace(target)
+                entries[peer] = {"hash": digest, "file": target.name}
+            atomic_write(
+                index,
+                json.dumps(
+                    {"version": 1, "avatars": entries},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            )
+        except OSError as exc:
+            self.logger.warning("failed to persist peer avatars: %s", exc)
+
+    async def _note_peer_avatar(
+        self,
+        sender_id: str,
+        avatar_hash: str,
+        *,
+        replayed: bool = False,
+    ) -> None:
+        peer = str(sender_id or "").strip()
+        digest = str(avatar_hash or "").strip().lower()
+        if not peer or not digest or peer == self.sender_id:
+            return
+        known = self._peer_avatar_hashes.get(peer)
+        if known == digest and peer in self._peer_avatars:
+            return
+        if known != digest:
+            self._peer_avatars.pop(peer, None)
+        self._peer_avatar_hashes[peer] = digest
+        if replayed:
+            return
+        now = time.monotonic()
+        key = (peer, digest)
+        if now - self._avatar_wants_sent.get(key, 0.0) < AVATAR_WANT_TTL_SECONDS:
+            return
+        client = self._client
+        if client is None or not self._connected:
+            return
+        self._avatar_wants_sent[key] = now
+        try:
+            await client.publish(
+                AVATAR_TOPIC,
+                encode_avatar_want(peer, digest).encode("utf-8"),
+                qos=0,
+            )
+            self._avatar_wants_sent_count += 1
+        except Exception as exc:
+            self._avatar_wants_sent.pop(key, None)
+            self.logger.debug("avatar want failed peer=%s error=%s", peer, exc)
 
     async def _publish_avatar_have(self, *, force: bool = False) -> bool:
         client = self._client
@@ -776,7 +909,13 @@ class TokifactorChannel:
         self.logger.info("avatar published id=%s hash=%s", self.sender_id, self._avatar_hash)
         return True
 
-    def _schedule_avatar_have(self) -> None:
+    def _schedule_avatar_have(self, requested_hash: str = "") -> None:
+        key = str(requested_hash or self._avatar_hash).strip().lower()
+        now = time.monotonic()
+        if key and now - self._avatar_haves_served.get(key, 0.0) < AVATAR_HAVE_TTL_SECONDS:
+            return
+        if key:
+            self._avatar_haves_served[key] = now
         if self._avatar_publish_task is not None and not self._avatar_publish_task.done():
             return
         task = asyncio.create_task(self._publish_avatar_have(force=True), name="akid-avatar-have")
@@ -822,7 +961,14 @@ class TokifactorChannel:
                 "published": self._avatar_published,
                 "last_published_hash": self._last_published_avatar_hash,
                 "peer_avatars": len(self._peer_avatars),
+                "peer_avatar_hashes": len(self._peer_avatar_hashes),
+                "cache_path": (
+                    str(self.avatar_cache_path) if self.avatar_cache_path else None
+                ),
                 "avatars_received": self._avatars_received,
+                "haves_received": self._avatar_haves_received,
+                "wants_sent": self._avatar_wants_sent_count,
+                "wants_received": self._avatar_wants_received,
                 "last_error": self._avatar_last_error,
             },
             "control": {

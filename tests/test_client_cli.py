@@ -260,12 +260,12 @@ class ClientCliTests(unittest.TestCase):
             "OldName\n",
         )
 
-    def test_akictl_mqtt_status_uses_lan_default(self) -> None:
+    def test_akictl_mqtt_status_uses_local_default(self) -> None:
         result = self.run_akictl("mqtt", "--socket", str(self.socket))
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertFalse(data["enabled"])
-        self.assertEqual(data["host"], "192.168.3.1")
+        self.assertEqual(data["host"], "127.0.0.1")
         self.assertEqual(data["port"], 1883)
 
 

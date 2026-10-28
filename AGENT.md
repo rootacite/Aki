@@ -360,6 +360,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   loopback LLM proxy；akid 进程本身不监听模型端口。启动时必须等待 backend ready 并确认
   `system/init.aki_bridge`；不是本项目定制的 Letta（未广告 `aki_bridge`）会直接报错退出，
   不再启用旧的持久化 turn 路径。
+- MQTT：默认使用本机 mosquitto（`127.0.0.1:1883`，同时监听 `0.0.0.0:1883` 供
+  LAN/WireGuard 客户端使用）。头像按消息里的 `avatarHash` 协商：缺失或不一致才发
+  `want`，收到显式 `want` 才回完整 `have`，连接成功不再广播头像。Linux
+  `tokifactord` 只有在前端连接 `tokifactord.sock` 时才请求头像。
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
 - 上下文预算：500,000 tokens；达到 50%（250,000 tokens）触发 compaction。
 - 会话模型：单会话，固定使用 `default` conversation。唯一对话入口是 MQTT 频道；

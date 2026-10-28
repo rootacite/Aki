@@ -285,6 +285,14 @@ broker 在重连后补发的积压消息只写入频道 transcript 和去重状�
 重置主动启动次数；重连后的补发识别窗口为 1 秒。Agent 已经发布的消息仍由用户端
 tokifactor 的持久会话补收，akid 不重复转发，避免产生重复消息或伪造发送者。
 
+头像采用 hash 协商，不在连接时无条件广播：text/control/picture envelope 都携带发送者的
+`avatarHash`。接收端把它与本地缓存的 hash 比较，缺失或不一致时才向
+`tokifactor/avatar` 发 `want`；只有收到显式 `want` 的一方才回完整 `have`。Linux
+`tokifactord` 的 `want` 还受前端连接门控：只有 `tokifactord.sock` 上存在 UI 客户端时才会
+请求头像；UI 关闭期间只记录消息里的 hash，不抓取头像。Aki 把对端头像和 hash 缓存在
+`<channel-key>/<profile>.avatars/`，重启后 hash 命中就不再请求。默认本机 broker 为
+`127.0.0.1:1883`，mosquitto 同时监听 `0.0.0.0:1883` 供 LAN/WireGuard 客户端使用。
+
 收到频道消息后，akid 会把它作为新的 Agent turn 处理，并在提示词中要求 Agent
 自行判断是否需要回复；不需要回复时 Agent 输出 `[NO_REPLY]`。只要整段回复中包含该标记
 （大小写、空格、连字符、全角方括号/圆括号等变体均可），网关会抑制整轮发布，不发正文。

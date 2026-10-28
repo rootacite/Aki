@@ -418,7 +418,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         channel: Any | None = None,
         image_require_approval: bool = False,
         mqtt_enabled: bool = False,
-        mqtt_host: str = "192.168.3.1",
+        mqtt_host: str = "127.0.0.1",
         mqtt_port: int = 1883,
         mqtt_state: Path | None = None,
         channel_wait_for: tuple[str, ...] = (),

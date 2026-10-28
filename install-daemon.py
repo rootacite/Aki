@@ -200,7 +200,7 @@ def service_unit(
     letta_bin: str = "",
     socket_path: Path | None = None,
     mqtt_enabled: bool = True,
-    mqtt_host: str = "192.168.3.1",
+    mqtt_host: str = "127.0.0.1",
     mqtt_port: int = 1883,
     mqtt_topic: str = "tokifactor/text",
     mqtt_magic: str = "akid-default-channel",
@@ -372,7 +372,7 @@ def main(argv: list[str] | None = None) -> int:
         default=str(Path(__file__).resolve().parent / "bin" / "letta-aki"),
     )
     parser.add_argument("--socket", help="gateway socket path")
-    parser.add_argument("--mqtt-host", default="192.168.3.1")
+    parser.add_argument("--mqtt-host", default="127.0.0.1")
     parser.add_argument("--mqtt-port", type=int, default=1883)
     parser.add_argument("--mqtt-topic", default="tokifactor/text")
     parser.add_argument("--mqtt-magic", default="akid-default-channel")

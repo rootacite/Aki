@@ -35,7 +35,7 @@ class MqttSettingsTests(unittest.TestCase):
         self.assertIn("host = 10.0.0.5", text)
         self.assertIn("port = 1884", text)
 
-    def test_defaults_are_lan_broker(self) -> None:
+    def test_defaults_are_local_broker(self) -> None:
         env = {k: v for k, v in os.environ.items() if not k.startswith("AKI_")}
         env["AKI_CONFIG"] = str(self.state)
         env["AKI_CWD"] = str(self.cwd)
@@ -45,7 +45,7 @@ class MqttSettingsTests(unittest.TestCase):
             config = build_config_from_env()
         self.assertEqual(config.mqtt_host, DEFAULT_MQTT_HOST)
         self.assertEqual(config.mqtt_port, DEFAULT_MQTT_PORT)
-        self.assertEqual(config.mqtt_host, "192.168.3.1")
+        self.assertEqual(config.mqtt_host, "127.0.0.1")
         self.assertEqual(config.mqtt_port, 1883)
 
     def test_conf_wins_over_environment(self) -> None:

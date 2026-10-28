@@ -15,8 +15,10 @@ from engine.tokifactor import (
     PICTURE_TOPIC,
     decrypt_bytes,
     decode_single_payload,
+    encode_avatar_have,
     encode_avatar_want,
     encode_text_payloads,
+    encrypt_bytes,
     ImageEnvelope,
     parse_avatar_envelope,
     parse_text_chunk,
@@ -474,6 +476,9 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         await self.peer.subscribe(AVATAR_TOPIC, qos=1)
         await self.peer.subscribe(TOPIC, qos=1)
 
+        await asyncio.sleep(0.2)
+        self.assertEqual(self.avatar_messages, [])
+
         await self.peer.publish(
             AVATAR_TOPIC,
             encode_avatar_want("akid", "").encode("utf-8"),
@@ -496,9 +501,78 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         await self.channel.publish_text("avatar-bearing reply")
         await wait_until(lambda: bool(self.peer_messages))
         self.assertEqual(self.peer_avatar_hashes[-1], envelope.hash)
+
+        peer_hash = hashlib.sha256(PNG_1X1).hexdigest()
+        payloads = encode_text_payloads(
+            "peer avatar changed",
+            MAGIC,
+            sender="alice",
+            sender_id="alice-1",
+            avatar_hash=peer_hash,
+        )
+        for payload in payloads:
+            await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
+
+        def wants_for_alice():
+            parsed = [parse_avatar_envelope(item) for item in self.avatar_messages]
+            return [
+                item
+                for item in parsed
+                if item is not None and item.type == "want" and item.id == "alice-1"
+            ]
+
+        await wait_until(lambda: bool(wants_for_alice()))
+        self.assertEqual(wants_for_alice()[-1].hash, peer_hash)
+
+        have = encode_avatar_have(
+            "alice-1",
+            peer_hash,
+            base64.b64encode(encrypt_bytes(PNG_1X1, MAGIC)).decode("ascii"),
+        )
+        await self.peer.publish(AVATAR_TOPIC, have.encode("utf-8"), qos=1)
+        await wait_until(
+            lambda: self.channel.health()["avatar"]["haves_received"] >= 1
+        )
+
+        for payload in payloads:
+            await self.peer.publish(TOPIC, payload.encode("utf-8"), qos=1)
+        await asyncio.sleep(0.2)
+        self.assertEqual(len(wants_for_alice()), 1)
+
         avatar_health = self.channel.health()["avatar"]
         self.assertTrue(avatar_health["published"])
         self.assertTrue(avatar_health["configured"])
+        self.assertGreaterEqual(avatar_health["wants_sent"], 1)
+        self.assertGreaterEqual(avatar_health["wants_received"], 1)
+
+    def test_peer_avatar_cache_round_trip(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            cache = Path(tempdir) / "avatars"
+            digest = hashlib.sha256(PNG_1X1).hexdigest()
+            first = TokifactorChannel(
+                host="127.0.0.1",
+                port=1,
+                magic=MAGIC,
+                topic=TOPIC,
+                sender_id="akid",
+                avatar_cache_path=cache,
+                on_text=self._on_text,
+            )
+            first._peer_avatars["alice-1"] = PNG_1X1
+            first._peer_avatar_hashes["alice-1"] = digest
+            first._save_peer_avatars()
+
+            second = TokifactorChannel(
+                host="127.0.0.1",
+                port=1,
+                magic=MAGIC,
+                topic=TOPIC,
+                sender_id="akid",
+                avatar_cache_path=cache,
+                on_text=self._on_text,
+            )
+            self.assertEqual(second._peer_avatars["alice-1"], PNG_1X1)
+            self.assertEqual(second._peer_avatar_hashes["alice-1"], digest)
 
 
 if __name__ == "__main__":

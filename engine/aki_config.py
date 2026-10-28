@@ -379,7 +379,7 @@ wait_for =
 
 [mqtt]
 enabled = true
-host = 192.168.3.1
+host = 127.0.0.1
 port = 1883
 topic = tokifactor/text
 magic = akid-default-channel
@@ -535,7 +535,7 @@ write_roots = /tmp,~/.local/share/tmp
 
 [mqtt]
 enabled = true
-host = 192.168.3.1
+host = 127.0.0.1
 port = 1883
 topic = tokifactor/text
 magic = akid-default-channel

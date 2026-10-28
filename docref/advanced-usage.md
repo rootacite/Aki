@@ -299,13 +299,15 @@ Aki 的 MQTT 配置在 `~/.aki/aki.conf` 的 `[mqtt]` 段：
 ```ini
 [mqtt]
 enabled = true
-host = <broker-host>
+host = 127.0.0.1
 port = 1883
 topic = tokifactor/text
 magic = <shared-magic>
 ```
 
-把同样的 `host:port` 和 magic 填进 tokifactor。连接建立后，tokifactor 会在加密的
+默认使用本机 mosquitto；它同时监听 `0.0.0.0:1883`，外部客户端填本机的
+LAN/WireGuard 地址和同样的 magic。把同样的 `host:port` 和 magic 填进 tokifactor。
+连接建立后，tokifactor 会在加密的
 `tokifactor/control` 主题上发送 probe；如果信道里有 Aki，Aki 回复 presence 并每 10 秒
 发布一次 status，tokifactor 顶部因此出现两行状态栏。信道里没有 Aki 时，tokifactor 只显示
 普通聊天界面，旧 tokifactor 客户端也会忽略控制主题继续聊天。
@@ -921,11 +923,15 @@ Natsu、Haru 以及 Aki 的其他立绘素材。
 
 tokifactor 侧的行为：
 
-- 连接后向 `tokifactor/avatar` 发布加密的 `have` 消息，包含头像哈希和头像数据。
-- 在文本和图片消息的 `avatarHash` 字段中带上同一个哈希，让对端知道该向
-  `akid` 请求头像。
-- 收到针对 `akid` 的 `want` 时自动重发 `have`。
+- 不在连接时广播完整头像；文本、控制和图片消息的 `avatarHash` 字段携带当前哈希。
+- 收到消息后把 `avatarHash` 与本地缓存比较，缺失或不一致时才向
+  `tokifactor/avatar` 发 `want`。
+- 收到针对 `akid` 的 `want` 时回加密的 `have`，包含头像哈希和头像数据。
 - 收到其他发送者的 `have` 时解密并校验 SHA-256，缓存到内存。
+- Aki 把对端头像和 hash 持久化到
+  `~/.aki/channel-history/<channel-key>/<profile>.avatars/`；重启后 hash 命中就不再请求。
+- Linux `tokifactord` 的 `want` 受前端连接门控：只有 `tokifactord.sock` 上有 UI
+  客户端时才请求头像；UI 关闭期间只记录消息里的哈希。
 
 状态可以通过 `akictl avatar` 或 RPC `aki.avatar.status` 查询；`aki.health`
 和 `aki.status` 也会返回 `avatar` 字段。
