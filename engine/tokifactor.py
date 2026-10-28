@@ -108,6 +108,8 @@ STRUCTURED_FIELDS = (
     "queueDepth",
     "activeTurn",
     "waitingUser",
+    "waitingOther",
+    "waitingOtherTargets",
     "pendingApprovals",
     "uptimeS",
     "memoryTokens",

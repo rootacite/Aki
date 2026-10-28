@@ -1347,6 +1347,13 @@ class ChannelConnection:
                 return
             state.text += delta
             return
+        if event_type == "assistant_segment":
+            await self._flush_progress(turn_id, seq, state, force=True)
+            state.segment += 1
+            state.text = ""
+            state.last_text = ""
+            state.finalized = False
+            return
         if event_type == "assistant_message":
             full = str(data.get("content") or data.get("text") or "")
             if contains_no_reply_marker(full):
@@ -1664,6 +1671,8 @@ class GatewayServer:
         self._channel_agent_states: dict[str, AgentChannelState] = {}
         self._channel_waiting_user: dict[str, float] = {}
         self._wait_user_active = False
+        self._wait_other_active = False
+        self._wait_other_targets: tuple[str, ...] = ()
         self._channel_event_seq = 0
         self._channel_history: list[ChannelTranscriptEntry] = []
         self._channel_history_seq = 0
@@ -5316,6 +5325,9 @@ class GatewayServer:
         if self._wait_user_active:
             with contextlib.suppress(Exception):
                 await self._set_wait_user_active(False)
+        if self._wait_other_active:
+            with contextlib.suppress(Exception):
+                await self._set_wait_other_active(False)
         self._release_turn_lock(turn)
         turn.done_event.set()
         if self.active is turn:
@@ -5593,6 +5605,8 @@ class GatewayServer:
                 else "false",
                 "channelReady": "true" if channel_ready else "false",
                 "waitingUser": "true" if self._wait_user_active else "false",
+                "waitingOther": "true" if self._wait_other_active else "false",
+                "waitingOtherTargets": ",".join(self._wait_other_targets),
             }
         )
         return metadata
@@ -5922,6 +5936,32 @@ class GatewayServer:
             )
         except Exception as exc:
             LOGGER.warning("failed to publish wait_user state active=%s: %s", active, exc)
+
+    async def _set_wait_other_active(
+        self, active: bool, targets: tuple[str, ...] = ()
+    ) -> None:
+        normalized = tuple(label.strip() for label in targets if label.strip())
+        if self._wait_other_active == active and self._wait_other_targets == normalized:
+            return
+        self._wait_other_active = active
+        self._wait_other_targets = normalized if active else ()
+        self._schedule_status_refresh()
+        channel = self.channel
+        if channel is None or not channel.connected:
+            return
+        metadata = {
+            **self._channel_live_metadata(),
+            "kind": "wait_other",
+            "waitingOther": "true" if active else "false",
+            "waitingOtherTargets": ",".join(self._wait_other_targets),
+        }
+        try:
+            await channel.publish_text(
+                "waiting for other agents" if active else "stopped waiting for other agents",
+                metadata,
+            )
+        except Exception as exc:
+            LOGGER.warning("failed to publish wait_other state active=%s: %s", active, exc)
 
     def _mark_channel_member_offline(self, member_id: str) -> None:
         self._channel_waiting_user.pop(member_id, None)
@@ -7757,6 +7797,15 @@ class GatewayServer:
         if tool_call_id:
             turn.tool_names[tool_call_id] = name
         if name in HIDDEN_TOOL_NAMES:
+            await self._emit(
+                turn,
+                "assistant_segment",
+                {
+                    "reason": "hidden_tool",
+                    "tool_call_id": tool_call_id,
+                    "name": name,
+                },
+            )
             return
         if tool_call_id in turn.tool_calls_seen:
             return
@@ -9104,20 +9153,25 @@ class GatewayServer:
                 False,
             )
             return
+        labels = tuple(name or label for _member_id, name, label in targets)
+        await self._set_wait_other_active(True, labels)
         turn.waited_agent_ids.update(
             member_id for member_id, _name, _label in targets if member_id
         )
-        results = await asyncio.gather(
-            *(
-                self._wait_for_agent(member_id, name, turn)
-                for member_id, name, _label in targets
+        try:
+            results = await asyncio.gather(
+                *(
+                    self._wait_for_agent(member_id, name, turn)
+                    for member_id, name, _label in targets
+                )
             )
-        )
-        await self._send_external_result(
-            tool_call_id,
-            self._format_wait_other_results(list(results)),
-            False,
-        )
+            await self._send_external_result(
+                tool_call_id,
+                self._format_wait_other_results(list(results)),
+                False,
+            )
+        finally:
+            await self._set_wait_other_active(False)
 
     async def _handle_execution_lock_tool(
         self, turn: Turn, tool_call_id: str, tool_name: str

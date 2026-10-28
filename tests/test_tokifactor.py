@@ -128,6 +128,25 @@ class TokifactorWireTests(unittest.TestCase):
         self.assertEqual(decoded.metadata, metadata)
         self.assertIn('"schema":"akid.v1"', encode_envelope(envelope))
 
+    def test_wait_other_metadata_survives_text_payload_encoding(self) -> None:
+        metadata = {
+            "schema": "akid.v1",
+            "kind": "wait_other",
+            "waitingOther": "true",
+            "waitingOtherTargets": "Aki,Fuyu",
+        }
+        payloads = encode_text_payloads(
+            "waiting for other agents",
+            MAGIC,
+            sender="Fuyu",
+            sender_id="fuyu",
+            metadata=metadata,
+        )
+        decoded = decode_single_payload(payloads[0], MAGIC)
+        self.assertIsNotNone(decoded)
+        assert decoded is not None
+        self.assertEqual(decoded.metadata, metadata)
+
     def test_control_status_envelope_round_trip(self) -> None:
         metadata = {
             "schema": "akid.v1",
@@ -148,6 +167,8 @@ class TokifactorWireTests(unittest.TestCase):
             "queueDepth": "2",
             "activeTurn": "true",
             "waitingUser": "true",
+            "waitingOther": "true",
+            "waitingOtherTargets": "Aki,Fuyu",
             "pendingApprovals": "1",
             "uptimeS": "60",
             "memoryTokens": "42",
