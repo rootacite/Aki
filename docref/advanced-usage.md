@@ -214,8 +214,7 @@ systemctl --user restart akid@aki.service
 systemctl --user restart akid-proxy@aki.service
 ```
 
-脚本会保留现有 core memory；旧后端已持久化的 `<live-context>` 也会保留，bridge 模式下
-live context 不再落盘，而由每个 turn 的 overlay 注入。脚本会先备份到
+脚本会保留现有 core memory；live context 不再落盘，而由每个 turn 的 overlay 注入。脚本会先备份到
 `~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 ownership/identity/
 transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
 `{CORE_MEMORY}` 占位符必须保留。
@@ -320,6 +319,26 @@ akictl --profile fuyu -p "你好"   # 显式 profile
 akictl history 50                 # 读本地频道历史
 akictl history --solo             # 读独处历史
 ```
+
+### 公共群聊记忆
+
+每个 profile 在自己的
+`~/.aki/channel-history/<channel-key>/<profile>.jsonl` 中保存频道历史；这些记录不会自动
+写入各成员的 MemFS。所有 profile 另有一份去重后的公共群聊记忆：
+
+```text
+~/.letta/lc-local-backend/memfs/shared/channel/<channel-key>/messages.jsonl
+~/.letta/lc-local-backend/memfs/shared/channel/<channel-key>/MEMORY.md
+```
+
+- 只记录 `phase=final`、非空且非独处的群聊消息；同一条消息按 `messageId`（缺失时按
+  发送者、时间和正文）去重，因此多个 profile 同时看到同一条消息不会重复写入。
+- 公共记忆为空时，Aki 首次启动会从自己的 canonical 群聊历史回填一次；之后由各 profile
+  实时追加新消息。
+- 文件最多保留最近 4096 条记录。
+- 持久 system prompt 只注入一个 `<shared-memory path=... records=...>` 索引，不重复消息正文；
+  需要细节时由成员自行读取 `messages.jsonl`。
+- `akictl health` 的 `channel.public_memory` 会显示路径、记录数和更新时间。
 
 REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
@@ -526,16 +545,15 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
 每条频道 user 消息包含 `[akid MQTT channel message]`、头部 `wake-reminder`、`sender`、
-可选 `seq`、在线成员列表 `<channel-context>` 和原始 `message`。`wake-reminder` 会写明
+可选 `seq` 和原始 `message`；在线成员列表 `<channel-context>` 只在 turn overlay 中。
+`wake-reminder` 会写明
 当前说话者：用户发言把 `${{USERNAME}}` 替换为 profile 的 `[gateway] username`，智能体
-发言使用成员名，不追加类型标签。当前 turn 结束后，持久化 user message 中的 `<channel-context>` 会被
-删除，并更新 `conversation.json.updated_at` 强制 Letta 重载；原始 prompt 可在
-`~/.aki/channel-prompt-journal/<profile>.jsonl` 中找到。其他智能体触发的 turn
+发言使用成员名，不追加类型标签。运行时不会生成 prompt journal。其他智能体触发的 turn
 还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
 的 `<channel-turn>` 中。
 
-历史频道 prompt 的成员表迁移与运行时回滚：
+历史频道 prompt 的成员表迁移（仅用于旧数据）：
 
 ```bash
 python3 scripts/migrate-channel-prompts.py            # dry-run
@@ -830,8 +848,7 @@ akid 通过 Letta external tool 注册 `desktop_take_screenshot`：
 ### 桌面实况上下文
 
 bridge 模式下，akid 在每个 turn 真正开始前采集一次桌面快照，并把它作为 per-turn overlay
-追加到实际 API 请求末尾的唯一 `<live-context>` 块，不写回持久 system prompt；旧后端才原地
-刷新持久块。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
+追加到实际 API 请求末尾的唯一 `<live-context>` 块，不写回持久 system prompt。该块不会追加到用户消息或 `messages.jsonl`，因此模型每次
 请求只看到一份当前快照，历史中没有重复副本。
 
 块内包含：

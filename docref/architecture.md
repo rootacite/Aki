@@ -122,14 +122,13 @@ per-turn `<channel-turn>` 里的 `<reply-target>` 会说明“如果你认为当
 `<channel-policy>` 保存静态频道规则并写入持久 system prompt；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。
 bridge 模式下 `<channel-turn>` 只作为 turn overlay 拼进实际 API 请求的 system prompt，
-不写回 agent record 或 `system-prompt.json`；旧后端无 bridge 时才回退为持久写入。每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
+不写回 agent record 或 `system-prompt.json`。akid 只接受带 `aki_bridge` 的定制 Letta；
+否则启动直接报错退出。每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
 这条 `wake-reminder` 还会通过 `当前正在和你说话的是 ${{USERNAME}}` 模板写明当前说话者：
 用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。bridge 模式下
 `<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，不写入持久 user message，
-turn 结束后自然消失。旧后端没有 bridge 时才回退为 user prompt + turn 后删除成员表，
-原子重写 `messages.jsonl` 并 bump `conversation.json.updated_at`，让 Letta 淘汰 resident
-messages 后重载。旧后端的原始 prompt 先写入 `~/.aki/channel-prompt-journal/<profile>.jsonl`
-以便按 turn 恢复；compaction、边界失效或无法唯一匹配时只记录错误，不修改文件。
+turn 结束后自然消失。运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`
+和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
 
 最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 system prompt，
 默认最多 64K **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。bridge 模式下
@@ -178,8 +177,7 @@ magic` 相同视为同一个群聊，每个 profile 在
 预算约束。
 
 `<live-context>` 在 bridge 模式下同样只作为 per-turn overlay 追加在实际 API 请求末尾，
-不写回 agent record / `system-prompt.json`。它每轮重新采集桌面快照；旧后端无 bridge 时才
-回退为原地刷新持久块。
+不写回 agent record / `system-prompt.json`。它每轮重新采集桌面快照。
 
 当一个智能体正在工作时，新消息先只更新 transcript 并标记 `during-work="true"`，供下一次
 API call 使用。若当前 turn 后续仍有 tool call/API call，用户消息视为已在该 turn 中消费；
@@ -304,7 +302,8 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/client.py`：同步本地管理客户端库。
 - `engine/akictl.py`、`bin/akictl`：MQTT 对话客户端 + 本地管理 CLI。
 - `engine/channel_history.py`：akid 与 CLI 共用的频道历史 key/路径 helper。
-- `engine/solo_memory.py`：独处会话存储、摘要、预算淘汰与 MemFS 归档。
+- `engine/solo_memory.py`：独处会话存储、摘要、确定性整轮预算淘汰与 MemFS 归档。
+- `engine/public_memory.py`：跨 profile 去重保存 final 群聊消息，提供共享公共记忆索引。
 - `aki-layer/`：Qt Quick + LayerShellQt 透明全屏画布层（overlay layer）。
 - `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装、vendored Letta 构建与 legacy 迁移。
 - `vendor/letta-code/`：固定版本的 Letta Code upstream submodule。

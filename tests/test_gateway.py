@@ -36,6 +36,7 @@ from engine.live_context import (
     WindowInfo,
     estimate_tokens,
     render_channel_policy,
+    render_channel_roster,
     render_channel_turn,
 )
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
@@ -138,6 +139,17 @@ async def respond_approval(
         approval.future.set_result(
             (allow, message or ("approved via test" if allow else "denied via test"))
         )
+
+
+def overlay_text(server: GatewayServer, *, update_index: int = -1) -> str:
+    overlays = getattr(server, "bridge_overlays", [])
+    if not overlays:
+        return ""
+    overlay = overlays[update_index]
+    context = overlay.get("turn_context") if isinstance(overlay, dict) else None
+    if not isinstance(context, dict):
+        return ""
+    return str(context.get("system_append") or "")
 
 
 class FakeChannel:
@@ -509,6 +521,31 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         if channel is not None:
             server.channel = channel
         await server.start()
+        server.bridge_overlays = []
+        server.bridge_restores = []
+        original_begin = server.backend.begin_aki_turn
+        original_update = server.backend.update_aki_turn
+        original_restore = server.backend.restore_conversation
+
+        async def capture_begin(
+            turn_id: str, overlay: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            server.bridge_overlays.append(dict(overlay))
+            return await original_begin(turn_id, overlay, **kwargs)
+
+        async def capture_update(
+            turn_id: str, overlay: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            server.bridge_overlays.append(dict(overlay))
+            return await original_update(turn_id, overlay, **kwargs)
+
+        async def capture_restore(snapshot_id: str, **kwargs: Any) -> Any:
+            server.bridge_restores.append(snapshot_id)
+            return await original_restore(snapshot_id, **kwargs)
+
+        server.backend.begin_aki_turn = capture_begin
+        server.backend.update_aki_turn = capture_update
+        server.backend.restore_conversation = capture_restore
         if wait_backend:
             self.assertTrue(await server.backend.wait_ready(5.0))
         self.server = server
@@ -598,11 +635,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await self.start_server(mcp_native_tools_enabled=False)
         assert self.server is not None
 
-        async def fake_letta_json(args, timeout=20.0, *, label="letta command"):
-            if args[:2] == ["mcp", "list"]:
-                return [{"name": "tavily", "transport": "stdio"}]
-            if args[:3] == ["mcp", "tools", "tavily"]:
-                return [
+        async def fake_mcp_list(*args, **kwargs):
+            return {"servers": [{"name": "tavily"}]}
+
+        async def fake_mcp_tools(*args, **kwargs):
+            return {
+                "tools": [
                     {
                         "name": "mcp__tavily__tavily_search",
                         "description": "Search the web",
@@ -613,11 +651,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                         },
                     }
                 ]
-            raise AssertionError(f"unexpected letta args: {args}")
+            }
 
         with mock.patch.object(
-            self.server, "_run_letta_json_value", new=fake_letta_json
-        ):
+            self.server.backend, "mcp_list", new=fake_mcp_list
+        ), mock.patch.object(self.server.backend, "mcp_tools", new=fake_mcp_tools):
             await self.server._discover_mcp_tools()
 
         names = [tool["name"] for tool in self.server._external_tools()]
@@ -637,30 +675,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         assert self.server is not None
 
-        async def fake_letta_json(args, timeout=20.0, *, label="letta command"):
-            if args[:2] == ["mcp", "list"]:
-                return [{"name": "tavily"}, {"name": "local"}]
-            if args[:3] == ["mcp", "tools", "tavily"]:
-                return [
+        async def fake_mcp_list(*args, **kwargs):
+            return {"servers": [{"name": "tavily"}, {"name": "local"}]}
+
+        async def fake_mcp_tools(*args, **kwargs):
+            return {
+                "tools": [
                     {
                         "name": "mcp__tavily__tavily_search",
                         "description": "Search the web",
                         "inputSchema": {"type": "object", "properties": {}},
-                    }
-                ]
-            if args[:3] == ["mcp", "tools", "local"]:
-                return [
+                    },
                     {
                         "name": "mcp__local__nmap_scan",
                         "description": "Scan ports",
                         "inputSchema": {"type": "object", "properties": {}},
-                    }
+                    },
                 ]
-            raise AssertionError(f"unexpected letta args: {args}")
+            }
 
         with mock.patch.object(
-            self.server, "_run_letta_json_value", new=fake_letta_json
-        ):
+            self.server.backend, "mcp_list", new=fake_mcp_list
+        ), mock.patch.object(self.server.backend, "mcp_tools", new=fake_mcp_tools):
             await self.server._discover_mcp_tools()
 
         self.assertEqual(self.server._mcp_native_active_servers, ["tavily"])
@@ -855,24 +891,38 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         text, is_error = _normalize_mcp_result("plain text")
         self.assertEqual((text, is_error), ("plain text", False))
 
-    async def test_conversation_compact_uses_official_runner(self) -> None:
-        await self.start_server()
+    async def test_conversation_compact_uses_bridge(self) -> None:
+        server = await self.start_server()
         client = await self.client()
         await client.hello()
-        fake_result = {
-            "compacted": True,
-            "mode": "all",
-            "num_messages_before": 12,
-            "num_messages_after": 3,
-            "summary": "condensed",
-            "output": "Compaction completed (mode: all).",
-            "reflection": "completed",
-            "reflection_launched": True,
-            "reflection_state_changed": True,
-        }
-        with mock.patch(
-            "engine.akid.run_letta_compact", return_value=fake_result
-        ) as runner:
+        with mock.patch.object(
+            server.backend,
+            "reflection_status",
+            new=mock.AsyncMock(
+                return_value={
+                    "last_reflection_started_at": "",
+                    "last_reflection_succeeded_at": "",
+                }
+            ),
+        ), mock.patch.object(
+            server.backend,
+            "compact_conversation",
+            new=mock.AsyncMock(
+                return_value={
+                    "compacted": True,
+                    "mode": "all",
+                    "num_messages_before": 12,
+                    "num_messages_after": 3,
+                    "summary": "condensed",
+                }
+            ),
+        ), mock.patch.object(
+            server.backend,
+            "reflect_conversation",
+            new=mock.AsyncMock(return_value={"launched": True}),
+        ), mock.patch.object(
+            server, "_wait_bridge_reflection", new=mock.AsyncMock(return_value="completed")
+        ):
             result = await client.call(
                 "aki.conversation.compact", {"mode": "all", "timeout": 120}
             )
@@ -881,12 +931,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["conversation_id"], "default")
         self.assertEqual(result["reflection"], "completed")
         self.assertEqual(result["mode"], "all")
-        runner.assert_called_once()
-        kwargs = runner.call_args.kwargs
-        self.assertEqual(kwargs["agent_id"], "test-agent")
-        self.assertEqual(kwargs["conversation_id"], "default")
-        self.assertEqual(kwargs["mode"], "all")
-        self.assertEqual(kwargs["timeout"], 120.0)
 
     async def test_conversation_compact_rejects_invalid_mode_and_busy_turn(self) -> None:
         server = await self.start_server(channel=FakeChannel())
@@ -1242,6 +1286,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual(ctx.exception.code, ErrorCode.PROTOCOL_VERSION)
 
+    async def test_startup_refuses_backend_without_aki_bridge(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"FAKE_LETTA_NO_BRIDGE": "1"}, clear=False
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                await self.start_server()
+        self.assertIn("aki_bridge", str(ctx.exception))
+        self.assertIsNone(self.server)
+
     async def test_custom_socket_parent_mode_is_not_changed(self) -> None:
         shared = self.root / "shared"
         shared.mkdir(mode=0o755)
@@ -1305,7 +1358,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。", prompt
         )
 
-    async def test_channel_turn_is_written_to_real_system_prompt(self) -> None:
+    async def test_channel_turn_is_bridge_overlay_only(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
         server = await self.start_server(channel=FakeChannel())
         turn = Turn(
@@ -1320,26 +1373,24 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             channel_sender="Acite",
             channel_text="hello",
         )
-        await server._refresh_channel_turn(turn)
-        system = self._agent_system(agent_path)
-        self.assertIn('<channel-turn version="1" from_agent="false" new="true">', system)
+        block = await server._refresh_channel_turn(turn)
+        self.assertIn('<channel-turn version="1" from_agent="false" new="true">', block)
         self.assertIn(
             '<new-message seq="7" sender="Acite" sender_id="sender-1" source="user"',
-            system,
+            block,
         )
-        self.assertIn("<text>hello</text>", system)
-        self.assertIn("<wake-reminder>用^排除不需要被提醒的成员", system)
+        self.assertIn("<text>hello</text>", block)
+        self.assertIn("<wake-reminder>用^排除不需要被提醒的成员", block)
         self.assertIn(
             "<reply-target>如果你认为当前只需要回复Master、无需打扰其他人，使用 `@Master`",
-            system,
+            block,
         )
-        self.assertIn("<guidance>", system)
-        self.assertIn('remaining="3"', system)
-        self.assertIn("resets=\"user-message\"", system)
+        self.assertIn("<guidance>", block)
+        self.assertIn('remaining="3"', block)
+        self.assertIn("resets=\"user-message\"", block)
+        self.assertNotIn("<channel-turn", self._agent_system(agent_path))
         prompt = server._channel_prompt("Acite", "sender-1", "hello")
         self.assertNotIn("<channel-turn", prompt)
-        await server._refresh_channel_turn(None)
-        self.assertNotIn("<channel-turn", self._agent_system(agent_path))
 
     async def test_wake_routing_is_written_to_real_system_prompt(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
@@ -1408,11 +1459,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(server._channel_history[0].from_agent)
         self.assertEqual(server._channel_history[-1].sender_id, legacy_member_id("Aki"))
         self.assertTrue(server._channel_history[-1].from_agent)
+        overlay = overlay_text(server)
+        self.assertIn("<channel-transcript", overlay)
+        self.assertIn(body, overlay)
+        self.assertIn('new="true"', overlay)
+        self.assertIn('source="agent"', overlay)
         system = self._agent_system(agent_path)
-        self.assertIn("<channel-transcript", system)
-        self.assertIn(body, system)
-        self.assertIn('new="true"', system)
-        self.assertIn('source="agent"', system)
+        self.assertNotIn("<channel-transcript", system)
+        self.assertNotIn(body, system)
 
     async def test_agent_progress_and_tool_events_do_not_create_turns(self) -> None:
         fake_channel = FakeChannel()
@@ -1584,6 +1638,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             include_reasoning=False,
             client_message_id=None,
             state="running",
+            bridge_turn_started=True,
         )
         server.active = busy_turn
         agent_body = "AGENT_MESSAGE_WHILE_BUSY"
@@ -1596,15 +1651,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(server.queue, [])
         self.assertTrue(server._channel_history[-1].arrived_while_busy)
-        system = self._agent_system(agent_path)
-        self.assertIn(agent_body, system)
-        self.assertIn('during-work="true"', system)
+        overlay = overlay_text(server)
+        self.assertIn(agent_body, overlay)
+        self.assertIn('during-work="true"', overlay)
 
         await server._on_channel_text("alice", "alice-1", "USER_MESSAGE_WHILE_BUSY")
         self.assertEqual(server.queue, [])
         self.assertEqual(len(busy_turn.busy_messages), 1)
         self.assertTrue(server._channel_history[-1].arrived_while_busy)
         self.assertEqual(fake_channel.events, [])
+        overlay = overlay_text(server)
+        self.assertIn("USER_MESSAGE_WHILE_BUSY", overlay)
+        self.assertIn('during-work="true"', overlay)
         server._queue_unhandled_busy_messages(busy_turn)
         self.assertEqual(len(server.queue), 1)
         self.assertIn("USER_MESSAGE_WHILE_BUSY", server.queue[0].message)
@@ -1654,26 +1712,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
             await task
 
-    async def test_bridge_user_turn_does_not_capture_or_strip_channel_prompt(self) -> None:
-        with mock.patch.dict(os.environ, {"FAKE_LETTA_AKI_BRIDGE": "1"}, clear=False):
-            server = await self.start_server(channel=FakeChannel())
-        directory = server._conversation_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        (directory / "messages.jsonl").write_text(
-            '{"type":"session"}\n', encoding="utf-8"
-        )
-        (directory / "conversation.json").write_text(
-            '{"id":"default"}\n', encoding="utf-8"
-        )
-        with mock.patch(
-            "engine.akid.capture_conversation_boundary"
-        ) as capture, mock.patch(
-            "engine.akid.strip_persisted_channel_prompt"
-        ) as strip:
-            await channel_send(server, "bridge hello")
-        capture.assert_not_called()
-        strip.assert_not_called()
-        self.assertFalse(server.channel_prompt_journal_path.exists())
+    async def test_bridge_user_turn_keeps_transcript_out_of_system_prompt(self) -> None:
+        agent_path = self._write_test_agent()
+        server = await self.start_server(channel=FakeChannel())
+        await channel_send(server, "bridge hello")
+        self.assertNotIn("<channel-transcript", self._agent_system(agent_path))
+        self.assertIn("<channel-transcript", overlay_text(server))
 
     async def test_busy_user_message_is_consumed_by_later_tool_call(self) -> None:
         fake_channel = FakeChannel()
@@ -2566,9 +2610,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(body, server._channel_prompt("alice", "alice-1", body))
         self.assertEqual(server._channel_history[0].text, body)
         self.assertFalse(server._channel_history[0].from_agent)
+        overlay = overlay_text(server)
+        self.assertIn('source="user"', overlay)
+        self.assertIn('new="true"', overlay)
         system = self._agent_system(agent_path)
-        self.assertIn('source="user"', system)
-        self.assertIn('new="true"', system)
+        self.assertNotIn('source="user"', system)
         client = await self.client()
         await client.hello()
         for method in ("aki.chat.send", "aki.chat.cancel", "aki.chat.history"):
@@ -2604,8 +2650,13 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await server._on_channel_text("Master", "master", "hello from a human")
         self.assertFalse(server._channel_history[-1].from_agent)
         prompt = server._channel_prompt("Master", "master", "hello from a human")
-        self.assertIn('kind="user"', prompt)
-        self.assertIn("human bio", prompt)
+        self.assertNotIn("human bio", prompt)
+        roster = render_channel_roster(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+        )
+        self.assertIn('kind="user"', roster)
+        self.assertIn("human bio", roster)
         turn = render_channel_turn(
             self_member=server._channel_self_member(),
             members=server._channel_member_views(),
@@ -2684,6 +2735,41 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             from_agent=False,
         )
         self.assertEqual(third.seq, 3)
+
+    async def test_group_messages_enter_public_memory(self) -> None:
+        server = await self.start_server()
+        server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="first public message",
+            from_agent=False,
+            message_id="public-1",
+        )
+        server._record_channel_message(
+            sender="Fuyu",
+            sender_id="fuyu",
+            text="second public message",
+            from_agent=True,
+            message_id="public-2",
+        )
+        server._record_channel_message(
+            sender="alice",
+            sender_id="alice-1",
+            text="first public message",
+            from_agent=False,
+            message_id="public-1",
+        )
+
+        self.assertEqual(server.public_memory.status()["records"], 2)
+        records = server.public_memory.snapshot()
+        self.assertEqual(
+            [record["text"] for record in records],
+            ["first public message", "second public message"],
+        )
+        block = server._public_memory_prompt_block()
+        self.assertIn("<shared-memory", block)
+        self.assertIn('records="2"', block)
+        self.assertIn(str(server.public_memory.path), block)
 
     async def test_channel_transcript_is_isolated_by_mqtt_channel(self) -> None:
         server = await self.start_server()
@@ -2866,7 +2952,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(await server.backend.wait_ready(5.0))
 
-    async def test_user_channel_turn_strips_roster_after_completion(self) -> None:
+    async def test_user_channel_turn_persists_without_roster_or_journal(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         directory = server._conversation_dir()
@@ -2891,7 +2977,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         async def append_and_send(content: str) -> None:
             prompt = content if isinstance(content, str) else ""
             prompts.append(prompt)
-            self.assertIn("<channel-context>", prompt)
+            self.assertNotIn("<channel-context>", prompt)
             row = {
                 "type": "message",
                 "id": f"entry-{len(prompts)}",
@@ -2933,19 +3019,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("当前正在和你说话的是 Master。", text)
         self.assertIn("message:\nfirst turn", rows[0]["message"]["content"][0]["text"])
         self.assertIn("message:\nsecond turn", rows[1]["message"]["content"][0]["text"])
-        record = json.loads(conversation.read_text(encoding="utf-8"))
-        self.assertNotEqual(record["updated_at"], "2026-01-01T00:00:00.000Z")
-        journal = server.channel_prompt_journal_path
-        self.assertTrue(journal.is_file())
-        self.assertEqual(
-            len(
-                [
-                    json.loads(line)
-                    for line in journal.read_text(encoding="utf-8").splitlines()
-                ]
-            ),
-            2,
-        )
 
     async def test_agent_channel_turn_uses_ephemeral_conversation_snapshot(self) -> None:
         fake_channel = FakeChannel()
@@ -2986,15 +3059,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "ephemeral channel turn",
                 {"schema": "akid.v1", "kind": "turn", "phase": "final"},
             )
-            await wait_until(
-                lambda: int(
-                    server._channel_transcript_status.get("ephemeral_turns", 0)
-                )
-                >= 1
-            )
             await wait_until(lambda: server.active is None and not server.queue)
-        self.assertEqual(messages.read_bytes(), original_messages)
-        self.assertEqual(conversation.read_bytes(), original_conversation)
+        self.assertTrue(server.bridge_restores)
         self.assertTrue(await server.backend.wait_ready(5.0))
 
     async def test_channel_image_and_text_share_one_history_entry_and_multimodal_turn(
@@ -3276,13 +3342,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 "ephemeral multimodal",
                 {"schema": "akid.v1", "kind": "turn", "phase": "final"},
             )
-            await wait_until(
-                lambda: int(server._channel_transcript_status.get("ephemeral_turns", 0))
-                >= 1
-            )
             await wait_until(lambda: server.active is None and not server.queue)
-        self.assertEqual(messages.read_bytes(), original_messages)
-        self.assertEqual(conversation.read_bytes(), original_conversation)
+        self.assertTrue(server.bridge_restores)
 
     async def test_channel_control_probe_presence_dedup_and_rate_limit(self) -> None:
         fake_channel = FakeChannel()
@@ -3414,7 +3475,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Master不在成员列表中", policy)
         self.assertNotIn("<wake-routing>", plain)
         self.assertNotIn("不希望其他成员注意到这条消息", plain)
-        roster = server._channel_prompt("alice", "alice-1", "hello everyone")
+        prompt = server._channel_prompt("alice", "alice-1", "hello everyone")
+        self.assertNotIn("Fuyu", prompt)
+        roster = render_channel_roster(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+        )
         self.assertIn("Fuyu", roster)
         self.assertIn("&lt;untrusted&gt;", roster)
         other = render_channel_turn(
@@ -3441,7 +3507,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 metadata={**metadata, "kind": "offline"},
             )
         )
-        after_offline = server._channel_prompt("alice", "alice-1", "hello")
+        after_offline = render_channel_roster(
+            self_member=server._channel_self_member(),
+            members=server._channel_member_views(),
+        )
         self.assertNotIn("Fuyu", after_offline)
         self.assertEqual(server.active, None)
         self.assertEqual(fake_channel.events, [])
@@ -4671,15 +4740,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(first_result.events_of("approval"))
                 self.assertEqual(first_result.final_text, "channel reply")
                 first_system = self._agent_system(agent_path)
-                self.assertEqual(first_system.count("<live-context"), 1)
-                self.assertEqual(first_system.count("</live-context>"), 1)
-                self.assertEqual(first_system.count("{CORE_MEMORY}"), 1)
+                first_overlay = overlay_text(server)
+                self.assertEqual(first_overlay.count("<live-context"), 1)
+                self.assertEqual(first_overlay.count("</live-context>"), 1)
+                self.assertNotIn("<live-context", first_system)
                 self.assertEqual(stat.S_IMODE(agent_path.stat().st_mode), 0o600)
-                self.assertIn("Fake Window &lt;test&gt;", first_system)
-                self.assertIn("firefox", first_system)
-                self.assertIn("python", first_system)
-                self.assertIn("echo { CORE_MEMORY }", first_system)
-                self.assertIn("live/desktop-", first_system)
+                self.assertIn("Fake Window &lt;test&gt;", first_overlay)
+                self.assertIn("firefox", first_overlay)
+                self.assertIn("python", first_overlay)
+                self.assertIn("echo { CORE_MEMORY }", first_overlay)
+                self.assertIn("live/desktop-", first_overlay)
                 live_files = list(
                     (self.root / "live-shots" / "live").glob("desktop-*.png")
                 )
@@ -4688,10 +4758,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 await asyncio.sleep(1.05)
                 second_result = await channel_send(server, "again")
                 self.assertEqual(second_result.final_text, "channel reply")
-                second_system = self._agent_system(agent_path)
-                self.assertEqual(second_system.count("<live-context"), 1)
-                self.assertEqual(second_system.count("</live-context>"), 1)
-                self.assertNotEqual(first_system, second_system)
+                second_overlay = overlay_text(server)
+                self.assertEqual(second_overlay.count("<live-context"), 1)
+                self.assertEqual(second_overlay.count("</live-context>"), 1)
+                self.assertNotEqual(first_overlay, second_overlay)
                 client = await self.client()
                 await client.hello()
                 health = await client.call("aki.status", {})
@@ -4749,9 +4819,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await channel_send(server, "hello")
                 system = self._agent_system(agent_path)
-                self.assertIn("<live-context", system)
-                self.assertNotIn("<screenshot", system)
-                self.assertIn("echo hi", system)
+                overlay = overlay_text(server)
+                self.assertIn("<live-context", overlay)
+                self.assertNotIn("<screenshot", overlay)
+                self.assertIn("echo hi", overlay)
+                self.assertNotIn("<live-context", system)
                 client = await self.client()
                 await client.hello()
                 status = await client.call("aki.status", {})
@@ -4797,15 +4869,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     live_context_timeout=2.0,
                 )
                 await channel_send(server, "hello")
-                system = self._agent_system(agent_path)
-                block = system[
-                    system.index("<live-context") : system.index(
+                overlay = overlay_text(server)
+                block = overlay[
+                    overlay.index("<live-context") : overlay.index(
                         "</live-context>"
                     )
                     + len("</live-context>")
                 ]
                 self.assertLessEqual(estimate_tokens(block), 2048)
-                self.assertNotIn("stale", system)
+                self.assertNotIn("<live-context", self._agent_system(agent_path))
 
                 disabled_path = self._write_test_agent(
                     "BASE\n\n<live-context refreshed_at=\"old\">stale</live-context>\n"
@@ -4818,6 +4890,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 cleared = self._agent_system(disabled_path)
                 self.assertNotIn("<live-context", cleared)
                 await channel_send(server, "hello")
+                self.assertNotIn("<live-context", overlay_text(server))
                 self.assertNotIn(
                     "<live-context", self._agent_system(disabled_path)
                 )
@@ -4852,8 +4925,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 server._enqueue_channel_turn("sender", "sender", "channel hello")
                 await wait_until(lambda: server.active is None and not server.queue)
                 system = self._agent_system(agent_path)
-                self.assertEqual(system.count("<live-context"), 1)
-                self.assertIn("echo channel", system)
+                overlay = overlay_text(server)
+                self.assertEqual(overlay.count("<live-context"), 1)
+                self.assertIn("echo channel", overlay)
+                self.assertNotIn("<live-context", system)
         finally:
             for sock in sockets:
                 sock.close()

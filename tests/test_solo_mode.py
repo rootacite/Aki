@@ -311,17 +311,18 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertIn("<solo-mode", system)
         self.assertIn("当下你正在与Master独处", system)
-        self.assertIn("group old", system)
-        self.assertIn('frozen="true"', system)
-        self.assertLess(
-            system.index("<channel-transcript"), system.index("<solo-mode")
-        )
+        self.assertNotIn("group old", system)
+        self.assertNotIn("<channel-transcript", system)
         self.assertTrue(any(item.get("kind") == "solo_ready" for item in self.channel.controls))
         conversation_prompt = json.loads(
             self.conversation_prompt_path.read_text(encoding="utf-8")
         )["content"]
         self.assertIn("<solo-mode", conversation_prompt)
-        self.assertIn("<solo-transcript", conversation_prompt)
+        self.assertNotIn("<solo-transcript", conversation_prompt)
+        overlay = await self.server._refresh_channel_transcript()
+        self.assertIn("group old", overlay)
+        self.assertIn('frozen="true"', overlay)
+        self.assertIn("<solo-transcript", overlay)
 
         await self.server._on_channel_control(
             TextEnvelope(
@@ -343,13 +344,13 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(str(self.server.channel_history_path).endswith("aki.jsonl"))
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertNotIn("<solo-mode", system)
-        self.assertIn("<channel-transcript", system)
+        self.assertNotIn("<channel-transcript", system)
         conversation_prompt = json.loads(
             self.conversation_prompt_path.read_text(encoding="utf-8")
         )["content"]
         self.assertNotIn("<solo-mode", conversation_prompt)
         self.assertNotIn("<solo-transcript", conversation_prompt)
-        self.assertIn("<channel-transcript", conversation_prompt)
+        self.assertNotIn("<channel-transcript", conversation_prompt)
 
     async def test_non_target_tracks_solo_target_without_switching(self) -> None:
         await self.server._on_channel_control(
@@ -512,6 +513,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(memories["sessions"]), 1)
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertIn("<solo-memories", system)
+        self.assertNotIn("<solo-mode", system)
         self.assertIn("这是独处里说的秘密", system)
         self.assertIn("独处里的私密回复", system)
         group_path = self.server.group_channel_history_path
@@ -519,6 +521,48 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             group_text = group_path.read_text(encoding="utf-8")
             self.assertNotIn("这是独处里说的秘密", group_text)
             self.assertNotIn("独处里的私密回复", group_text)
+
+    async def test_bridge_keeps_solo_rules_and_memories_in_system_prompt(self) -> None:
+        from engine.solo_memory import SoloMemoryEntry, SoloMemorySession
+        from engine.solo_mode import SoloSession
+
+        self.server.backend.supports_aki_bridge = True
+        self.server._solo_session = SoloSession(
+            session_id="solo-active",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-28T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.server._solo_scene = "私密房间。"
+        self.server.solo_memory.add_session(
+            SoloMemorySession(
+                session_id="solo-old",
+                started_at="2026-10-27T00:00:00Z",
+                ended_at="2026-10-27T00:10:00Z",
+                summary="旧独处摘要",
+                entries=[
+                    SoloMemoryEntry(
+                        id="sme_old",
+                        seq=1,
+                        role="user",
+                        sender="Master",
+                        timestamp="2026-10-27T00:01:00Z",
+                        text="旧独处秘密",
+                        tokens=8,
+                    )
+                ],
+            )
+        )
+        overlay = await self.server._refresh_channel_transcript()
+        self.assertNotIn("<solo-mode", overlay)
+        self.assertNotIn("<solo-memories", overlay)
+        system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
+        self.assertIn("<solo-mode", system)
+        self.assertIn("<solo-memories", system)
+        self.assertIn("旧独处秘密", system)
+        self.assertNotIn("solo-active", system.split("<solo-memories", 1)[1])
 
 
 if __name__ == "__main__":

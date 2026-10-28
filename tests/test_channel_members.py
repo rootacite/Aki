@@ -31,6 +31,8 @@ async def wait_until(predicate, timeout: float = 8.0) -> None:
 
 class DummyBackend:
     ready = True
+    supports_aki_bridge = True
+    aki_bridge = {"version": 1}
 
     def start(self) -> None:
         return

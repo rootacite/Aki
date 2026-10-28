@@ -13,7 +13,7 @@ import subprocess
 import tempfile
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -30,14 +30,19 @@ NO_REPLY_RE = re.compile(
     r"(?:\[\s*[-_ ]?no[-_ ]?reply\s*\]|［\s*[-_ ]?no[-_ ]?reply\s*］)",
     re.IGNORECASE,
 )
+_CORE_MEMORY_BLOCK_RE = re.compile(
+    r"(?ms)^[ \t]*<(human|memory-policy|persona|memory)\b[^>]*>"
+    r".*?</\1>",
+    re.IGNORECASE,
+)
 _FRAMEWORK_BLOCK_RE = re.compile(
-    r"</?(?:tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|solo-transcript|"
-    r"solo-memories|live-context)\b[^>]*>",
+    r"(?m)^[ \t]*</?(?:tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|"
+    r"solo-transcript|solo-memories|shared-memory|live-context)\b[^>]*>[ \t]*(?:\n|$)",
     re.IGNORECASE,
 )
 _COMPLETE_FRAMEWORK_BLOCK_RE = re.compile(
-    r"\n*<(tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|solo-transcript|"
-    r"solo-memories|live-context)\b.*?</\1>\n*",
+    r"(?ms)^[ \t]*<(tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|"
+    r"solo-transcript|solo-memories|shared-memory|live-context)\b[^>]*>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
 
@@ -51,8 +56,15 @@ def contains_no_reply(text: str) -> bool:
 
 
 def strip_runtime_prompt_blocks(system: str) -> str:
-    """Keep persona + core memory and drop every runtime turn block."""
-    text = _COMPLETE_FRAMEWORK_BLOCK_RE.sub("\n", str(system or ""))
+    """Return only persona/core memory for memory-management subtasks."""
+    source = str(system or "")
+    core_blocks = [
+        match.group(0).strip()
+        for match in _CORE_MEMORY_BLOCK_RE.finditer(source)
+    ]
+    if core_blocks:
+        return "\n\n".join(core_blocks)
+    text = _COMPLETE_FRAMEWORK_BLOCK_RE.sub("\n", source)
     text = _FRAMEWORK_BLOCK_RE.sub("", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
@@ -551,112 +563,65 @@ class SoloMemoryManager:
                 visible, budget_tokens=self.budget_tokens
             )
 
-        working = [replace(session, entries=list(session.entries)) for session in visible]
-        pending_archive: dict[str, list[SoloMemoryEntry]] = {}
-        pending_summary: dict[str, str] = {}
-        last_error = ""
-        for attempt in range(SOLO_SUMMARY_MAX_RETRIES + 1):
+        # Budget eviction is deterministic: archive the oldest whole sessions
+        # until the remaining active memory fits. Never ask the model to count
+        # tokens or partially evict entries.
+        working = sorted(
+            visible,
+            key=lambda session: (
+                str(session.started_at or ""),
+                str(session.session_id or ""),
+            ),
+        )
+        evicted: list[SoloMemorySession] = []
+        while working:
             current_rendered = render_solo_memories(
                 working, budget_tokens=10**9
             )
-            system = (
-                strip_runtime_prompt_blocks(base_prompt)
-                + "\n\n你正在管理独处会话记忆的 64K token 预算。"
-                "只输出 JSON：{\"evict_entries\":[\"id\"],\"evict_sessions\":[\"id\"]}。"
-                "批量选择最低价值的条目或整段会话；不得选择不存在的 ID。"
-            )
-            user = json.dumps(
-                {
-                    "budget_tokens": self.budget_tokens,
-                    "current_tokens": estimate_tokens(current_rendered),
-                    "sessions": [_session_payload(session) for session in working],
-                },
-                ensure_ascii=False,
-            )
-            try:
-                response = await asyncio.to_thread(
-                    _post_json,
-                    proxy_base_url.rstrip("/") + route_path,
-                    token=proxy_token,
-                    payload=_personality_payload(
-                        model=model, api=api, system=system, user=user
-                    ),
-                    timeout=SOLO_EVICTION_TIMEOUT_SECONDS,
-                )
-                payload = _extract_json_payload(response)
-                evict_entries_raw = payload.get("evict_entries")
-                evict_sessions_raw = payload.get("evict_sessions")
-                if not isinstance(evict_entries_raw, list) or not isinstance(
-                    evict_sessions_raw, list
-                ):
-                    raise SoloMemoryError("eviction response has invalid lists")
-                evict_entries = {str(item) for item in evict_entries_raw if str(item)}
-                evict_sessions = {
-                    str(item) for item in evict_sessions_raw if str(item)
-                }
-                if not evict_entries and not evict_sessions:
-                    raise SoloMemoryError("eviction response selected nothing")
-                known_sessions = {session.session_id for session in working}
-                known_entries = {
-                    entry.id for session in working for entry in session.entries
-                }
-                if not evict_sessions.issubset(known_sessions):
-                    raise SoloMemoryError("eviction response named an unknown session")
-                if not evict_entries.issubset(known_entries):
-                    raise SoloMemoryError("eviction response named an unknown entry")
-                next_working: list[SoloMemorySession] = []
-                for session in working:
-                    if session.session_id in evict_sessions:
-                        pending_archive.setdefault(session.session_id, [])
-                        pending_archive[session.session_id].extend(session.entries)
-                        pending_summary[session.session_id] = session.summary
-                        continue
-                    kept_entries: list[SoloMemoryEntry] = []
-                    evicted_here: list[SoloMemoryEntry] = []
-                    for entry in session.entries:
-                        if entry.id in evict_entries:
-                            evicted_here.append(entry)
-                        else:
-                            kept_entries.append(entry)
-                    if evicted_here:
-                        pending_archive.setdefault(session.session_id, []).extend(
-                            evicted_here
-                        )
-                        pending_summary[session.session_id] = session.summary
-                        session.archived = True
-                    session.entries = kept_entries
-                    next_working.append(session)
-                working = next_working
-                current_rendered = render_solo_memories(
-                    working, budget_tokens=10**9
-                )
-                if estimate_tokens(current_rendered) <= self.budget_tokens:
-                    self._archive_entries(pending_archive, pending_summary)
-                    # Preserve the in-progress session while replacing the
-                    # historical sessions selected for eviction.
-                    current = [
-                        session
-                        for session in self.sessions
-                        if session.session_id == current_session_id
-                    ]
-                    self.sessions = working + current
-                    self.save()
-                    self.last_error = None
-                    self.last_eviction_at = _now_iso()
-                    return render_solo_memories(
-                        working, budget_tokens=self.budget_tokens
-                    )
-                last_error = "still over budget after eviction"
-            except Exception as exc:
-                last_error = str(exc)
-                self.logger.warning(
-                    "solo memory eviction failed attempt=%s error=%s",
-                    attempt + 1,
-                    exc,
-                )
+            if estimate_tokens(current_rendered) <= self.budget_tokens:
                 break
-        self.last_error = last_error or "solo memory eviction failed"
-        return render_solo_memories(visible, budget_tokens=self.budget_tokens)
+            evicted.append(working.pop(0))
+        if not evicted:
+            self.last_error = None
+            return render_solo_memories(
+                visible, budget_tokens=self.budget_tokens
+            )
+
+        pending_archive = {
+            session.session_id: list(session.entries)
+            for session in evicted
+        }
+        pending_summary = {
+            session.session_id: session.summary
+            for session in evicted
+        }
+        try:
+            self._archive_entries(pending_archive, pending_summary)
+        except Exception as exc:
+            self.last_error = str(exc)
+            self.logger.warning("solo memory archive failed: %s", exc)
+            return render_solo_memories(
+                visible, budget_tokens=self.budget_tokens
+            )
+
+        # Preserve an in-progress session while replacing the older sessions.
+        current = [
+            session
+            for session in self.sessions
+            if session.session_id == current_session_id
+        ]
+        self.sessions = working + current
+        self.save()
+        self.last_error = None
+        self.last_eviction_at = _now_iso()
+        self.logger.info(
+            "solo memory evicted oldest sessions=%s archived_entries=%s",
+            [session.session_id for session in evicted],
+            sum(len(session.entries) for session in evicted),
+        )
+        return render_solo_memories(
+            working, budget_tokens=self.budget_tokens
+        )
 
     def _archive_entries(
         self,

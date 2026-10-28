@@ -8,6 +8,7 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from unittest.mock import patch
 
 from engine.live_context import estimate_tokens, render_solo_memories
 from engine.solo_memory import (
@@ -19,6 +20,7 @@ from engine.solo_memory import (
     capture_solo_entries,
     default_solo_memory_path,
     fallback_summary,
+    strip_runtime_prompt_blocks,
 )
 
 
@@ -89,6 +91,53 @@ def make_git_repo(path: Path) -> None:
 
 
 class SoloMemoryStoreTests(unittest.TestCase):
+    def test_memory_prompt_keeps_core_blocks_and_ignores_inline_tool_reference(
+        self,
+    ) -> None:
+        compiled = """You are Aki.
+
+# Runtime Environment
+## Execution lock
+Exception: tools listed in `<tool-ownership>` as exclusive to you.
+
+<tool-ownership version="1">
+<rules>runtime ownership</rules>
+</tool-ownership>
+
+<channel-policy version="1">channel policy</channel-policy>
+
+<human>human profile</human>
+
+<memory-policy>memory policy</memory-policy>
+
+<persona>persona rules</persona>
+
+<memory>memory index</memory>
+"""
+        stripped = strip_runtime_prompt_blocks(compiled)
+        self.assertNotIn("## Execution lock", stripped)
+        self.assertNotIn("Exception: tools listed in", stripped)
+        self.assertNotIn("<tool-ownership", stripped)
+        self.assertNotIn("<channel-policy", stripped)
+        self.assertIn("<human>human profile</human>", stripped)
+        self.assertIn("<memory-policy>memory policy</memory-policy>", stripped)
+        self.assertIn("<persona>persona rules</persona>", stripped)
+        self.assertIn("<memory>memory index</memory>", stripped)
+        self.assertNotIn("You are Aki.", stripped)
+
+    def test_runtime_block_fallback_stays_line_anchored(self) -> None:
+        prompt = (
+            "You are Aki.\n\n"
+            "<tool-ownership>tools</tool-ownership>\n"
+            "<channel-policy>policy</channel-policy>\n"
+            "<live-context>live</live-context>\n"
+        )
+        stripped = strip_runtime_prompt_blocks(prompt)
+        self.assertIn("You are Aki.", stripped)
+        self.assertNotIn("<tool-ownership", stripped)
+        self.assertNotIn("<channel-policy", stripped)
+        self.assertNotIn("<live-context", stripped)
+
     def test_default_path_and_atomic_store(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             home = Path(tempdir)
@@ -210,27 +259,82 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.summary_status, FALLBACK_SUMMARY_STATUS)
         self.assertIn("remember this", session.summary)
 
-    async def test_eviction_archives_entries_and_commits_memfs(self) -> None:
-        self.api.responses = [
-            response_with(
-                {"evict_entries": [], "evict_sessions": ["s1"]}
-            )
-        ]
-        manager = self.manager(budget=1024)
-        session = SoloMemorySession(
-            session_id="s1",
-            started_at="2026-10-27T10:00:00Z",
-            ended_at="2026-10-27T10:10:00Z",
-            summary="old session",
-            entries=[entry(index, "长内容" * 300) for index in range(1, 5)],
+    def rendered_tokens(self, sessions: list[SoloMemorySession]) -> int:
+        return estimate_tokens(
+            render_solo_memories(sessions, budget_tokens=10**9)
         )
-        manager.add_session(session)
+
+    def sessions_for_eviction(self) -> tuple[
+        SoloMemorySession, SoloMemorySession, SoloMemorySession
+    ]:
+        old = SoloMemorySession(
+            session_id="old",
+            started_at="2026-10-24T10:00:00Z",
+            ended_at="2026-10-24T10:10:00Z",
+            summary="old session",
+            entries=[
+                entry(1, "OLD_ONE " + "旧" * 300),
+                entry(2, "OLD_TWO " + "旧" * 300),
+            ],
+        )
+        middle = SoloMemorySession(
+            session_id="middle",
+            started_at="2026-10-25T10:00:00Z",
+            ended_at="2026-10-25T10:10:00Z",
+            summary="middle session",
+            entries=[
+                entry(3, "MIDDLE_ONE " + "中" * 700),
+                entry(4, "MIDDLE_TWO " + "中" * 700),
+            ],
+        )
+        newest = SoloMemorySession(
+            session_id="newest",
+            started_at="2026-10-26T10:00:00Z",
+            ended_at="2026-10-26T10:10:00Z",
+            summary="newest session",
+            entries=[entry(5, "NEWEST " + "新" * 80)],
+        )
+        return old, middle, newest
+
+    async def test_eviction_archives_only_oldest_whole_session(self) -> None:
+        old, middle, newest = self.sessions_for_eviction()
+        after_old = self.rendered_tokens([middle, newest])
+        manager = self.manager(budget=after_old + 1)
+        for session in (old, middle, newest):
+            manager.add_session(session)
+
         rendered = await manager.render_for_prompt(**self.api_kwargs())
-        self.assertEqual(rendered, "")
-        self.assertEqual(manager.sessions, [])
-        archive = self.memory / "solo" / "s1.md"
+
+        self.assertEqual([session.session_id for session in manager.sessions], ["middle", "newest"])
+        self.assertEqual([len(session.entries) for session in manager.sessions], [2, 1])
+        self.assertEqual(self.api.requests, [])
+        self.assertNotIn("OLD_ONE", rendered)
+        self.assertIn("MIDDLE_ONE", rendered)
+        self.assertIn("NEWEST", rendered)
+        archive = self.memory / "solo" / "old.md"
         self.assertTrue(archive.is_file())
-        self.assertIn("长内容", archive.read_text())
+        self.assertIn("OLD_ONE", archive.read_text())
+        self.assertFalse((self.memory / "solo" / "middle.md").exists())
+        self.assertIsNone(manager.last_error)
+        self.assertIsNotNone(manager.last_eviction_at)
+
+    async def test_eviction_archives_multiple_oldest_whole_sessions(self) -> None:
+        old, middle, newest = self.sessions_for_eviction()
+        manager = self.manager(budget=1024)
+        for session in (old, middle, newest):
+            manager.add_session(session)
+
+        rendered = await manager.render_for_prompt(**self.api_kwargs())
+
+        self.assertEqual([session.session_id for session in manager.sessions], ["newest"])
+        self.assertEqual(manager.sessions[0].entries[0].text, "NEWEST " + "新" * 80)
+        self.assertEqual(self.api.requests, [])
+        self.assertIn("NEWEST", rendered)
+        for session_id in ("old", "middle"):
+            archive = self.memory / "solo" / f"{session_id}.md"
+            self.assertTrue(archive.is_file())
+        self.assertIn("OLD_ONE", (self.memory / "solo" / "old.md").read_text())
+        self.assertIn("MIDDLE_ONE", (self.memory / "solo" / "middle.md").read_text())
         self.assertTrue((self.memory / "solo" / "MEMORY.md").is_file())
         log = subprocess.run(
             ["git", "-C", str(self.memory), "log", "--oneline"],
@@ -240,28 +344,31 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         ).stdout
         self.assertIn("solo memory archive", log)
 
-    async def test_invalid_eviction_does_not_modify_store(self) -> None:
-        self.api.responses = [
-            response_with(
-                {"evict_entries": ["missing"], "evict_sessions": []}
-            )
-        ]
-        manager = self.manager(budget=1024)
-        session = SoloMemorySession(
-            session_id="s1",
-            started_at="2026-10-27T10:00:00Z",
-            ended_at="2026-10-27T10:10:00Z",
-            summary="old session",
-            entries=[entry(index, "长内容" * 300) for index in range(1, 5)],
-        )
-        manager.add_session(session)
-        original = self.root.joinpath("solo-memory.json").read_text()
-        rendered = await manager.render_for_prompt(**self.api_kwargs())
+    async def test_archive_failure_keeps_active_store_unchanged(self) -> None:
+        old, middle, newest = self.sessions_for_eviction()
+        after_old = self.rendered_tokens([middle, newest])
+        manager = self.manager(budget=after_old + 1)
+        for session in (old, middle, newest):
+            manager.add_session(session)
+        path = self.root / "solo-memory.json"
+        original = path.read_text(encoding="utf-8")
+
+        with patch.object(
+            manager,
+            "_archive_entries",
+            side_effect=RuntimeError("archive failed"),
+        ):
+            rendered = await manager.render_for_prompt(**self.api_kwargs())
+
         self.assertTrue(rendered)
         self.assertLessEqual(estimate_tokens(rendered), manager.budget_tokens)
-        self.assertEqual(rendered.count("<solo id="), 1)
-        self.assertEqual(self.root.joinpath("solo-memory.json").read_text(), original)
-        self.assertIsNotNone(manager.last_error)
+        self.assertEqual(path.read_text(encoding="utf-8"), original)
+        self.assertEqual(
+            [session.session_id for session in manager.sessions],
+            ["old", "middle", "newest"],
+        )
+        self.assertEqual(self.api.requests, [])
+        self.assertIn("archive failed", manager.last_error or "")
 
     async def test_current_session_is_excluded_from_memories(self) -> None:
         manager = self.manager()

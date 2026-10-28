@@ -231,6 +231,10 @@ class HaruLettaIntegrationTests(unittest.TestCase):
                 "LETTA_LOCAL_BACKEND_DIR": str(self.backend),
                 "XDG_RUNTIME_DIR": str(self.runtime),
                 "AKI_CWD": str(self.workdir),
+                "AKI_LETTA_BIN": str(ROOT / "bin" / "letta-aki"),
+                "AKI_LETTA_RUNTIME": str(
+                    Path.home() / ".local" / "lib" / "aki" / "letta-code" / "current"
+                ),
                 "AKI_LAYER_ENABLED": "0",
                 "AKI_LAYER_NOTIFY_ENABLED": "0",
                 "PYTHONUNBUFFERED": "1",

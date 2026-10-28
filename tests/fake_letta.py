@@ -977,7 +977,7 @@ def main() -> int:
         "model": "fake/model",
         "tools": [],
     }
-    if os.environ.get("FAKE_LETTA_AKI_BRIDGE") == "1":
+    if os.environ.get("FAKE_LETTA_NO_BRIDGE") != "1":
         init_payload["aki_bridge"] = {
             "version": 1,
             "features": [

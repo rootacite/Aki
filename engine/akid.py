@@ -89,12 +89,12 @@ from engine.channel import (
     ChannelUnavailable,
     TokifactorChannel,
 )
-from engine.channel_prompt import (
-    ConversationBoundary,
-    capture_conversation_boundary,
-    strip_persisted_channel_prompt,
+from engine.channel_prompt import capture_conversation_boundary
+from engine.channel_history import (
+    channel_history_key,
+    channel_history_path,
+    read_channel_history,
 )
-from engine.channel_history import channel_history_key, channel_history_path
 from engine.execution_lock import (
     ExecutionLock,
     default_execution_lock_path,
@@ -124,18 +124,16 @@ from engine.live_context import (
     LiveContextOptions,
     apply_channel_identity,
     apply_channel_policy,
-    apply_channel_turn,
     apply_channel_wake_routing,
-    apply_channel_transcript,
-    apply_live_context,
+    apply_shared_memory,
     apply_solo_memories,
     apply_solo_mode,
-    apply_solo_transcript,
     clamp_budget_tokens,
     clear_channel_identity,
     clear_channel_turn,
     clear_channel_transcript,
     clear_live_context,
+    clear_shared_memory,
     clear_solo_memories,
     clear_solo_mode,
     clear_solo_transcript,
@@ -151,6 +149,7 @@ from engine.live_context import (
     render_channel_transcript,
     render_live_context,
     render_new_message,
+    render_shared_memory,
     render_solo_memories,
     render_solo_mode,
     render_solo_transcript,
@@ -169,6 +168,7 @@ from engine.solo_memory import (
     fallback_summary,
     strip_runtime_prompt_blocks,
 )
+from engine.public_memory import PublicMemoryStore, default_public_memory_path
 from engine.solo_mode import (
     SOLO_ACTIVE,
     SOLO_END,
@@ -1509,7 +1509,6 @@ class Turn:
     channel_sender: str = ""
     channel_text: str = ""
     channel_attachments: tuple[ChannelImageAttachment, ...] = ()
-    channel_prompt_boundary: ConversationBoundary | None = None
     conversation_snapshot: dict[str, Any] | None = None
     bridge_snapshot_id: str | None = None
     bridge_turn_started: bool = False
@@ -1633,27 +1632,6 @@ class GatewayServer:
             "last_seq": 0,
             "ephemeral_turns": 0,
         }
-        self._channel_prompt_status: dict[str, Any] = {
-            "stripped": 0,
-            "last_stripped_at": None,
-            "last_message_id": None,
-            "last_turn_id": None,
-            "last_skip_reason": None,
-            "last_error": None,
-        }
-        prompt_state_root = (
-            config.profile_config_path.parent
-            if config.profile_config_path is not None
-            else state_dir()
-        )
-        self.channel_prompt_journal_path = (
-            prompt_state_root
-            / "channel-prompt-journal"
-            / f"{config.profile}.jsonl"
-        )
-        self._channel_prompt_status["journal_path"] = str(
-            self.channel_prompt_journal_path
-        )
         self._channel_transcript_lock = asyncio.Lock()
         self._solo_lock = asyncio.Lock()
         self.channel_history_dir = config.channel_history_dir or (
@@ -1663,6 +1641,18 @@ class GatewayServer:
         )
         self.channel_media_dir = config.channel_media_dir or (
             self.channel_history_dir / "media"
+        )
+        self.public_memory = PublicMemoryStore(
+            default_public_memory_path(
+                config.backend_dir,
+                channel_history_key(
+                    host=config.mqtt_host,
+                    port=config.mqtt_port,
+                    topic=config.mqtt_topic,
+                    magic=config.mqtt_magic,
+                ),
+            ),
+            logger=logging.getLogger("akid.public-memory"),
         )
         self.solo_state_path = config.solo_state or default_solo_state_path(
             config.profile
@@ -1935,6 +1925,20 @@ class GatewayServer:
         )
 
     # ------------------------------------------------------------------ server
+    async def _abort_startup(self, message: str) -> None:
+        LOGGER.error("refusing to start: %s", message)
+        with contextlib.suppress(Exception):
+            await self.backend.stop()
+        server = self._server
+        self._server = None
+        if server is not None:
+            server.close()
+            with contextlib.suppress(Exception):
+                await server.wait_closed()
+        with contextlib.suppress(FileNotFoundError):
+            self.config.socket_path.unlink()
+        raise RuntimeError(message)
+
     async def start(self) -> None:
         path = self.config.socket_path
         parent = path.parent
@@ -1975,7 +1979,8 @@ class GatewayServer:
         self._clear_channel_identity_block()
         await self._refresh_channel_policy()
         await self._refresh_channel_wake_routing()
-        await self._refresh_channel_turn(None)
+        await self._refresh_channel_identity()
+        self._backfill_public_memory()
         await self._refresh_channel_transcript()
         await self._refresh_tool_ownership()
         if self.config.aki is not None:
@@ -2000,6 +2005,15 @@ class GatewayServer:
                 LOGGER.info("sandbox ready backend=bwrap path=%s", bwrap_path)
         if sandbox_available:
             self.backend.start()
+            if not await self._wait_backend_ready(30.0):
+                await self._abort_startup(
+                    "Letta backend did not become ready; refusing to run"
+                )
+            if not self._aki_bridge_available():
+                await self._abort_startup(
+                    "Aki requires the customized Letta runtime with aki_bridge; "
+                    "the configured backend does not advertise it"
+                )
         if self.channel is not None:
             await self.channel.start()
             self._start_channel_status_loop()
@@ -2491,12 +2505,12 @@ class GatewayServer:
                 "topic": self.config.mqtt_topic,
                 "wait_for": list(self.config.channel_wait_for),
                 "transcript": dict(self._channel_transcript_status),
-                "prompt_cleanup": dict(self._channel_prompt_status),
+                "public_memory": self.public_memory.status(),
             }
         health = self.channel.health()
         health["wait_for"] = list(self.config.channel_wait_for)
         health["transcript"] = dict(self._channel_transcript_status)
-        health["prompt_cleanup"] = dict(self._channel_prompt_status)
+        health["public_memory"] = self.public_memory.status()
         return health
 
     def _sandbox_health(self) -> dict[str, Any]:
@@ -2791,11 +2805,13 @@ class GatewayServer:
         sandbox = self._sandbox_health()
         channel_ready = not channel.get("enabled", False) or bool(channel.get("connected", False))
         sandbox_ready = not sandbox.get("enabled", False) or bool(sandbox.get("available", False))
-        ready = bool(backend["ready"]) and channel_ready and sandbox_ready
+        bridge_ready = self._aki_bridge_available()
+        ready = bool(backend["ready"]) and bridge_ready and channel_ready and sandbox_ready
         return {
             "status": "ok" if ready else "degraded",
             "ready": ready,
             "backend_ready": bool(backend["ready"]),
+            "bridge_ready": bridge_ready,
             "channel_ready": channel_ready,
             "sandbox_ready": sandbox_ready,
             "version": SERVER_VERSION,
@@ -2938,6 +2954,11 @@ class GatewayServer:
         if len(self._channel_history) > CHANNEL_TRANSCRIPT_MAX_RECORDS:
             del self._channel_history[:-CHANNEL_TRANSCRIPT_MAX_RECORDS]
         self._persist_channel_history()
+        if self._solo_session is None:
+            try:
+                self.public_memory.record(entry)
+            except Exception as exc:
+                LOGGER.warning("public memory record failed: %s", exc)
         self._channel_transcript_status.update(
             {
                 "entries": len(self._channel_history),
@@ -3252,6 +3273,52 @@ class GatewayServer:
                         self._write_agent_record(path, record, updated)
         except (OSError, ValueError) as exc:
             LOGGER.warning("failed to clear persisted turn blocks: %s", exc)
+
+    def _public_memory_prompt_block(self) -> str:
+        records = self.public_memory.snapshot()
+        if not records:
+            return ""
+        return render_shared_memory(
+            records,
+            path=str(self.public_memory.path),
+            updated_at=str(records[-1].get("recorded_at") or ""),
+        )
+
+    def _backfill_public_memory(self) -> int:
+        """Seed the shared store once from Aki's canonical group history."""
+        if self.config.profile != "aki":
+            return 0
+        if self.public_memory.status()["records"] > 0:
+            return 0
+        entries: list[ChannelTranscriptEntry] = []
+        for row in read_channel_history(self.group_channel_history_path):
+            if str(row.get("phase") or "final") != "final":
+                continue
+            text = str(row.get("text") or "").strip()
+            if not text or "[NO_REPLY]" in text:
+                continue
+            entries.append(
+                ChannelTranscriptEntry(
+                    seq=int(row.get("seq") or 0),
+                    sender=str(row.get("sender") or ""),
+                    sender_id=str(row.get("sender_id") or ""),
+                    text=text,
+                    from_agent=bool(row.get("from_agent")),
+                    timestamp=str(row.get("timestamp") or ""),
+                    sent_at=int(row.get("sent_at") or 0),
+                    message_id=str(row.get("message_id") or ""),
+                    phase="final",
+                )
+            )
+        if not entries:
+            return 0
+        added = self.public_memory.record_many(entries)
+        if added:
+            LOGGER.info(
+                "public memory backfilled from canonical group history records=%s",
+                added,
+            )
+        return added
         prompt_path = self._conversation_dir() / "system-prompt.json"
         if not prompt_path.is_file():
             return
@@ -3379,16 +3446,8 @@ class GatewayServer:
                 label="channel policy",
             )
 
-    async def _refresh_channel_turn(
-        self, turn: Turn | None, *, apply: bool = True
-    ) -> str:
+    async def _refresh_channel_turn(self, turn: Turn | None) -> str:
         if turn is None or turn.origin != "mqtt":
-            if apply:
-                async with self._wake_routing_lock:
-                    self._update_system_prompt_text(
-                        clear_channel_turn,
-                        label="channel turn",
-                    )
             return ""
         solo = self._solo_session is not None
         wait_labels = (
@@ -3409,12 +3468,6 @@ class GatewayServer:
             message_attachments=turn.channel_attachments,
             solo=solo,
         )
-        if apply:
-            async with self._wake_routing_lock:
-                self._update_system_prompt_text(
-                    lambda system: apply_channel_turn(system, block),
-                    label="channel turn",
-                )
         return block
 
     async def _refresh_channel_wake_routing(self) -> None:
@@ -3504,15 +3557,8 @@ class GatewayServer:
         *,
         new_seq: int | None = None,
         limit: int | None = None,
-        apply: bool = True,
     ) -> str:
-        # With the bridge, the transcript is a per-turn overlay. Never mirror
-        # it into the persisted system prompt as well.
-        if self._aki_bridge_available():
-            apply = False
         path = self._agent_record_path()
-        if path is None and apply:
-            return ""
 
         def with_attachment_state(
             entries: list[ChannelTranscriptEntry],
@@ -3536,7 +3582,7 @@ class GatewayServer:
             ]
 
         members = self._channel_member_views()
-        scene = ""
+        solo_mode_block = ""
         if self._solo_session is not None:
             group_entries = with_attachment_state(
                 list(self._frozen_group_history)
@@ -3574,6 +3620,12 @@ class GatewayServer:
                 ),
             )
             self._solo_scene = scene
+            solo_mode_block = render_solo_mode(
+                member_name=self.config.channel_name,
+                user_name=self.config.username,
+                session_id=self._solo_session.session_id,
+                scene=scene,
+            )
             rendered_entries = len(group_entries)
             solo_entries_count = len(solo_entries)
         else:
@@ -3612,9 +3664,8 @@ class GatewayServer:
                 ],
                 budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
             )
-        overlay_block = self._transcript_overlay_block(
-            group_block, solo_block, scene, solo_memories_block
-        )
+        shared_memory_block = self._public_memory_prompt_block()
+        overlay_block = self._transcript_overlay_block(group_block, solo_block)
         self._channel_transcript_status.update(
             {
                 "budget_tokens": self.config.channel_transcript_budget_tokens,
@@ -3640,37 +3691,28 @@ class GatewayServer:
                 "agent_path": str(path) if path is not None else "",
             }
         )
-        if not apply:
+        if path is None:
             return overlay_block
 
         def update_system(system: str) -> str:
+            # The bridge owns per-turn transcripts as an overlay. The
+            # persistent system prompt only carries rules and memory.
+            updated = clear_solo_transcript(system)
+            updated = clear_channel_transcript(updated)
             updated = (
-                apply_channel_transcript(system, group_block)
-                if group_block
-                else clear_channel_transcript(system)
+                apply_solo_mode(updated, solo_mode_block)
+                if solo_mode_block
+                else clear_solo_mode(updated)
             )
-            if self._solo_session is not None:
-                updated = apply_solo_mode(
-                    updated,
-                    render_solo_mode(
-                        member_name=self.config.channel_name,
-                        user_name=self.config.username,
-                        session_id=self._solo_session.session_id,
-                        scene=scene,
-                    ),
-                )
-                updated = (
-                    apply_solo_transcript(updated, solo_block)
-                    if solo_block
-                    else clear_solo_transcript(updated)
-                )
-            else:
-                updated = clear_solo_mode(updated)
-                updated = clear_solo_transcript(updated)
             updated = (
                 apply_solo_memories(updated, solo_memories_block)
                 if solo_memories_block
                 else clear_solo_memories(updated)
+            )
+            updated = (
+                apply_shared_memory(updated, shared_memory_block)
+                if shared_memory_block
+                else clear_shared_memory(updated)
             )
             return updated
 
@@ -3717,27 +3759,15 @@ class GatewayServer:
         self,
         group_block: str,
         solo_block: str,
-        scene: str,
-        memories_block: str = "",
     ) -> str:
         parts: list[str] = []
         if self._solo_session is not None:
             if group_block:
                 parts.append(group_block)
-            parts.append(
-                render_solo_mode(
-                    member_name=self.config.channel_name,
-                    user_name=self.config.username,
-                    session_id=self._solo_session.session_id,
-                    scene=scene,
-                )
-            )
             if solo_block:
                 parts.append(solo_block)
         elif group_block:
             parts.append(group_block)
-        if memories_block:
-            parts.append(memories_block)
         return "\n\n".join(parts)
 
     def _clear_execution_lock_policy(self) -> None:
@@ -3766,18 +3796,10 @@ class GatewayServer:
             timeout=min(self.config.live_context_timeout, 2.5),
         )
 
-    async def _refresh_live_context(self, *, apply: bool = True) -> str:
+    async def _refresh_live_context(self) -> str:
         if not self.config.live_context_enabled:
             return ""
-        if self._aki_bridge_available():
-            apply = False
         path = self._agent_record_path()
-        if path is None and apply:
-            self._live_context_status["last_errors"] = [
-                f"agent record not found for {self.config.agent_id}"
-            ]
-            self._live_context_status["updated"] = False
-            return ""
         captured_at = datetime.now().astimezone()
         options = LiveContextOptions(
             ps_bin=self.config.ps_bin,
@@ -3808,16 +3830,6 @@ class GatewayServer:
                     else ""
                 ),
             )
-            if apply:
-                async with self._live_context_lock:
-                    record = json.loads(path.read_text(encoding="utf-8"))
-                    if not isinstance(record, dict):
-                        raise ValueError("agent record is not a JSON object")
-                    system = record.get("system")
-                    if not isinstance(system, str) or not system:
-                        raise ValueError("agent system prompt is not a string")
-                    updated = apply_live_context(system, block)
-                    self._write_agent_record(path, record, updated)
             self._live_context_status.update(
                 {
                     "enabled": True,
@@ -3933,9 +3945,15 @@ class GatewayServer:
             "layer": self._layer_health(),
             "avatar": self._avatar_health(),
             "backend_ready": backend_ready,
+            "bridge_ready": self._aki_bridge_available(),
             "channel_ready": channel_ready,
             "sandbox_ready": sandbox_ready,
-            "ready": backend_ready and channel_ready and sandbox_ready,
+            "ready": (
+                backend_ready
+                and self._aki_bridge_available()
+                and channel_ready
+                and sandbox_ready
+            ),
         }
 
     # ------------------------------------------------------------------ turns
@@ -4008,35 +4026,39 @@ class GatewayServer:
                 await self._finish_turn(turn, "backend_unavailable")
                 return
             self._clear_execution_lock_policy()
-            bridge = self._aki_bridge_available()
+            if not self._aki_bridge_available():
+                await self._emit(
+                    turn,
+                    "error",
+                    {
+                        "code": "BRIDGE_REQUIRED",
+                        "message": (
+                            "Aki requires the customized Letta runtime with "
+                            "aki_bridge"
+                        ),
+                    },
+                )
+                await self._finish_turn(turn, "bridge_unavailable")
+                return
             overlay_parts = await self._build_turn_overlay(turn)
             await self._refresh_tool_ownership()
             live_block = await self._refresh_live_context()
-            if bridge and live_block:
+            if live_block:
                 overlay_parts.append(live_block)
-            if (
-                turn.origin == "mqtt"
-                and not turn.origin_is_agent
-                and not bridge
-            ):
-                turn.channel_prompt_boundary = capture_conversation_boundary(
-                    self._conversation_dir() / "messages.jsonl"
+            overlay = (
+                {"turn_context": {"system_append": "\n\n".join(overlay_parts)}}
+                if overlay_parts
+                else {}
+            )
+            try:
+                await self.backend.begin_aki_turn(turn.turn_id, overlay)
+                turn.bridge_turn_started = True
+            except Exception as exc:
+                LOGGER.warning(
+                    "failed to install Aki turn overlay turn=%s: %s",
+                    turn.turn_id,
+                    exc,
                 )
-            if bridge:
-                overlay = (
-                    {"turn_context": {"system_append": "\n\n".join(overlay_parts)}}
-                    if overlay_parts
-                    else {}
-                )
-                try:
-                    await self.backend.begin_aki_turn(turn.turn_id, overlay)
-                    turn.bridge_turn_started = True
-                except Exception as exc:
-                    LOGGER.warning(
-                        "failed to install Aki turn overlay turn=%s: %s",
-                        turn.turn_id,
-                        exc,
-                    )
             try:
                 await self.backend.send_user(await self._build_user_content(turn))
             except BackendUnavailable:
@@ -4059,40 +4081,29 @@ class GatewayServer:
 
     async def _build_turn_overlay(self, turn: Turn) -> list[str]:
         """Build the per-turn bridge overlay without mutating the transcript."""
-        bridge = self._aki_bridge_available()
         overlay_parts: list[str] = []
         if turn.origin == "solo_notice":
             await self._refresh_channel_identity()
-            if bridge:
-                block = await self._refresh_channel_transcript(apply=False)
-                if block:
-                    overlay_parts.append(block)
-            else:
-                await self._refresh_channel_transcript()
-                await self._refresh_channel_turn(None)
+            block = await self._refresh_channel_transcript()
+            if block:
+                overlay_parts.append(block)
             await self._snapshot_turn_conversation(turn)
         elif turn.origin in ("mqtt", "proactive"):
             await self._refresh_channel_identity()
-            if bridge:
-                block = await self._refresh_channel_turn(turn, apply=False)
-                if block:
-                    overlay_parts.append(block)
-                block = await self._refresh_channel_transcript(
-                    new_seq=turn.channel_message_seq, apply=False
+            block = await self._refresh_channel_turn(turn)
+            if block:
+                overlay_parts.append(block)
+            block = await self._refresh_channel_transcript(
+                new_seq=turn.channel_message_seq
+            )
+            if block:
+                overlay_parts.append(block)
+            overlay_parts.append(
+                render_channel_roster(
+                    self_member=self._channel_self_member(),
+                    members=self._channel_member_views(),
                 )
-                if block:
-                    overlay_parts.append(block)
-                overlay_parts.append(
-                    render_channel_roster(
-                        self_member=self._channel_self_member(),
-                        members=self._channel_member_views(),
-                    )
-                )
-            else:
-                await self._refresh_channel_transcript(
-                    new_seq=turn.channel_message_seq,
-                )
-                await self._refresh_channel_turn(turn)
+            )
             if turn.origin_is_agent:
                 await self._snapshot_turn_conversation(turn)
         return overlay_parts
@@ -4721,7 +4732,6 @@ class GatewayServer:
             with contextlib.suppress(Exception):
                 await self.backend.end_aki_turn(turn.turn_id)
             turn.bridge_turn_started = False
-        await self._strip_channel_prompt(turn)
         self._queue_unhandled_busy_messages(turn)
         if turn.bridge_snapshot_id is not None:
             task = asyncio.create_task(
@@ -4786,85 +4796,6 @@ class GatewayServer:
                 queued,
             )
         turn.busy_messages.clear()
-
-    async def _strip_channel_prompt(self, turn: Turn) -> None:
-        """Remove the roster from the persisted user turn after it finishes."""
-        if turn.origin != "mqtt" or turn.origin_is_agent:
-            return
-        if self._aki_bridge_available():
-            return
-        if turn.conversation_snapshot is not None:
-            return
-        boundary = turn.channel_prompt_boundary
-        if boundary is None:
-            return
-        if (
-            "<channel-context>" not in turn.message
-            and "<channel_context>" not in turn.message
-        ):
-            return
-        if self._compacting or self._recompiling or self._resetting:
-            self._channel_prompt_status["last_skip_reason"] = "maintenance"
-            self._channel_prompt_status["last_turn_id"] = turn.turn_id
-            return
-        conversation_dir = self._conversation_dir()
-        if not (conversation_dir / "messages.jsonl").is_file() or not (
-            conversation_dir / "conversation.json"
-        ).is_file():
-            self._channel_prompt_status["last_skip_reason"] = "missing_transcript"
-            self._channel_prompt_status["last_turn_id"] = turn.turn_id
-            return
-        member_id = self._history_member_id(
-            turn.channel_sender, turn.origin_sender_id
-        )
-        speaker_name = self._member_display_name(
-            member_id, turn.channel_sender
-        ) or turn.channel_sender
-        speaker_kind = self._channel_member_kind(member_id)
-        try:
-            result = await asyncio.to_thread(
-                strip_persisted_channel_prompt,
-                conversation_dir=conversation_dir,
-                boundary=boundary,
-                expected_prompt=turn.message,
-                turn_id=turn.turn_id,
-                profile=self.config.profile,
-                journal_path=self.channel_prompt_journal_path,
-                speaker_name=speaker_name,
-                speaker_kind=speaker_kind,
-            )
-        except Exception as exc:
-            self._channel_prompt_status["last_error"] = str(exc)
-            self._channel_prompt_status["last_turn_id"] = turn.turn_id
-            LOGGER.warning(
-                "channel prompt cleanup failed turn=%s: %s", turn.turn_id, exc
-            )
-            return
-        self._channel_prompt_status["last_turn_id"] = turn.turn_id
-        if result.status == "applied":
-            self._channel_prompt_status["stripped"] = (
-                int(self._channel_prompt_status.get("stripped", 0)) + 1
-            )
-            self._channel_prompt_status["last_stripped_at"] = now_iso()
-            self._channel_prompt_status["last_message_id"] = result.message_id
-            self._channel_prompt_status["last_skip_reason"] = None
-            self._channel_prompt_status["last_error"] = None
-            LOGGER.info(
-                "stripped channel roster turn=%s message=%s updated_at=%s",
-                turn.turn_id,
-                result.message_id or "?",
-                result.updated_at,
-            )
-            return
-        self._channel_prompt_status["last_skip_reason"] = result.status
-        if result.error:
-            self._channel_prompt_status["last_error"] = result.error
-            LOGGER.warning(
-                "channel prompt cleanup skipped turn=%s status=%s error=%s",
-                turn.turn_id,
-                result.status,
-                result.error,
-            )
 
     async def _restore_channel_turn(self, turn: Turn) -> None:
         try:
@@ -5704,7 +5635,6 @@ class GatewayServer:
         self._load_channel_history(self.solo_channel_history_path)
         self._solo_memory_start_seq = int(self._channel_history_seq)
         await self._refresh_channel_transcript()
-        await self._refresh_channel_turn(None)
         await self._publish_channel_control(
             f"{self.config.channel_name} solo active",
             {
@@ -5774,7 +5704,6 @@ class GatewayServer:
         await self._finalize_solo_memory_session(session, solo_history)
         self._solo_memory_start_seq = int(self._channel_history_seq)
         await self._refresh_channel_transcript()
-        await self._refresh_channel_turn(None)
         await self._publish_channel_control(
             f"{self.config.channel_name} solo ended",
             {
@@ -7121,14 +7050,8 @@ class GatewayServer:
         identity = (
             f"{display_sender} ({member_id})" if member_id else display_sender
         )
-        roster = (
-            ""
-            if self._aki_bridge_available()
-            else render_channel_roster(
-                self_member=self._channel_self_member(),
-                members=self._channel_member_views(),
-            )
-        )
+        # The roster is injected as a bridge overlay, never in the user role.
+        roster = ""
         attachment_names = ", ".join(
             attachment.name for attachment in sorted(attachments, key=lambda item: item.index)
         )
@@ -7398,8 +7321,13 @@ class GatewayServer:
     # -------------------------------------------------------------- backend rx
     async def _on_backend_ready(self, payload: dict[str, Any]) -> None:
         LOGGER.info("backend ready conversation=%s", payload.get("conversation_id"))
-        if self._aki_bridge_available():
-            self._clear_persisted_turn_blocks()
+        if not self._aki_bridge_available():
+            LOGGER.error(
+                "backend is not the customized Aki Letta runtime: "
+                "missing aki_bridge capability"
+            )
+            return
+        self._clear_persisted_turn_blocks()
         self._reset_backend_queue_state()
         self._external_tools_registered = False
         self._external_tools_error = None
@@ -9849,7 +9777,6 @@ class GatewayServer:
             result.update(recompiled)
             await self._refresh_channel_policy()
             await self._refresh_channel_wake_routing()
-            await self._refresh_channel_turn(None)
             result["applies"] = "now"
             return result
 
@@ -10045,24 +9972,40 @@ class GatewayServer:
                         scene=scene,
                     ),
                 )
-                solo_block = render_solo_transcript(
-                    list(self._channel_history),
-                    budget_tokens=(
-                        self.config.aki.solo_transcript_budget_tokens
-                        if self.config.aki is not None
-                        else 64 * 1024
-                    ),
-                    members=self._channel_member_views(),
-                    self_id=self._channel_self_key(),
-                )
-                content = (
-                    apply_solo_transcript(content, solo_block)
-                    if solo_block
-                    else clear_solo_transcript(content)
-                )
             else:
                 content = clear_solo_mode(content)
-                content = clear_solo_transcript(content)
+            content = clear_solo_transcript(content)
+            memory_config = self._solo_memory_llm_config()
+            if memory_config is not None:
+                solo_memories_block = await self.solo_memory.render_for_prompt(
+                    current_session_id=(
+                        self._solo_session.session_id
+                        if self._solo_session is not None
+                        else ""
+                    ),
+                    **memory_config,
+                )
+            else:
+                solo_memories_block = render_solo_memories(
+                    [
+                        session
+                        for session in self.solo_memory.sessions
+                        if self._solo_session is None
+                        or session.session_id != self._solo_session.session_id
+                    ],
+                    budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
+                )
+            content = (
+                apply_solo_memories(content, solo_memories_block)
+                if solo_memories_block
+                else clear_solo_memories(content)
+            )
+            shared_memory_block = self._public_memory_prompt_block()
+            content = (
+                apply_shared_memory(content, shared_memory_block)
+                if shared_memory_block
+                else clear_shared_memory(content)
+            )
 
             old_core = str(record.get("coreMemory") or "")
             core_parts: list[str] = []
@@ -11190,6 +11133,9 @@ def main(argv: list[str] | None = None) -> int:
         config.tokifactor_image_require_approval = True
     try:
         asyncio.run(_serve(config))
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except KeyboardInterrupt:
         return 130
     return 0
