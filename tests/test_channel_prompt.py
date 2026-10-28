@@ -14,9 +14,6 @@ from engine.channel_prompt import (
     roster_kind,
     strip_channel_context,
 )
-from engine.live_context import render_channel_wake_reminder
-
-
 def channel_prompt(
     *,
     sender: str = "Acite Lee (legacy_48487683f202ce845f7df0e56c94b11d)",
@@ -62,20 +59,6 @@ class ChannelPromptTextTests(unittest.TestCase):
         updated, changed = strip_channel_context(original)
         self.assertFalse(changed)
         self.assertEqual(updated, original)
-
-    def test_wake_reminder_formats_known_and_unknown_kinds(self) -> None:
-        user = render_channel_wake_reminder(
-            "Master", speaker_name="Master", speaker_kind="user"
-        )
-        agent = render_channel_wake_reminder(
-            "Master", speaker_name="Fuyu", speaker_kind="agent"
-        )
-        unknown = render_channel_wake_reminder(
-            "Master", speaker_name="Someone", speaker_kind=""
-        )
-        self.assertTrue(user.startswith("当前正在和你说话的是 Master。"))
-        self.assertTrue(agent.startswith("当前正在和你说话的是 Fuyu。"))
-        self.assertTrue(unknown.startswith("当前正在和你说话的是 Someone。"))
 
     def test_username_placeholder_is_replaced(self) -> None:
         self.assertEqual(

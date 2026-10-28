@@ -48,10 +48,11 @@ from engine.live_context import (
     render_channel_roster,
     render_channel_turn,
     render_new_message,
-    render_channel_wake_reminder,
     render_channel_wake_routing,
     render_channel_transcript,
     render_live_context,
+    render_user_insertion,
+    render_user_insertions,
     route_channel_reply,
     select_execution_responder,
     strip_channel_non_wakes,
@@ -143,6 +144,44 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertEqual(len(root.findall("system")), 0)
 
+    def test_user_insertion_blocks_carry_boundaries_and_time(self) -> None:
+        import xml.etree.ElementTree as ET
+
+        first = render_user_insertion(
+            "明天中午11点出门买菜",
+            insertion_id="ins-1",
+            seq=7,
+            inserted_at="2026-10-28T21:10:05.123+08:00",
+            inserted_at_ms=1793193005123,
+            attachments=[{"name": "图片1", "path": "/tmp/one.png"}],
+        )
+        second = render_user_insertion(
+            "然后回家做饭",
+            insertion_id="ins-2",
+            seq=8,
+            inserted_at="2026-10-28T21:10:31.882+08:00",
+            inserted_at_ms=1793193031882,
+        )
+        block = ET.fromstring(first)
+        self.assertEqual(block.tag, "user-insertion")
+        self.assertEqual(block.attrib["id"], "ins-1")
+        self.assertEqual(block.attrib["seq"], "7")
+        self.assertEqual(
+            block.attrib["inserted-at"], "2026-10-28T21:10:05.123+08:00"
+        )
+        self.assertEqual(block.attrib["inserted-at-ms"], "1793193005123")
+        self.assertEqual(block.findtext("text"), "明天中午11点出门买菜")
+        self.assertIsNone(block.find("during-work-note"))
+        self.assertIn("图片1", block.findtext("attachments") or "")
+
+        envelope = ET.fromstring(
+            render_user_insertions([first, second], turn_id="turn-1")
+        )
+        self.assertEqual(envelope.tag, "user-insertions")
+        self.assertEqual(envelope.attrib["count"], "2")
+        self.assertEqual(envelope.attrib["during-work"], "true")
+        self.assertEqual(len(envelope.findall("user-insertion")), 2)
+
     def members(self) -> list[ChannelMember]:
         return [
             ChannelMember(
@@ -216,7 +255,7 @@ class ChannelContextTests(unittest.TestCase):
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
         self.assertIn("Master在消息中点名了你，请直接回复。", self_text)
-        self.assertIn("当前只需要回复Master", self_text)
+        self.assertNotIn("<reply-target>", self_text)
         other_text = render_channel_turn(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
@@ -256,7 +295,9 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertTrue(turn.startswith(f"<{CHANNEL_TURN_TAG}"))
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
-        self.assertIn("使用该工具时不要在回复中强调等了谁", turn)
+        self.assertIn("You MUST call `wait_other` once", turn)
+        self.assertIn("It is not in compliance to speak before", turn)
+        self.assertIn("Do not mention or emphasize whom you waited for", turn)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_policy(system, policy)
@@ -272,10 +313,21 @@ class ChannelContextTests(unittest.TestCase):
     def test_wake_routing_is_a_system_prompt_block(self) -> None:
         block = render_channel_wake_routing("Master")
         self.assertTrue(block.startswith(f"<{CHANNEL_WAKE_ROUTING_TAG}"))
-        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", block)
-        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", block)
-        self.assertIn("无 `@`、无 `^成员名`：唤醒所有其他在线成员。", block)
-        self.assertNotIn("@Master", block)
+        self.assertIn(
+            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
+            block,
+        )
+        self.assertIn(
+            "If there is no `@` but the reply contains `^MemberName`", block
+        )
+        self.assertIn(
+            "If there is neither `@` nor `^MemberName`: wake ALL other online members.",
+            block,
+        )
+        self.assertIn("Use `^MemberName` to exclude members from being woken.", block)
+        self.assertIn(
+            "use `@Master`; the marker may appear anywhere in the reply", block
+        )
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_wake_routing(system, block)
@@ -286,7 +338,7 @@ class ChannelContextTests(unittest.TestCase):
             applied, render_channel_wake_routing("哥哥")
         )
         self.assertNotIn("@Master", renamed)
-        self.assertNotIn("@哥哥", renamed)
+        self.assertIn("@哥哥", renamed)
 
     def test_turn_identifies_new_message_and_repeats_wake_reminder(self) -> None:
         members = self.members()
@@ -299,11 +351,8 @@ class ChannelContextTests(unittest.TestCase):
             message_sender_id="aki",
             from_agent=True,
         )
-        self.assertIn(
-            "<wake-reminder>用^排除不需要被提醒的成员（格式：^成员名）。"
-            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。</wake-reminder>",
-            turn,
-        )
+        self.assertNotIn("<wake-reminder>", turn)
+        self.assertNotIn("<reply-target>", turn)
         self.assertIn(
             '<new-message seq="23" sender="Aki" sender_id="aki" source="agent"',
             turn,
@@ -423,13 +472,6 @@ class ChannelContextTests(unittest.TestCase):
         self.assertEqual(everyone_suppressed.wake, CHANNEL_WAKE_USER)
         self.assertEqual(everyone_suppressed.target_ids, ())
 
-    def test_wake_reminder_uses_soft_user_marker_wording(self) -> None:
-        reminder = render_channel_wake_reminder("哥哥")
-        self.assertIn("用^排除不需要被提醒的成员（格式：^成员名）。", reminder)
-        self.assertIn(
-            "如果你认为只需要回复哥哥、无需打扰其他人，使用 @哥哥。", reminder
-        )
-
     def test_non_wake_marker_requires_agent_alias_and_boundary(self) -> None:
         members = self.members()
         self.assertEqual(match_channel_non_wakes("^Aki", members), {"aki"})
@@ -536,7 +578,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertIn('source="user"', block)
         self.assertIn('source="agent"', block)
         self.assertIn('phase="progress"', block)
-        self.assertIn('during-work="true"', block)
+        self.assertNotIn('during-work="true"', block)
         self.assertIn('seq="2"', block)
         self.assertIn('new="true"', block)
         self.assertIn("缺少回滚点", block)

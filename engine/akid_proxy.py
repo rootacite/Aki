@@ -42,6 +42,7 @@ def _build(config) -> LlmProxy:
         config.proxy_token,
         config.enabled_models,
         upstream_proxy=config.upstream_proxy,
+        profile=config.profile,
     )
 
 

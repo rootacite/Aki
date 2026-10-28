@@ -19,7 +19,8 @@
   "patches": {
     "0000-build-use-local-tsc.patch": "b4199c1391f1331938f8142862310287dcfab81aaf69f8d2fa464fce45e24df4",
     "0001-aki-bridge.patch": "c353041f45660d2e94de143bdb5873ffe7aeb67e020cdd3383ec7aa0edfba092",
-    "0002-aki-compaction-policy.patch": "57265c9995e7f5fb4b9686d6db860272a9c3e1688ac49342db6a4eddbbc705c5"
+    "0002-aki-compaction-policy.patch": "57265c9995e7f5fb4b9686d6db860272a9c3e1688ac49342db6a4eddbbc705c5",
+    "0003-aki-turn-overlay-files.patch": "0cbeda8bee27f64eb8999cc3bfc67662c0af7d6bb9a6e7c8acd07f345e94a5e7"
   },
-  "runtime_sha256": "2e2538439043de7b7bab9cb159d556252097c20bf3b0262499dda702a1150c1c"
+  "runtime_sha256": "672da2714b59a4f64137f9f5645584955a943a34e3e9d86d6f5c515c533063a1"
 }

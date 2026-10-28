@@ -287,12 +287,38 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `${{USERNAME}}` 占位符替换为 profile 的 `[gateway] username`，智能体发言使用成员名，
   不再追加类型标签。运行时不再生成 prompt journal；`scripts/restore-channel-prompts.py`
   和 `scripts/migrate-channel-prompts.py` 仅用于迁移历史记录，默认 dry-run。
+- 唤醒规则集中在英文持久 `<channel-wake-routing>`：`@成员` 只唤醒被点名者，`^成员` 排除
+  指定成员，无标记则唤醒全部其他在线成员；“只回复用户时使用 `@<username>`”和 `^` 排除
+  提示也写在这里，不再在每轮 user message 或 `<channel-turn>` 中重复。Aki 的
+  `<channel-wait-for>` 为空，且代码层禁止 Aki 注册/渲染 `wait_other`。
+- `wait_for` 的 final 兜底护栏：turn 正常结束时，如果配置的前序成员仍在 working 或有排队
+  turn，akid 丢弃本次 final（不进 MQTT、群聊和频道历史），只发送 `ignored=true` 的 ended
+  事件；随后注入 `origin=wait_guard` 的系统 turn，说明“这是系统提示，不是用户消息：你刚才
+  没有等待应该等待的目标，这些目标是:…”。新 turn 继承原 participant 与 `wait_for` 目标，
+  不消耗主动启动次数、不获得非只读执行锁，可正常补调 `wait_other`。护栏不改变并发语义，
+  `wait_other` 仍是提示词驱动。
 - `[NO_REPLY]` 采用包含式判定：大小写、空格、连字符和全角括号变体均识别；只要最终正文
   中包含该标记，整轮不发布正文。`wait_other` 的工具与 turn 提示同时要求模型不要在回复中
   强调等待了谁。
+- 运行中消息 overlay：turn 运行期间到达的真人补充消息不再同步调用 `aki_update_turn`，
+  而是原子写入 `AKI_TURN_OVERLAY_DIR/<turn_id>/<zero-padded-seq>-<uuid>.json`
+  （默认 `backend_dir/aki-turn-overlays/<agent_id>`，目录 `0700`、文件 `0600`）。文件带
+  稳定的 `insertion_id`、seq 和 `inserted_at`/`inserted_at_ms`，`content` 为
+  `<user-insertion>` 块，不重复写 during-work note。bridge 只消费/删除文件一次，但在
+  turn 结束前每次 provider 请求都会重放当前 turn 的插入集合
+  `<user-insertions count=N during-work="true">`，避免 tool result 后上下文丢失。若没有
+  后续 API call，未消费消息在 turn 退出时合并成一个新的用户 turn；已被消费的消息用一个
+  `<user-insertions>` 文本 part 并入当前 turn 最近一条真人 user role，智能体触发的 turn
+  先回滚临时 prompt/assistant/tool 消息再合并，并通过 `reload_conversation` 让下一次请求
+  读到结果。`wait_guard` correction turn 的已消费插入合并到最近一条真人频道 user role，
+  避免护栏打回后再生成一个重复的兜底用户 turn。合并或 reload 失败只记录错误，不把已消费
+  消息退回未消费路径再次生成 turn。频道 ingress 不再调用 `aki_update_turn`；坏文件或 turn
+  不匹配的文件保留并记录 warning。群聊记录在消息送达时立即追加为普通用户消息，多条插入
+  不在群聊历史中合并。
 - `wait_user(timeout_s)` 是频道隐藏工具：仅真人触发的 turn 可调用，只等待同一位触发者的
-  下一条消息，超时参数限定 1–25 秒；返回后已消费消息不会重复补 turn，模型可再次调用。
-  工具事件不写入频道，提示词禁止模型解释或提及等待。
+  下一条消息，超时参数限定 1–25 秒；等待期间的消息优先通过 `WAIT_USER_RESULT` 返回，
+  不写 overlay 文件；返回后已消费消息不会重复补 turn，模型可再次调用。工具事件不写入
+  频道，提示词禁止模型解释或提及等待。
 - 等待期间会广播 `waitingUser=true`（presence/status 与 QoS1 `kind=wait_user` 事件）。
   有等待者时，无 `@` 的用户新消息只投递给等待者；working 成员仍可收到补充，但不额外唤醒
   空闲且非等待成员。有 `@` 时仍按点名路由。

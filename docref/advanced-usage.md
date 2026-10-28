@@ -32,6 +32,15 @@
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
 - **桌面实况上下文。** 每个 turn 采集一次快照；bridge 模式下 `<live-context>` 作为 per-turn overlay 注入实际 API 请求，不落盘，
   包含当前时间、焦点窗口、CPU top 5、最近 20 条 zsh 命令和截图路径；不写入消息历史。
+- **运行中消息 overlay。** turn 运行期间到达的真人补充消息会原子写入
+  `AKI_TURN_OVERLAY_DIR/<turn_id>/`（默认在 backend 目录下的
+  `aki-turn-overlays/<agent_id>`，目录 `0700`、文件 `0600`）。每条文件带稳定
+  `insertion_id`、seq 和插入时间，正文块为 `<user-insertion>`。bridge 只删除文件一次，
+  但会在该 turn 后续每次 provider 请求中重放 `<user-insertions count=N>`，直到 turn 结束；
+  没有后续 API call 时，turn 退出会把未消费消息合并成一个新的持久用户 turn。已消费消息
+  并入当前 turn 最近一条真人 user role 的单个 `<user-insertions>` 块；智能体触发的临时
+  turn 先回滚临时 prompt/assistant/tool 消息再合并。群聊记录本身在消息送达时立即追加为
+  普通消息，多条插入不会在群聊历史中合并。
 
 ---
 
@@ -229,11 +238,11 @@ wake routing → identity → channel turn → transcript → live context`：
    `@Owner` 转述规则，每个 turn 刷新。
 4. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
    execution guidance、专属域规则和输出规则。
-5. `<channel-wake-routing>`：`@成员`、`^成员` 的最终回复唤醒规则，启动时写入
-   持久 system prompt，并随 profile username 刷新；每轮 `<reply-target>` 再给出柔和的
-   用户-only 提示。
+5. `<channel-wake-routing>`：英文持久块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
+   使用 `@<username>`”和 `^` 排除提示；启动时写入持久 system prompt，并随 profile
+   username 刷新。
 6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
-7. `<channel-turn>`：当前频道 turn 的 `wake-reminder`、新消息 sender/seq/正文、guidance、
+7. `<channel-turn>`：当前频道 turn 的新消息 sender/seq/正文、guidance、
    initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
    bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
 8. `<channel-transcript>`：仅频道来源的 turn 包含；bridge 模式下同样只走 turn overlay，
@@ -446,7 +455,8 @@ wait_for = Aki
 ```
 
 例如 Fuyu 配 `wait_for = Aki`，Haru 配 `wait_for = Aki,Fuyu`，Natsu 预留
-`wait_for = Aki,Fuyu`；Aki 留空。配置为空时不注册 `wait_other` 工具。
+`wait_for = Aki,Fuyu`；Aki 留空。配置为空时不注册 `wait_other` 工具；即使误配，
+代码层也不会给 Aki 注册或渲染 `wait_other`。
 顺序必须无环，否则两个 profile 会互相等待。
 
 改角色定位时，最好把人格模板、MemFS 和 `[channel] description` 一起更新，避免群里
@@ -544,11 +554,9 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 或文本结束的形式都不会被当成提及。
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
-每条频道 user 消息包含 `[akid MQTT channel message]`、头部 `wake-reminder`、`sender`、
-可选 `seq` 和原始 `message`；在线成员列表 `<channel-context>` 只在 turn overlay 中。
-`wake-reminder` 会写明
-当前说话者：用户发言把 `${{USERNAME}}` 替换为 profile 的 `[gateway] username`，智能体
-发言使用成员名，不追加类型标签。运行时不会生成 prompt journal。其他智能体触发的 turn
+每条频道 user 消息包含 `[akid MQTT channel message]`、`message-time`、`sender`、
+可选 `seq` 和原始 `message`；唤醒规则只在持久 `<channel-wake-routing>` 中，在线成员列表
+`<channel-context>` 只在 turn overlay 中。运行时不会生成 prompt journal。其他智能体触发的 turn
 还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
 initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
 的 `<channel-turn>` 中。
@@ -573,7 +581,7 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
-的 `<channel-wake-routing>` 块中，每轮 user 消息头部还会重复一条简短提醒。
+的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `<channel-turn>` 中重复。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
 - 任意位置写 `@<username>`：如果你认为只需要回复该 username、无需打扰其他人，使用它；它会强制只唤醒该 username。该标记发布前会被移除。
@@ -581,9 +589,7 @@ bridge 模式下作为 per-turn overlay 注入，不落盘。
 - 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
 因此，只想让用户看到、不要惊动其他 agent 时，可以在回复任意位置写 `@Master`；也可以继续
-使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。per-turn `<reply-target>` 会提示
-“如果你认为当前只需要回复用户”；
-`@<username>` 可放在任意位置，并从发布内容中移除，但回复
+使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。`@<username>` 可放在任意位置，并从发布内容中移除，但回复
 仍会写入频道消息记录。
 
 出现 `@<username>` 时不唤醒任何其他成员；其他情况下 `^` 优先于 `@`：同一条回复里同时写
@@ -605,8 +611,16 @@ bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 等待完成后没有固定完成超时；只要对方 akid 在线，就会一直等到它结束当前 turn。
 `wait_other` 的 `tool_call` / `tool_result` 不写入频道，也不出现在 tokifactor 的工具卡片中。
-这个机制依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
+turn 提示使用全英文强制措辞：`You MUST call wait_other once`，并明确提前发言不合规。
+这个机制仍依赖模型在最终回复前主动调用工具，不是 harness 强制串行。
 工具提示要求模型不要在回复中强调等了谁，也不要写“等某某先说完”之类的过程旁白。
+
+如果模型没有调用 `wait_other` 就结束了 turn，akid 会在 final 发布前做一次兜底检查：
+只要 `wait_for` 中仍有目标处于 working 或队列中还有工作，本次 final 不会进入
+MQTT/群聊，也不会写入频道历史。旧 turn 只收到 `ignored=true` 的 ended 事件；随后系统会
+注入一个新 turn，明确写出“这是系统提示，不是用户消息：你刚才没有等待应该等待的目标，
+这些目标是:…”，让模型补调 `wait_other`。系统 turn 不消耗主动启动次数，也不能执行
+非只读操作。该护栏不强制把多个模型串行化，`wait_other` 本身仍然是提示词驱动。
 
 ### 等待用户继续补充的 `wait_user`
 
@@ -618,6 +632,8 @@ bridge 模式下作为 per-turn overlay 注入，不落盘。
 - 只匹配当前 turn 触发者的后续消息；其他人类成员或智能体消息不会提前返回。
 - 新消息到达后立即返回消息正文、seq、时间和附件名称/路径；已返回消息不会在 turn
   结束时重复排成新 turn。
+- 等待期间到达的真人消息优先作为 `WAIT_USER_RESULT` 返回，不写 overlay 文件；等待结束后
+  再到达的消息才进入下一次 API call 的 overlay 消费路径。
 - 返回后模型仍可再次调用，继续等待下一条补充消息；超时返回 `WAIT_USER_TIMEOUT`。
 - 工具事件不写入频道，也不出现在 tokifactor 工具卡片中；提示词禁止模型向用户解释、
   提及或复述等待行为。
@@ -864,6 +880,23 @@ bridge 模式下，akid 在每个 turn 真正开始前采集一次桌面快照�
 截图走静默采集路径，不触发审批。任一来源失败只省略对应部分，不影响 turn。总块大小有
 64K token 的保守估算上限（ASCII 约 4 字符/token，CJK 按 1 字符/token），默认启用；MQTT 来源的 turn 同样会获得该
 上下文，因此不要在公共频道里逐字复述桌面信息。
+
+### Provider API call capture
+
+排查上游模型行为（例如 `finish_reason: content_filter`）时，可以按 profile 开启两层只追加的
+JSONL capture；默认关闭，不影响正常请求：
+
+- Bridge 层：设置 `AKI_API_CALL_CAPTURE=<dir>`，在每次 provider `streamOnce` 前记录加完
+  turn overlay 后的 `system_prompt`、`messages`、`tools`、模型、conversation 和
+  `overlay.turn_id`。文件名是 `api-calls-<agent-id>.jsonl`。
+- Proxy 层：设置 `AKI_RAW_API_CALL_CAPTURE_DIR=<dir>`，在 loopback proxy 真正转发前记录
+  最终 JSON payload、上游模型、URL、body 大小和 SHA-256。文件名是
+  `raw-api-calls-<profile>.jsonl`。
+
+两层记录都使用目录 `0700`、文件 `0600`；大于 1000 字符的 base64 `data` 会替换为
+`[base64 omitted]`，超长字符串会截断。不要长期保留包含私密对话的 capture，排查完成后删除
+对应目录。systemd 服务可通过 `akid@<profile>.service.d/` 与
+`akid-proxy@<profile>.service.d/` 的 `Environment=` drop-in 单独开启。
 
 相关环境变量和参数：`AKI_LIVE_CONTEXT_ENABLED`、`AKI_LIVE_CONTEXT_BUDGET_TOKENS`、
 `AKI_ZSH_HISTORY`、`AKI_PS_BIN`、`AKI_QDBUS_BIN`、`AKI_LIVE_CONTEXT_TIMEOUT`；

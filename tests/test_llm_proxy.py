@@ -127,6 +127,64 @@ class LlmProxyTests(unittest.IsolatedAsyncioTestCase):
         payload = await asyncio.wait_for(reader.read(4096), timeout=2)
         self.assertIn(b"404", payload)
 
+    async def test_captures_raw_forwarded_provider_request(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            route = next(iter(self.proxy.routes.values()))
+            proxy = LlmProxy(
+                "127.0.0.1",
+                0,
+                "loopback-token",
+                (route,),
+                profile="haru",
+                capture_dir=directory,
+            )
+            await proxy.start()
+            writer = None
+            try:
+                reader, writer = await asyncio.open_connection(
+                    "127.0.0.1", proxy.port
+                )
+                body = json.dumps(
+                    {
+                        "model": "local-model",
+                        "messages": [{"role": "user", "content": "hello capture"}],
+                    }
+                ).encode()
+                writer.write(
+                    (
+                        "POST /v1/chat/completions HTTP/1.1\r\n"
+                        f"Host: 127.0.0.1:{proxy.port}\r\n"
+                        "Authorization: Bearer loopback-token\r\n"
+                        "Content-Type: application/json\r\n"
+                        f"Content-Length: {len(body)}\r\n"
+                        "\r\n"
+                    ).encode()
+                    + body
+                )
+                await writer.drain()
+                response = b""
+                while b"data" not in response:
+                    response += await asyncio.wait_for(reader.read(4096), timeout=2)
+                self.release_upstream.set()
+                await asyncio.wait_for(reader.read(4096), timeout=2)
+
+                path = Path(directory) / "raw-api-calls-haru.jsonl"
+                record = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
+                self.assertEqual(record["profile"], "haru")
+                self.assertEqual(record["model"], "local-model")
+                self.assertEqual(record["upstream_model"], "upstream-model")
+                self.assertEqual(record["payload"]["model"], "upstream-model")
+                self.assertEqual(
+                    record["payload"]["messages"][0]["content"], "hello capture"
+                )
+                self.assertNotIn("authorization", record)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            finally:
+                if writer is not None:
+                    writer.close()
+                    await writer.wait_closed()
+                await proxy.stop()
+
     def test_refuses_non_loopback_bind(self) -> None:
         with self.assertRaises(ProxyBindError):
             LlmProxy("0.0.0.0", 7721, "token", ())

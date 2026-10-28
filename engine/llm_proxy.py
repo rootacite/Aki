@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import hmac
 import json
 import logging
+import os
 import ssl
 import time
+from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
@@ -69,6 +72,24 @@ def _authorized(headers: Mapping[str, str], token: str) -> bool:
     return hmac.compare_digest(supplied, token)
 
 
+def _capture_safe(value: object, depth: int = 0) -> object:
+    if depth > 12:
+        return "[depth limit]"
+    if isinstance(value, str):
+        return value if len(value) <= 300_000 else value[:300_000] + "\n...[truncated]"
+    if isinstance(value, list):
+        return [_capture_safe(item, depth + 1) for item in value]
+    if isinstance(value, dict):
+        captured: dict[str, object] = {}
+        for key, item in value.items():
+            if key == "data" and isinstance(item, str) and len(item) > 1000:
+                captured[key] = "[base64 omitted]"
+            else:
+                captured[key] = _capture_safe(item, depth + 1)
+        return captured
+    return value
+
+
 class LlmProxy:
     def __init__(
         self,
@@ -79,6 +100,8 @@ class LlmProxy:
         upstream_proxy: str = "",
         ssl_context: ssl.SSLContext | None = None,
         grok_oauth: GrokOAuthProvider | None = None,
+        profile: str = "",
+        capture_dir: str | os.PathLike[str] | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -92,6 +115,14 @@ class LlmProxy:
         self.grok_oauth = grok_oauth
         if needs_grok_oauth and self.grok_oauth is None:
             self.grok_oauth = GrokOAuthProvider(upstream_proxy=self.upstream_proxy)
+        configured_capture = capture_dir or os.environ.get(
+            "AKI_RAW_API_CALL_CAPTURE_DIR", ""
+        )
+        self.capture_dir = (
+            Path(configured_capture).expanduser() if str(configured_capture).strip() else None
+        )
+        self.profile = profile
+        self._capture_lock = asyncio.Lock()
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -211,6 +242,13 @@ class LlmProxy:
         if route.extra_body:
             payload.update(route.extra_body)
         forwarded = json.dumps(payload).encode("utf-8")
+        await self._capture_provider_request(
+            path=path,
+            model_id=model_id,
+            route=route,
+            payload=payload,
+            forwarded=forwarded,
+        )
         parsed = urlsplit(route.url)
         upstream_host = parsed.hostname or "-"
         api_key = route.api_key
@@ -249,6 +287,58 @@ class LlmProxy:
             writer.write(_status_json(502, "upstream unavailable"))
             return 502, model_id, upstream_host
         return status, model_id, upstream_host
+
+    async def _capture_provider_request(
+        self,
+        *,
+        path: str,
+        model_id: str,
+        route: ModelRoute,
+        payload: Mapping[str, object],
+        forwarded: bytes,
+    ) -> None:
+        directory = self.capture_dir
+        if directory is None:
+            return
+        record = {
+            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "pid": os.getpid(),
+            "profile": self.profile,
+            "path": path,
+            "model": model_id,
+            "upstream_model": route.upstream_model,
+            "upstream_url": route.url,
+            "body_bytes": len(forwarded),
+            "body_sha256": hashlib.sha256(forwarded).hexdigest(),
+            "payload": _capture_safe(payload),
+        }
+        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+            "utf-8"
+        )
+        safe_profile = "".join(
+            character if character.isalnum() or character in "_.-" else "_"
+            for character in (self.profile or "proxy")
+        )
+        target = directory / f"raw-api-calls-{safe_profile}.jsonl"
+
+        def write() -> None:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(directory, 0o700)
+            fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
+            try:
+                with os.fdopen(fd, "ab", closefd=False) as handle:
+                    handle.write(line)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                os.close(fd)
+            os.chmod(target, 0o600)
+
+        try:
+            async with self._capture_lock:
+                await asyncio.to_thread(write)
+        except OSError as exc:
+            LOGGER.warning("raw API capture failed: %s", exc)
 
 
 async def _read_headers(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:

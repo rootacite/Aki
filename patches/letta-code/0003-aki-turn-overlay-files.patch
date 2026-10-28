@@ -1,0 +1,520 @@
+diff --git a/src/aki/bridge.test.ts b/src/aki/bridge.test.ts
+index 0bc0f1a..aff021c 100644
+--- a/src/aki/bridge.test.ts
++++ b/src/aki/bridge.test.ts
+@@ -1,10 +1,11 @@
+ import { afterEach, describe, expect, test } from "bun:test";
+-import { mkdtemp, readFile, rm } from "node:fs/promises";
++import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+ import { tmpdir } from "node:os";
+ import { join } from "node:path";
+ import {
+   akiBridgeCapabilities,
+   applyAkiProviderOverlay,
++  applyAkiProviderOverlayWithFiles,
+   beginAkiTurn,
+   captureAkiProviderCall,
+   endAkiTurn,
+@@ -36,8 +37,22 @@ function input(): ProviderTurnInput {
+ afterEach(() => {
+   endAkiTurn("turn-1");
+   endAkiTurn("turn-2");
++  endAkiTurn("turn-files");
++  endAkiTurn("turn-capture");
+ });
+ 
++function insertionContent(
++  seq: number,
++  insertedAtMs: number,
++  text: string,
++): string {
++  return [
++    `<user-insertion id="ins-${seq}" seq="${seq}" inserted-at-ms="${insertedAtMs}">`,
++    `<text>${text}</text>`,
++    "</user-insertion>",
++  ].join("\n");
++}
++
+ describe("Aki bridge", () => {
+   test("advertises its wire capabilities", () => {
+     expect(akiBridgeCapabilities()).toMatchObject({
+@@ -89,6 +104,157 @@ describe("Aki bridge", () => {
+     expect(applyAkiProviderOverlay(input()).systemPrompt).toBe("base system");
+   });
+ 
++  test("claims overlay files once and replays insertions for the whole turn", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
++    process.env.AKI_TURN_OVERLAY_DIR = directory;
++    try {
++      beginAkiTurn("turn-files", {});
++      const turnDir = join(directory, "turn-files");
++      await mkdir(turnDir, { mode: 0o700 });
++      await writeFile(
++        join(turnDir, "00000009-b.json"),
++        JSON.stringify({
++          turn_id: "turn-files",
++          seq: 9,
++          insertion_id: "ins-9",
++          inserted_at_ms: 900,
++          content: insertionContent(9, 900, "nine"),
++        }),
++      );
++      await writeFile(
++        join(turnDir, "00000002-a.json"),
++        JSON.stringify({
++          turn_id: "turn-files",
++          seq: 2,
++          insertion_id: "ins-2",
++          inserted_at_ms: 200,
++          content: insertionContent(2, 200, "two"),
++        }),
++      );
++      const first = await applyAkiProviderOverlayWithFiles(input());
++      expect(first.uiMessages).toHaveLength(1);
++      const firstContent = String(
++        (first.uiMessages[0]?.content as Array<{ text: string }>)[0]?.text,
++      );
++      expect(firstContent).toContain('count="2"');
++      expect(firstContent.indexOf("two")).toBeLessThan(
++        firstContent.indexOf("nine"),
++      );
++      const second = await applyAkiProviderOverlayWithFiles(input());
++      expect(second.uiMessages).toHaveLength(1);
++      const secondContent = String(
++        (second.uiMessages[0]?.content as Array<{ text: string }>)[0]?.text,
++      );
++      expect(secondContent).toBe(firstContent);
++      expect(await readdir(turnDir)).toEqual([]);
++    } finally {
++      delete process.env.AKI_TURN_OVERLAY_DIR;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++
++  test("increments the insertion envelope as new messages arrive", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
++    process.env.AKI_TURN_OVERLAY_DIR = directory;
++    try {
++      beginAkiTurn("turn-files", {});
++      const turnDir = join(directory, "turn-files");
++      await mkdir(turnDir, { mode: 0o700 });
++      const writeInsertion = async (seq: number, text: string) => {
++        await writeFile(
++          join(turnDir, `0000000${seq}-${seq}.json`),
++          JSON.stringify({
++            turn_id: "turn-files",
++            seq,
++            insertion_id: `ins-${seq}`,
++            inserted_at_ms: seq * 100,
++            content: insertionContent(seq, seq * 100, text),
++          }),
++        );
++      };
++      await writeInsertion(1, "first");
++      const first = await applyAkiProviderOverlayWithFiles(input());
++      let content = String(
++        (first.uiMessages[0]?.content as Array<{ text: string }>)[0]?.text,
++      );
++      expect(content).toContain('count="1"');
++      expect(content).toContain("first");
++      expect(content).not.toContain("second");
++
++      await writeInsertion(2, "second");
++      const second = await applyAkiProviderOverlayWithFiles(input());
++      content = String(
++        (second.uiMessages[0]?.content as Array<{ text: string }>)[0]?.text,
++      );
++      expect(content).toContain('count="2"');
++      expect(content).toContain("first");
++      expect(content).toContain("second");
++
++      const third = await applyAkiProviderOverlayWithFiles(input());
++      expect(
++        String(
++          (third.uiMessages[0]?.content as Array<{ text: string }>)[0]?.text,
++        ),
++      ).toBe(content);
++    } finally {
++      delete process.env.AKI_TURN_OVERLAY_DIR;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++
++  test("keeps malformed and foreign-turn overlay files", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
++    process.env.AKI_TURN_OVERLAY_DIR = directory;
++    try {
++      beginAkiTurn("turn-files", {});
++      const turnDir = join(directory, "turn-files");
++      await mkdir(turnDir, { mode: 0o700 });
++      await writeFile(join(turnDir, "00000001-bad.json"), "{not-json");
++      await writeFile(
++        join(turnDir, "00000002-foreign.json"),
++        JSON.stringify({
++          turn_id: "another-turn",
++          seq: 2,
++          insertion_id: "ins-foreign",
++          inserted_at_ms: 200,
++          content: "foreign",
++        }),
++      );
++      await writeFile(
++        join(turnDir, "00000003-good.json"),
++        JSON.stringify({
++          turn_id: "turn-files",
++          seq: 3,
++          insertion_id: "ins-3",
++          inserted_at_ms: 300,
++          content: "good",
++        }),
++      );
++      const enriched = await applyAkiProviderOverlayWithFiles(input());
++      expect(enriched.uiMessages).toHaveLength(1);
++      expect((await readdir(turnDir)).sort()).toEqual([
++        "00000001-bad.json",
++        "00000002-foreign.json",
++      ]);
++    } finally {
++      delete process.env.AKI_TURN_OVERLAY_DIR;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++
++  test("ignores overlay files when no turn is active", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
++    process.env.AKI_TURN_OVERLAY_DIR = directory;
++    try {
++      endAkiTurn("turn-files");
++      const enriched = await applyAkiProviderOverlayWithFiles(input());
++      expect(enriched.uiMessages).toHaveLength(0);
++    } finally {
++      delete process.env.AKI_TURN_OVERLAY_DIR;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++
+   test("rejects updates for an inactive turn", () => {
+     expect(() =>
+       updateAkiTurn("missing", { interjection: { user_messages: [] } }),
+diff --git a/src/aki/bridge.ts b/src/aki/bridge.ts
+index ac67cbb..1a04e4c 100644
+--- a/src/aki/bridge.ts
++++ b/src/aki/bridge.ts
+@@ -8,6 +8,7 @@
+ 
+ import { randomUUID } from "node:crypto";
+ import { appendFileSync, mkdirSync } from "node:fs";
++import { readdir, readFile, unlink } from "node:fs/promises";
+ import { join } from "node:path";
+ import type { ProviderTurnInput } from "@/backend/dev/provider-turn-executor";
+ import type { LocalMessage, LocalUserMessage } from "@/backend/local/local-message";
+@@ -17,6 +18,13 @@ export interface AkiEphemeralMessage {
+   content: string | Array<{ type: "text"; text: string }>;
+ }
+ 
++interface AkiInsertion {
++  id: string;
++  seq: number;
++  insertedAtMs: number;
++  content: string;
++}
++
+ export interface AkiTurnContext {
+   system_append?: string;
+   mid_system_append?: string;
+@@ -32,6 +40,7 @@ interface AkiTurnState {
+   turnId: string;
+   overlay: AkiTurnOverlay;
+   pendingInterjections: AkiEphemeralMessage[];
++  turnInsertions: AkiInsertion[];
+ }
+ 
+ let activeTurn: AkiTurnState | null = null;
+@@ -73,6 +82,7 @@ export function beginAkiTurn(turnId: string, overlay: unknown): void {
+     turnId,
+     overlay: normalizeOverlay(overlay),
+     pendingInterjections: [],
++    turnInsertions: [],
+   };
+ }
+ 
+@@ -133,10 +143,37 @@ function makeEphemeralMessage(
+   };
+ }
+ 
++function escapeXmlAttr(value: string): string {
++  return value
++    .replaceAll("&", "&amp;")
++    .replaceAll("<", "&lt;")
++    .replaceAll(">", "&gt;")
++    .replaceAll('"', "&quot;")
++    .replaceAll("'", "&apos;");
++}
++
++function renderInsertionEnvelope(
++  turnId: string,
++  insertions: AkiInsertion[],
++): string {
++  const ordered = [...insertions].sort(
++    (left, right) =>
++      left.insertedAtMs - right.insertedAtMs ||
++      left.seq - right.seq ||
++      left.id.localeCompare(right.id),
++  );
++  return [
++    `<user-insertions turn_id="${escapeXmlAttr(turnId)}" count="${ordered.length}" during-work="true">`,
++    ...ordered.map((insertion) => insertion.content),
++    "</user-insertions>",
++  ].join("\n");
++}
++
+ /**
+  * Apply the active Aki overlay immediately before a provider request.
+- * turn_context is replayed for every request in the turn; interjections are
+- * consumed once at the next request boundary.
++ * turn_context is replayed for every request in the turn. Legacy in-memory
++ * interjections are consumed once; akid's file insertions are replayed for the
++ * remainder of the turn so tool-result requests keep a stable user context.
+  */
+ export function applyAkiProviderOverlay(input: ProviderTurnInput): ProviderTurnInput {
+   const state = activeTurn;
+@@ -144,10 +181,19 @@ export function applyAkiProviderOverlay(input: ProviderTurnInput): ProviderTurnI
+   const turnContext = state.overlay.turn_context ?? {};
+   const interjections = state.pendingInterjections;
+   state.pendingInterjections = [];
+-  const messages = [
++  const messages: AkiEphemeralMessage[] = [
+     ...(turnContext.user_messages ?? []),
+     ...interjections,
+-  ].map((message) => makeEphemeralMessage(message, input));
++  ];
++  if (state.turnInsertions.length > 0) {
++    messages.push({
++      role: "user",
++      content: renderInsertionEnvelope(state.turnId, state.turnInsertions),
++    });
++  }
++  const ephemeralMessages = messages.map((message) =>
++    makeEphemeralMessage(message, input),
++  );
+   const systemPrompt = appendBlock(
+     input.systemPrompt ?? input.agent.system,
+     turnContext.system_append,
+@@ -156,17 +202,184 @@ export function applyAkiProviderOverlay(input: ProviderTurnInput): ProviderTurnI
+     input.midConversationSystemPrompt,
+     turnContext.mid_system_append,
+   );
+-  if (!messages.length && systemPrompt === input.systemPrompt && midConversationSystemPrompt === input.midConversationSystemPrompt) {
++  if (!ephemeralMessages.length && systemPrompt === input.systemPrompt && midConversationSystemPrompt === input.midConversationSystemPrompt) {
+     return input;
+   }
+-  return {
++  const output = {
+     ...input,
+     ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+     ...(midConversationSystemPrompt !== undefined
+       ? { midConversationSystemPrompt }
+       : {}),
+-    uiMessages: [...input.uiMessages, ...messages] as LocalMessage[],
++    uiMessages: [...input.uiMessages, ...ephemeralMessages] as LocalMessage[],
+   };
++  return output;
++}
++
++interface AkiOverlayFileRecord {
++  turn_id?: unknown;
++  seq?: unknown;
++  insertion_id?: unknown;
++  inserted_at?: unknown;
++  inserted_at_ms?: unknown;
++  content?: unknown;
++  text?: unknown;
++}
++
++function overlayFileContentText(value: unknown): string | null {
++  if (typeof value === "string") return value;
++  if (!Array.isArray(value)) return null;
++  const parts: string[] = [];
++  for (const part of value) {
++    if (
++      part !== null &&
++      typeof part === "object" &&
++      (part as { type?: unknown }).type === "text" &&
++      typeof (part as { text?: unknown }).text === "string"
++    ) {
++      parts.push((part as { text: string }).text);
++    }
++  }
++  return parts.length > 0 ? parts.join("\n") : null;
++}
++
++/**
++ * Claim akid's per-message overlay files at the provider request boundary.
++ * Files are sorted by seq and deleted only after they were parsed and queued.
++ * Invalid or foreign-turn files stay on disk so akid can preserve them.
++ */
++export async function claimAkiOverlayFiles(
++  turnId: string,
++): Promise<AkiInsertion[]> {
++  const root = process.env.AKI_TURN_OVERLAY_DIR?.trim();
++  if (!root || !turnId) return [];
++  const directory = join(root, turnId);
++  let names: string[];
++  try {
++    names = await readdir(directory);
++  } catch (error) {
++    const code = (error as NodeJS.ErrnoException).code;
++    if (code !== "ENOENT") {
++      console.error(
++        `[aki-overlay-files] cannot read ${directory}: ${
++          error instanceof Error ? error.message : String(error)
++        }`,
++      );
++    }
++    return [];
++  }
++  const records: Array<{
++    name: string;
++    path: string;
++    seq: number;
++    insertedAtMs: number;
++    id: string;
++    content: string;
++    record: AkiOverlayFileRecord;
++  }> = [];
++  for (const name of names.filter((candidate) => candidate.endsWith(".json"))) {
++    const path = join(directory, name);
++    let raw: string;
++    try {
++      raw = await readFile(path, "utf8");
++    } catch (error) {
++      console.error(
++        `[aki-overlay-files] cannot read ${path}: ${
++          error instanceof Error ? error.message : String(error)
++        }`,
++      );
++      continue;
++    }
++    let record: AkiOverlayFileRecord;
++    try {
++      record = JSON.parse(raw) as AkiOverlayFileRecord;
++    } catch (error) {
++      console.error(
++        `[aki-overlay-files] invalid JSON in ${path}: ${
++          error instanceof Error ? error.message : String(error)
++        }`,
++      );
++      continue;
++    }
++    if (String(record.turn_id ?? "") !== turnId) {
++      console.error(
++        `[aki-overlay-files] ignoring ${path}: turn_id=${
++          String(record.turn_id ?? "")
++        } active=${turnId}`,
++      );
++      continue;
++    }
++    const seq = Number(record.seq);
++    if (!Number.isFinite(seq)) {
++      console.error(`[aki-overlay-files] ignoring ${path}: invalid seq`);
++      continue;
++    }
++    const content = overlayFileContentText(record.content);
++    if (content === null) {
++      console.error(`[aki-overlay-files] ignoring ${path}: missing content`);
++      continue;
++    }
++    let insertedAtMs = Number(record.inserted_at_ms);
++    if (!Number.isFinite(insertedAtMs)) {
++      const parsed = Date.parse(String(record.inserted_at ?? ""));
++      insertedAtMs = Number.isFinite(parsed) ? parsed : seq;
++    }
++    const id =
++      String(record.insertion_id ?? "").trim() || `overlay-${name}`;
++    records.push({ name, path, seq, insertedAtMs, id, content, record });
++  }
++  records.sort(
++    (left, right) =>
++      left.insertedAtMs - right.insertedAtMs ||
++      left.seq - right.seq ||
++      left.name.localeCompare(right.name),
++  );
++  const insertions: AkiInsertion[] = [];
++  for (const entry of records) {
++    insertions.push({
++      id: entry.id,
++      seq: entry.seq,
++      insertedAtMs: entry.insertedAtMs,
++      content: entry.content,
++    });
++    try {
++      await unlink(entry.path);
++    } catch (error) {
++      console.error(
++        `[aki-overlay-files] delivered but could not consume ${entry.path}: ${
++          error instanceof Error ? error.message : String(error)
++        }`,
++      );
++    }
++  }
++  return insertions;
++}
++
++/**
++ * Read akid's file overlay for the active turn, add newly claimed insertions to
++ * the turn-scoped replay list, then apply the stable overlay to this request.
++ */
++export async function applyAkiProviderOverlayWithFiles(
++  input: ProviderTurnInput,
++): Promise<ProviderTurnInput> {
++  const state = activeTurn;
++  if (!state) return input;
++  const insertions = await claimAkiOverlayFiles(state.turnId);
++  if (insertions.length > 0) {
++    const known = new Set(state.turnInsertions.map((item) => item.id));
++    for (const insertion of insertions) {
++      if (known.has(insertion.id)) continue;
++      known.add(insertion.id);
++      state.turnInsertions.push(insertion);
++    }
++    state.turnInsertions.sort(
++      (left, right) =>
++        left.insertedAtMs - right.insertedAtMs ||
++        left.seq - right.seq ||
++        left.id.localeCompare(right.id),
++    );
++  }
++  return applyAkiProviderOverlay(input);
+ }
+ 
+ export function addAkiInterjection(
+@@ -189,6 +402,7 @@ export function akiOverlaySnapshot(): Record<string, unknown> | null {
+     overlay_user_messages:
+       activeTurn.overlay.turn_context?.user_messages ?? [],
+     pending_interjections: activeTurn.pendingInterjections,
++    insertions: activeTurn.turnInsertions,
+   };
+ }
+ 
+diff --git a/src/backend/dev/pi-stream-adapter.ts b/src/backend/dev/pi-stream-adapter.ts
+index eaf51c6..8f76006 100644
+--- a/src/backend/dev/pi-stream-adapter.ts
++++ b/src/backend/dev/pi-stream-adapter.ts
+@@ -11,7 +11,7 @@ import type {
+ import { isContextOverflow, Type } from "@earendil-works/pi-ai";
+ 
+ import {
+-  applyAkiProviderOverlay,
++  applyAkiProviderOverlayWithFiles,
+   captureAkiProviderCall,
+ } from "@/aki/bridge";
+ import type { LocalCompactionStats } from "@/backend/local/compaction";
+@@ -578,7 +578,7 @@ export class PiStreamAdapter implements ProviderStreamAdapter {
+   private async *streamOnce(
+     input: ProviderTurnInput,
+   ): AsyncIterable<ProviderStreamEvent> {
+-    input = applyAkiProviderOverlay(input);
++    input = await applyAkiProviderOverlayWithFiles(input);
+     const tools = toPiTools(input.clientTools);
+     const localModel = await resolveAvailableLocalModelForTurn({
+       model: input.agent.model,

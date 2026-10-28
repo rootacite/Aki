@@ -21,6 +21,7 @@ from engine.akid import (
     GatewayConfig,
     GatewayServer,
     Turn,
+    WAIT_GUARD_ORIGIN,
     WAIT_USER_TOOL,
     _b64url,
     _format_channel_message_time,
@@ -1349,14 +1350,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
             system,
         )
-        self.assertIn(
-            "wake-reminder: 当前正在和你说话的是 Master。"
-            "用^排除不需要被提醒的成员",
-            prompt,
-        )
-        self.assertIn(
-            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。", prompt
-        )
+        self.assertNotIn("wake-reminder:", prompt)
+        self.assertNotIn("reply-target", prompt)
+        self.assertIn("Use `^MemberName` to exclude members from being woken.", system)
+        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", system)
 
     async def test_channel_turn_is_bridge_overlay_only(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
@@ -1380,15 +1377,14 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             block,
         )
         self.assertIn("<text>hello</text>", block)
-        self.assertIn("<wake-reminder>用^排除不需要被提醒的成员", block)
-        self.assertIn(
-            "<reply-target>如果你认为当前只需要回复Master、无需打扰其他人，使用 `@Master`",
-            block,
-        )
+        self.assertNotIn("<wake-reminder>", block)
+        self.assertNotIn("<reply-target>", block)
         self.assertIn("<guidance>", block)
         self.assertIn('remaining="3"', block)
         self.assertIn("resets=\"user-message\"", block)
-        self.assertNotIn("<channel-turn", self._agent_system(agent_path))
+        system = self._agent_system(agent_path)
+        self.assertNotIn("<channel-turn", system)
+        self.assertIn("Use `^MemberName` to exclude members from being woken.", system)
         prompt = server._channel_prompt("Acite", "sender-1", "hello")
         self.assertNotIn("<channel-turn", prompt)
 
@@ -1410,23 +1406,30 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
 
         agent_system = self._agent_system(agent_path)
         self.assertIn("<channel-wake-routing", agent_system)
-        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", agent_system)
-        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", agent_system)
-        self.assertNotIn("@Master", agent_system)
+        self.assertIn(
+            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
+            agent_system,
+        )
+        self.assertIn(
+            "If there is no `@` but the reply contains `^MemberName`", agent_system
+        )
+        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", agent_system)
 
         compiled = json.loads(prompt_path.read_text(encoding="utf-8"))["content"]
         self.assertIn("<channel-wake-routing", compiled)
-        self.assertIn("有 `@成员名 `：只唤醒被 @ 的成员。", compiled)
-        self.assertIn("无 `@`、有 `^成员名`：不唤醒被 `^` 的成员", compiled)
-        self.assertNotIn("@Master", compiled)
+        self.assertIn(
+            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
+            compiled,
+        )
+        self.assertIn(
+            "If there is no `@` but the reply contains `^MemberName`", compiled
+        )
+        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", compiled)
 
         channel_prompt = server._channel_prompt("Acite", "sender-1", "你好")
         self.assertNotIn("<wake-routing>", channel_prompt)
         self.assertNotIn("不希望其他成员注意到这条消息", channel_prompt)
-        self.assertIn(
-            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。",
-            channel_prompt,
-        )
+        self.assertNotIn("wake-reminder:", channel_prompt)
 
     async def test_agent_channel_message_uses_transcript_not_user_role(self) -> None:
         agent_path = self._write_test_agent()
@@ -1651,25 +1654,34 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
         self.assertEqual(server.queue, [])
         self.assertTrue(server._channel_history[-1].arrived_while_busy)
-        overlay = overlay_text(server)
-        self.assertIn(agent_body, overlay)
-        self.assertIn('during-work="true"', overlay)
+        self.assertEqual(overlay_text(server), "")
+        self.assertEqual(busy_turn.overlay_files, {})
 
         await server._on_channel_text("alice", "alice-1", "USER_MESSAGE_WHILE_BUSY")
         self.assertEqual(server.queue, [])
         self.assertEqual(len(busy_turn.busy_messages), 1)
         self.assertTrue(server._channel_history[-1].arrived_while_busy)
         self.assertEqual(fake_channel.events, [])
-        overlay = overlay_text(server)
-        self.assertIn("USER_MESSAGE_WHILE_BUSY", overlay)
-        self.assertIn('during-work="true"', overlay)
-        server._queue_unhandled_busy_messages(busy_turn)
+        self.assertEqual(overlay_text(server), "")
+        self.assertEqual(len(busy_turn.overlay_files), 1)
+        overlay_path = next(iter(busy_turn.overlay_files.values()))
+        payload = json.loads(overlay_path.read_text(encoding="utf-8"))
+        self.assertIn("USER_MESSAGE_WHILE_BUSY", payload["content"])
+        self.assertEqual(payload["schema"], "aki.turn-overlay.v1")
+        self.assertTrue(payload["insertion_id"].startswith("ins-"))
+        self.assertIn("<user-insertion ", payload["content"])
+        self.assertIn("inserted-at=", payload["content"])
+        self.assertNotIn("during-work-note", payload["content"])
+        self.assertEqual(stat_mode(overlay_path.parent), 0o700)
+        self.assertEqual(stat_mode(overlay_path), 0o600)
+        await server._finalize_turn_overlays(busy_turn)
         self.assertEqual(len(server.queue), 1)
         self.assertIn("USER_MESSAGE_WHILE_BUSY", server.queue[0].message)
+        self.assertFalse(overlay_path.exists())
         server.active = None
         server.queue.clear()
 
-    async def test_bridge_busy_message_refreshes_overlay_and_interjection(self) -> None:
+    async def test_bridge_busy_message_writes_overlay_file_without_backend_update(self) -> None:
         with mock.patch.dict(os.environ, {"FAKE_LETTA_AKI_BRIDGE": "1"}, clear=False):
             server = await self.start_server(channel=FakeChannel())
         updates: list[dict[str, Any]] = []
@@ -1690,16 +1702,17 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             )
             await wait_until(lambda: server.active is not None)
             await server._on_channel_text("Master", "master", "补充一下")
-            await wait_until(lambda: bool(updates))
-            overlay_text = json.dumps(updates[0]["overlay"], ensure_ascii=False)
-            self.assertIn('during-work=\\"true\\"', overlay_text)
-            interjection = updates[0]["overlay"].get("interjection")
-            self.assertIsNotNone(interjection)
-            content = interjection["user_messages"][0]["content"]
-            self.assertIn("<during-work-note>", content)
-            self.assertIn('sender_id="', content)
-            self.assertIn('source="user"', content)
+            await wait_until(lambda: bool(server.active.overlay_files))
+            self.assertEqual(updates, [])
+            overlay_path = next(iter(server.active.overlay_files.values()))
+            payload = json.loads(overlay_path.read_text(encoding="utf-8"))
+            content = payload["content"]
+            self.assertIn("<user-insertion ", content)
+            self.assertIn("inserted-at=", content)
+            self.assertNotIn("during-work-note", content)
             self.assertIn("补充一下", content)
+            self.assertEqual(payload["turn_id"], server.active.turn_id)
+            self.assertFalse(payload["origin_is_agent"])
             await server._on_channel_text(
                 "Master",
                 "master",
@@ -1718,6 +1731,332 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await channel_send(server, "bridge hello")
         self.assertNotIn("<channel-transcript", self._agent_system(agent_path))
         self.assertIn("<channel-transcript", overlay_text(server))
+
+    def _write_channel_conversation(
+        self, server: GatewayServer, rows: list[dict[str, Any]]
+    ) -> Path:
+        directory = server._conversation_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "messages.jsonl"
+        path.write_text(
+            "".join(
+                json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for row in rows
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(path, 0o600)
+        (directory / "conversation.json").write_text(
+            '{"id":"default","in_context_message_ids":[]}\n', encoding="utf-8"
+        )
+        return path
+
+    def _conversation_user_rows(self, server: GatewayServer) -> list[dict[str, Any]]:
+        path = server._conversation_dir() / "messages.jsonl"
+        return [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    async def test_unconsumed_user_messages_merge_into_one_new_turn(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        turn = Turn(
+            turn_id="overlay-unconsumed",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_sender="Master",
+            channel_message_seq=1,
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "第一段")
+        attachment = ChannelImageAttachment(
+            name="补充图.png",
+            path=str(self.root / "overlay.png"),
+            mime="image/png",
+            size=8,
+            index=1,
+        )
+        await server._on_channel_text(
+            "Master", "master", "第二段", _attachments=(attachment,)
+        )
+        self.assertEqual(len(turn.overlay_files), 2)
+        overlay_paths = list(turn.overlay_files.values())
+        await server._finalize_turn_overlays(turn)
+        self.assertEqual(len(server.queue), 1)
+        queued = server.queue[0]
+        self.assertIn("第一段", queued.message)
+        self.assertIn("第二段", queued.message)
+        self.assertEqual(queued.channel_message_seq, 2)
+        self.assertEqual(queued.channel_attachments[0].name, "补充图.png")
+        self.assertTrue(all(not path.exists() for path in overlay_paths))
+        server.active = None
+        server.queue.clear()
+
+    async def test_consumed_user_message_merges_into_current_user_role(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        prompt = server._channel_prompt(
+            "Master", "master", "原始问题", sent_at=1_792_942_663_759
+        )
+        self._write_channel_conversation(
+            server,
+            [
+                {"type": "session", "version": 3, "id": "default"},
+                {
+                    "type": "message",
+                    "id": "entry-user",
+                    "parentId": None,
+                    "timestamp": "2026-10-28T00:00:00Z",
+                    "message": {
+                        "id": "ui-user",
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                        "timestamp": 1792942663000,
+                    },
+                },
+            ],
+        )
+        turn = Turn(
+            turn_id="overlay-consumed-user",
+            conn=server.channel_conn,
+            message=prompt,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_sender="Master",
+            channel_message_seq=2,
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "执行中补充")
+        overlay_path = next(iter(turn.overlay_files.values()))
+        overlay_path.unlink()
+        await server._finalize_turn_overlays(turn)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(turn.user_role_entry_id, "entry-user")
+        rows = self._conversation_user_rows(server)
+        user_rows = [row for row in rows if row.get("message", {}).get("role") == "user"]
+        self.assertEqual(len(user_rows), 1)
+        content = user_rows[0]["message"]["content"]
+        self.assertEqual(len(content), 2)
+        self.assertIn("执行中补充", content[1]["text"])
+        self.assertIn("<user-insertions", content[1]["text"])
+        self.assertIn('count="1"', content[1]["text"])
+        self.assertIn('during-work="true"', content[1]["text"])
+        self.assertIn("<user-insertion ", content[1]["text"])
+        server.active = None
+
+    async def test_multiple_consumed_insertions_merge_in_one_envelope(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        prompt = server._channel_prompt("Master", "master", "原始问题")
+        self._write_channel_conversation(
+            server,
+            [
+                {"type": "session", "version": 3, "id": "default"},
+                {
+                    "type": "message",
+                    "id": "entry-user",
+                    "parentId": None,
+                    "timestamp": "2026-10-28T00:00:00Z",
+                    "message": {
+                        "id": "ui-user",
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                        "timestamp": 1792942663000,
+                    },
+                },
+            ],
+        )
+        turn = Turn(
+            turn_id="overlay-two-consumed",
+            conn=server.channel_conn,
+            message=prompt,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_sender="Master",
+            channel_message_seq=2,
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text(
+            "Master", "master", "第一条补充", sent_at=1_792_942_664_000
+        )
+        await server._on_channel_text(
+            "Master", "master", "第二条补充", sent_at=1_792_942_664_500
+        )
+        for path in list(turn.overlay_files.values()):
+            path.unlink()
+        await server._finalize_turn_overlays(turn)
+        self.assertEqual(server.queue, [])
+        rows = self._conversation_user_rows(server)
+        user_row = next(
+            row for row in rows if row.get("message", {}).get("role") == "user"
+        )
+        merged = user_row["message"]["content"][1]["text"]
+        self.assertIn("<user-insertions", merged)
+        self.assertIn('count="2"', merged)
+        self.assertEqual(merged.count("<user-insertion "), 2)
+        self.assertLess(
+            merged.index("第一条补充"), merged.index("第二条补充")
+        )
+        self.assertEqual(merged.count("inserted-at="), 2)
+        self.assertNotIn("during-work-note", merged)
+        server.active = None
+
+    async def test_agent_turn_merge_targets_latest_human_role(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        human_prompt = server._channel_prompt("Master", "master", "历史真话")
+        agent_prompt = server._channel_prompt(
+            "Fuyu", legacy_member_id("Fuyu"), "智能体触发", from_agent=True
+        )
+        self._write_channel_conversation(
+            server,
+            [
+                {"type": "session", "version": 3, "id": "default"},
+                {
+                    "type": "message",
+                    "id": "entry-human",
+                    "parentId": None,
+                    "timestamp": "2026-10-28T00:00:00Z",
+                    "message": {
+                        "id": "ui-human",
+                        "role": "user",
+                        "content": [{"type": "text", "text": human_prompt}],
+                        "timestamp": 1792942663000,
+                    },
+                },
+                {
+                    "type": "message",
+                    "id": "entry-agent",
+                    "parentId": "entry-human",
+                    "timestamp": "2026-10-28T00:00:01Z",
+                    "message": {
+                        "id": "ui-agent",
+                        "role": "user",
+                        "content": [{"type": "text", "text": agent_prompt}],
+                        "timestamp": 1792942664000,
+                    },
+                },
+                {
+                    "type": "message",
+                    "id": "entry-assistant",
+                    "parentId": "entry-agent",
+                    "timestamp": "2026-10-28T00:00:02Z",
+                    "message": {
+                        "id": "ui-assistant",
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "临时回复"}],
+                        "timestamp": 1792942665000,
+                    },
+                },
+            ],
+        )
+        turn = Turn(
+            turn_id="overlay-consumed-agent",
+            conn=server.channel_conn,
+            message=agent_prompt,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id=legacy_member_id("Fuyu"),
+            origin_is_agent=True,
+            channel_sender="Fuyu",
+            channel_message_seq=2,
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "人类插话")
+        next(iter(turn.overlay_files.values())).unlink()
+        await server._finalize_turn_overlays(turn)
+        rows = self._conversation_user_rows(server)
+        human_row = next(row for row in rows if row.get("id") == "entry-human")
+        agent_row = next(row for row in rows if row.get("id") == "entry-agent")
+        self.assertEqual(len(human_row["message"]["content"]), 2)
+        self.assertIn("人类插话", human_row["message"]["content"][1]["text"])
+        self.assertEqual(
+            agent_row["message"]["content"],
+            [{"type": "text", "text": agent_prompt}],
+        )
+        server.active = None
+
+    async def test_reload_failure_does_not_requeue_consumed_message(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        prompt = server._channel_prompt("Master", "master", "原始问题")
+        path = self._write_channel_conversation(
+            server,
+            [
+                {"type": "session", "version": 3, "id": "default"},
+                {
+                    "type": "message",
+                    "id": "entry-user",
+                    "parentId": None,
+                    "timestamp": "2026-10-28T00:00:00Z",
+                    "message": {
+                        "id": "ui-user",
+                        "role": "user",
+                        "content": [{"type": "text", "text": prompt}],
+                        "timestamp": 1792942663000,
+                    },
+                },
+            ],
+        )
+        before = path.read_bytes()
+        turn = Turn(
+            turn_id="overlay-reload-failure",
+            conn=server.channel_conn,
+            message=prompt,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_sender="Master",
+            channel_message_seq=2,
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "不能丢的消息")
+        next(iter(turn.overlay_files.values())).unlink()
+        with mock.patch.object(
+            server.backend,
+            "reload_conversation",
+            side_effect=RuntimeError("reload failed"),
+        ):
+            await server._finalize_turn_overlays(turn)
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(server.queue, [])
+        server.active = None
+        server.queue.clear()
+
+    async def test_message_at_end_sent_boundary_creates_new_turn(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        turn = Turn(
+            turn_id="overlay-end-sent",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_sender="Master",
+            state="running",
+            end_sent=True,
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "边界消息")
+        self.assertEqual(turn.busy_messages, [])
+        self.assertEqual(turn.overlay_files, {})
+        self.assertEqual(len(server.queue), 1)
+        self.assertIn("边界消息", server.queue[0].message)
+        server.active = None
+        server.queue.clear()
 
     async def test_busy_user_message_is_consumed_by_later_tool_call(self) -> None:
         fake_channel = FakeChannel()
@@ -1820,7 +2159,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def test_wait_other_is_registered_only_when_configured(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(
-            channel=fake_channel, channel_wait_for=("Aki",)
+            channel=fake_channel, profile="fuyu", channel_wait_for=("Aki",)
         )
         names = {str(tool.get("name") or "") for tool in server._external_tools()}
         self.assertIn(WAIT_OTHER_TOOL, names)
@@ -1830,6 +2169,191 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         plain = await self.start_server(channel=FakeChannel())
         plain_names = {str(tool.get("name") or "") for tool in plain._external_tools()}
         self.assertNotIn(WAIT_OTHER_TOOL, plain_names)
+
+    async def test_unwaited_final_is_replaced_by_wait_guard_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel,
+            profile="fuyu",
+            channel_wait_for=("Aki",),
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        state = server._agent_channel_state("aki")
+        state.active = True
+        guard_turns: list[Turn] = []
+        original_enqueue = server._enqueue_wait_guard_turn
+
+        def capture_guard(turn: Turn, targets: list[tuple[str, str, str]]) -> None:
+            original_enqueue(turn, targets)
+            guard_turns.append(server.queue[-1])
+            state.active = False
+
+        with mock.patch.object(
+            server, "_enqueue_wait_guard_turn", side_effect=capture_guard
+        ):
+            result = await channel_send(server, "hello")
+
+        self.assertEqual(len(guard_turns), 1)
+        guard_turn = guard_turns[0]
+        self.assertEqual(guard_turn.origin, WAIT_GUARD_ORIGIN)
+        self.assertIn("这是系统提示，不是用户消息", guard_turn.message)
+        self.assertIn("这些目标是:Aki", guard_turn.message)
+        self.assertEqual(guard_turn.wait_guard_targets, (("aki", "Aki", "Aki"),))
+        self.assertNotIn("channel reply", result.final_texts())
+        self.assertTrue(any("echo:" in text for text in result.final_texts()))
+        ended = [
+            event
+            for event in result.events_of("turn")
+            if event.get("phase") == "ended"
+        ]
+        self.assertTrue(any(event.get("ignored") == "true" for event in ended))
+
+    async def test_idle_wait_target_does_not_trigger_wait_guard(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel,
+            profile="fuyu",
+            channel_wait_for=("Aki",),
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        with mock.patch.object(server, "_enqueue_wait_guard_turn") as enqueue:
+            result = await channel_send(server, "hello")
+        enqueue.assert_not_called()
+        self.assertEqual(result.final_texts(), ["channel reply"])
+
+    async def test_wait_guard_targets_include_queued_work(self) -> None:
+        server = await self.start_server(
+            channel=FakeChannel(),
+            profile="fuyu",
+            channel_wait_for=("Aki",),
+        )
+        server._channel_members["aki"] = {
+            "id": "aki",
+            "name": "Aki",
+            "aliases": ("Aki", "aki"),
+            "description": "",
+            "kind": "agent",
+            "last_seen": time.monotonic(),
+            "sources": {"aki": time.monotonic()},
+        }
+        state = server._agent_channel_state("aki")
+        state.queue_depth = 1
+        turn = Turn(
+            turn_id="wait-guard-queue-depth",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            channel_participants=frozenset({"aki"}),
+            state="running",
+        )
+        self.assertEqual(
+            server._unfinished_wait_targets(turn),
+            [("aki", "Aki", "Aki")],
+        )
+
+    async def test_wait_guard_turn_merges_consumed_message_into_human_role(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        human_prompt = server._channel_prompt("Master", "master", "原始问题")
+        guard_prompt = server._wait_guard_notice([("aki", "Aki", "Aki")])
+        self._write_channel_conversation(
+            server,
+            [
+                {"type": "session", "version": 3, "id": "default"},
+                {
+                    "type": "message",
+                    "id": "entry-human",
+                    "parentId": None,
+                    "timestamp": "2026-10-28T00:00:00Z",
+                    "message": {
+                        "id": "ui-human",
+                        "role": "user",
+                        "content": [{"type": "text", "text": human_prompt}],
+                        "timestamp": 1792942663000,
+                    },
+                },
+                {
+                    "type": "message",
+                    "id": "entry-guard",
+                    "parentId": "entry-human",
+                    "timestamp": "2026-10-28T00:00:01Z",
+                    "message": {
+                        "id": "ui-guard",
+                        "role": "user",
+                        "content": [{"type": "text", "text": guard_prompt}],
+                        "timestamp": 1792942664000,
+                    },
+                },
+            ],
+        )
+        turn = Turn(
+            turn_id="overlay-wait-guard-consumed",
+            conn=server.channel_conn,
+            message=guard_prompt,
+            include_reasoning=False,
+            client_message_id=None,
+            origin=WAIT_GUARD_ORIGIN,
+            origin_sender_id="master",
+            channel_sender="Master",
+            channel_participants=frozenset({"aki"}),
+            wait_guard_targets=(("aki", "Aki", "Aki"),),
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "执行中补充")
+        next(iter(turn.overlay_files.values())).unlink()
+        await server._finalize_turn_overlays(turn)
+
+        self.assertEqual(server.queue, [])
+        rows = self._conversation_user_rows(server)
+        human_row = next(row for row in rows if row.get("id") == "entry-human")
+        guard_row = next(row for row in rows if row.get("id") == "entry-guard")
+        self.assertEqual(len(human_row["message"]["content"]), 2)
+        self.assertIn("执行中补充", human_row["message"]["content"][1]["text"])
+        self.assertEqual(
+            guard_row["message"]["content"],
+            [{"type": "text", "text": guard_prompt}],
+        )
+        server.active = None
+
+    async def test_aki_never_registers_wait_other(self) -> None:
+        server = await self.start_server(
+            channel=FakeChannel(), profile="aki", channel_wait_for=("Fuyu",)
+        )
+        names = {str(tool.get("name") or "") for tool in server._external_tools()}
+        self.assertNotIn(WAIT_OTHER_TOOL, names)
+        turn = Turn(
+            turn_id="aki-no-wait-other",
+            conn=server.channel_conn,
+            message="",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="master",
+            channel_message_seq=1,
+            channel_sender="Master",
+            channel_text="hello",
+            channel_participants=frozenset({"fuyu"}),
+        )
+        block = await server._refresh_channel_turn(turn)
+        self.assertNotIn("<wait-other", block)
 
     async def test_wait_other_tool_events_are_hidden(self) -> None:
         fake_channel = FakeChannel()
@@ -2140,6 +2664,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("WAIT_USER_RESULT", captured[0])
         self.assertIn("补充一句", captured[0])
         self.assertTrue(turn.waited_user_seqs)
+        self.assertEqual(turn.overlay_files, {})
+        self.assertFalse(turn.wait_user_call_active)
         turn.tool_result_events += 1
         server._queue_unhandled_busy_messages(turn)
         self.assertEqual(server.queue, [])
@@ -2188,6 +2714,48 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("同一用户", captured[0])
         self.assertNotIn("别人的话", captured[0])
         self.assertNotIn("智能体的话", captured[0])
+        server.active = None
+
+    async def test_wait_user_only_consumes_messages_that_arrive_during_wait(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        sender_id = server._member_key({}, "Master", "master")
+        turn = Turn(
+            turn_id="wait-user-eligibility",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id=sender_id,
+            channel_sender="Master",
+            state="running",
+        )
+        server.active = turn
+        await server._on_channel_text("Master", "master", "等待前补充")
+        before_wait = next(iter(turn.overlay_files.values()))
+        captured: list[str] = []
+
+        async def capture(_tool_call_id, content, *, is_error=False):
+            captured.append(content[0]["text"])
+
+        with mock.patch.object(
+            server.backend, "send_external_tool_result", side_effect=capture
+        ):
+            task = asyncio.create_task(
+                server._handle_wait_user_tool(turn, "wait-user-scope", {"timeout_s": 1})
+            )
+            await asyncio.sleep(0.02)
+            self.assertFalse(task.done())
+            await server._on_channel_text("Master", "master", "等待中补充")
+            await asyncio.wait_for(task, timeout=2.0)
+        self.assertIn("等待中补充", captured[0])
+        self.assertNotIn("等待前补充", captured[0])
+        self.assertTrue(before_wait.exists())
+        self.assertEqual(len(turn.overlay_files), 1)
+        self.assertEqual(next(iter(turn.overlay_files.values())), before_wait)
+        self.assertEqual(len(turn.waited_user_seqs), 1)
+        self.assertTrue(turn.waited_user_seqs <= turn.wait_user_eligible_seqs)
         server.active = None
 
     async def test_wait_user_timeout_and_repeat_call(self) -> None:
@@ -2445,14 +3013,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("new-message: true", prompt)
         self.assertIn('<new-message seq="9"', prompt)
         self.assertIn('source="agent"', prompt)
-        self.assertIn(
-            "wake-reminder: 当前正在和你说话的是 Fuyu。"
-            "用^排除不需要被提醒的成员",
-            prompt,
-        )
-        self.assertIn(
-            "如果你认为只需要回复Master、无需打扰其他人，使用 @Master。", prompt
-        )
+        self.assertNotIn("wake-reminder:", prompt)
+        self.assertNotIn("reply-target", prompt)
         self.assertNotIn("<channel-turn", prompt)
 
     async def test_legacy_dynamic_execution_lock_block_is_removed(self) -> None:
@@ -3016,7 +3578,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         for row in rows:
             text = row["message"]["content"][0]["text"]
             self.assertNotIn("<channel-context>", text)
-            self.assertIn("当前正在和你说话的是 Master。", text)
+            self.assertNotIn("wake-reminder:", text)
+            self.assertIn("sender: alice", text)
         self.assertIn("message:\nfirst turn", rows[0]["message"]["content"][0]["text"])
         self.assertIn("message:\nsecond turn", rows[1]["message"]["content"][0]["text"])
 
@@ -3497,7 +4060,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             user_name=server.config.username,
         )
         self.assertIn("Master在消息中点名了你，请直接回复。", own)
-        self.assertIn("当前只需要回复Master", own)
+        self.assertNotIn("<reply-target>", own)
         self.assertNotIn("未点名你", own)
         await server._on_channel_control(
             TextEnvelope(

@@ -23,6 +23,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import unicodedata
 import uuid
@@ -145,7 +146,6 @@ from engine.live_context import (
     render_channel_roster,
     render_channel_turn,
     render_channel_wake_routing,
-    render_channel_wake_reminder,
     render_channel_transcript,
     render_live_context,
     render_new_message,
@@ -153,6 +153,8 @@ from engine.live_context import (
     render_solo_memories,
     render_solo_mode,
     render_solo_transcript,
+    render_user_insertion,
+    render_user_insertions,
     route_channel_reply,
     strip_channel_mentions,
     strip_channel_non_wakes,
@@ -340,6 +342,7 @@ WAIT_OTHER_POLL_INTERVAL = 0.2
 WAIT_OTHER_MAX_REPLY_CHARS = 16 * 1024
 WAIT_OTHER_MAX_TOTAL_CHARS = 32 * 1024
 WAIT_OTHER_TIMEOUT_MS = 24 * 60 * 60 * 1000
+WAIT_GUARD_ORIGIN = "wait_guard"
 WAIT_USER_MIN_TIMEOUT_S = 1
 WAIT_USER_MAX_TIMEOUT_S = 25
 WAIT_USER_MAX_REPLY_CHARS = 8 * 1024
@@ -477,9 +480,10 @@ WAIT_OTHER_TOOL_SCHEMA = {
     "name": WAIT_OTHER_TOOL,
     "label": "Wait for earlier agents",
     "description": (
-        "Wait until the configured earlier agents finish their current public "
-        "channel reply, then return their final replies. Call this once before "
-        "your final answer when the channel prompt asks you to. This tool is "
+        "You MUST call this once before your final answer when the channel prompt "
+        "requires it. It waits until the configured earlier agents finish their "
+        "current public channel reply, then returns their final replies. It is not "
+        "in compliance to speak before those targets have finished. This tool is "
         "hidden from the user. It returns immediately for idle agents and reports "
         "any target that goes offline. Do not mention or emphasize whom you waited "
         "for in your reply. Do not retry after an offline or unknown target result."
@@ -603,6 +607,10 @@ def default_backend_dir() -> Path:
     if configured:
         return Path(configured).expanduser()
     return Path.home() / ".letta" / "lc-local-backend"
+
+
+def default_turn_overlay_dir(backend_dir: Path, agent_id: str) -> Path:
+    return backend_dir / "aki-turn-overlays" / (agent_id or "agent")
 
 
 def default_mcp_native_state_path() -> Path:
@@ -1107,6 +1115,7 @@ class ChannelConnection:
         wake_ids: str = "",
         images: list[dict[str, Any]] | None = None,
         client_message_id: str = "",
+        ignored: bool = False,
     ) -> None:
         metadata = {
             "schema": "akid.v1",
@@ -1121,6 +1130,8 @@ class ChannelConnection:
             metadata["wake"] = wake or CHANNEL_WAKE_ALL
             if wake_ids:
                 metadata["wakeIds"] = wake_ids
+        if ignored:
+            metadata["ignored"] = "true"
         self._enqueue_text(
             text,
             metadata,
@@ -1299,6 +1310,18 @@ class ChannelConnection:
             return
         if state.suppressed:
             return
+        if state.guard_blocked:
+            if event_type == "turn_end":
+                self._enqueue_turn(
+                    turn_id,
+                    seq,
+                    "ended",
+                    "",
+                    client_message_id=state.client_message_id,
+                    ignored=True,
+                )
+                self._turns.pop(turn_id, None)
+            return
         if event_type == "turn_started":
             state.client_message_id = str(data.get("client_message_id") or "")
             state.origin_is_agent = bool(data.get("origin_is_agent"))
@@ -1465,6 +1488,14 @@ class ChannelConnection:
             self._turns.pop(turn_id, None)
             return
 
+    def discard_turn_output(self, turn_id: str) -> None:
+        """Drop buffered/public output for a turn rejected by the wait guard."""
+        state = self._turn_state(turn_id)
+        state.text = ""
+        state.last_text = ""
+        state.finalized = True
+        state.guard_blocked = True
+
 
 @dataclass
 class ChannelTurnState:
@@ -1476,6 +1507,7 @@ class ChannelTurnState:
     origin_is_agent: bool = False
     initiation_charged: bool = False
     suppressed: bool = False
+    guard_blocked: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
     wake: str = ""
     wake_ids: str = ""
@@ -1514,9 +1546,18 @@ class Turn:
     bridge_turn_started: bool = False
     busy_messages: list[dict[str, Any]] = field(default_factory=list)
     user_message_event: asyncio.Event = field(default_factory=asyncio.Event)
+    wait_user_call_active: bool = False
+    overlay_files: dict[int, Path] = field(default_factory=dict)
+    overlay_consumed_seqs: set[int] = field(default_factory=set)
+    wait_user_eligible_seqs: set[int] = field(default_factory=set)
     waited_user_seqs: set[int] = field(default_factory=set)
     wait_user_used: bool = False
+    merged_user_messages: list[dict[str, Any]] = field(default_factory=list)
+    user_role_entry_id: str = ""
     waited_agent_ids: set[str] = field(default_factory=set)
+    wait_guard_targets: tuple[tuple[str, str, str], ...] = ()
+    wait_guard_attempt: int = 0
+    wait_guard_blocked: bool = False
     tool_result_events: int = 0
     pending_tool_results: int = 0
     seq: int = 0
@@ -1889,6 +1930,7 @@ class GatewayServer:
         env.update(
             {
                 "AKI_PROFILE": self.config.profile,
+                "AKI_TURN_OVERLAY_DIR": str(self._turn_overlay_dir()),
                 "AKI_EXECUTION_LOCK_STATUS": str(
                     self.execution_lock.status_path
                 ),
@@ -1922,6 +1964,14 @@ class GatewayServer:
             on_ready=on_ready,
             on_exit=on_exit,
             logger=logging.getLogger("akid.letta"),
+        )
+
+    def _turn_overlay_dir(self) -> Path:
+        configured = os.environ.get("AKI_TURN_OVERLAY_DIR", "").strip()
+        if configured:
+            return Path(configured).expanduser()
+        return default_turn_overlay_dir(
+            self.config.backend_dir, self.config.agent_id
         )
 
     # ------------------------------------------------------------------ server
@@ -4106,6 +4156,17 @@ class GatewayServer:
             )
             if turn.origin_is_agent:
                 await self._snapshot_turn_conversation(turn)
+        elif turn.origin == WAIT_GUARD_ORIGIN:
+            await self._refresh_channel_identity()
+            block = await self._refresh_channel_transcript()
+            if block:
+                overlay_parts.append(block)
+            overlay_parts.append(
+                render_channel_roster(
+                    self_member=self._channel_self_member(),
+                    members=self._channel_member_views(),
+                )
+            )
         return overlay_parts
 
     async def _update_busy_turn_overlay(self, turn: Turn) -> None:
@@ -4521,6 +4582,167 @@ class GatewayServer:
         if snapshot_id:
             turn.bridge_snapshot_id = snapshot_id
 
+    @staticmethod
+    def _render_during_work_message(
+        text: str,
+        *,
+        sender: str,
+        sender_id: str,
+        seq: int | None,
+        from_agent: bool,
+    ) -> str:
+        return render_new_message(
+            text,
+            sender=sender,
+            sender_id=sender_id,
+            source="agent" if from_agent else "user",
+            phase="final",
+            seq=seq,
+            untrusted=True,
+            during_work=True,
+        )
+
+    @staticmethod
+    def _overlay_attachments_payload(
+        attachments: Sequence[ChannelImageAttachment],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": attachment.name,
+                "path": attachment.path,
+                **({"missing": True} if attachment.missing else {}),
+            }
+            for attachment in attachments
+        ]
+
+    def _ensure_turn_overlay_dir(self, turn_id: str) -> Path:
+        root = self._turn_overlay_dir()
+        directory = root / turn_id
+        if not os.environ.get("AKI_TURN_OVERLAY_DIR", "").strip():
+            try:
+                root.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                os.chmod(root.parent, 0o700)
+            except OSError:
+                pass
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        for path in (root, directory):
+            try:
+                os.chmod(path, 0o700)
+            except OSError:
+                pass
+        return directory
+
+    def _build_insertion_record(
+        self, turn: Turn, item: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            seq = int(item.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        text = str(item.get("text") or "")
+        sender = str(item.get("sender") or turn.channel_sender or "user")
+        sender_id = str(item.get("sender_id") or turn.origin_sender_id or "")
+        attachments = tuple(item.get("attachments") or ())
+        insertion_id = str(item.get("insertion_id") or "").strip()
+        if not insertion_id:
+            insertion_id = f"ins-{uuid.uuid4().hex}"
+        try:
+            inserted_at_ms = int(
+                item.get("inserted_at_ms")
+                or item.get("sent_at")
+                or int(time.time() * 1000)
+            )
+        except (TypeError, ValueError):
+            inserted_at_ms = int(time.time() * 1000)
+        inserted_at = str(item.get("inserted_at") or "").strip()
+        if not inserted_at:
+            inserted_at = (
+                datetime.fromtimestamp(inserted_at_ms / 1000, tz=timezone.utc)
+                .astimezone()
+                .isoformat(timespec="milliseconds")
+            )
+        attachment_payload = self._overlay_attachments_payload(attachments)
+        content = render_user_insertion(
+            text,
+            insertion_id=insertion_id,
+            seq=seq,
+            inserted_at=inserted_at,
+            inserted_at_ms=inserted_at_ms,
+            attachments=attachment_payload,
+        )
+        item["insertion_id"] = insertion_id
+        item["inserted_at"] = inserted_at
+        item["inserted_at_ms"] = inserted_at_ms
+        item["insertion_content"] = content
+        return {
+            "schema": "aki.turn-overlay.v1",
+            "turn_id": turn.turn_id,
+            "insertion_id": insertion_id,
+            "seq": seq,
+            "sender": sender,
+            "sender_id": sender_id,
+            "origin_is_agent": False,
+            "inserted_at": inserted_at,
+            "inserted_at_ms": inserted_at_ms,
+            "text": text,
+            "content": content,
+            "sent_at": int(item.get("sent_at") or 0),
+            "attachments": attachment_payload,
+        }
+
+    async def _write_turn_overlay_file(
+        self, turn: Turn, item: dict[str, Any]
+    ) -> Path | None:
+        try:
+            seq = int(item.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        if seq <= 0:
+            return None
+        payload = self._build_insertion_record(turn, item)
+        try:
+            directory = await asyncio.to_thread(
+                self._ensure_turn_overlay_dir, turn.turn_id
+            )
+            path = directory / f"{seq:08d}-{uuid.uuid4().hex}.json"
+            data = (
+                json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+                + "\n"
+            ).encode("utf-8")
+            fd, temporary = tempfile.mkstemp(
+                prefix=f".{path.name}.", dir=str(directory)
+            )
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "wb") as handle:
+                    handle.write(data)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, path)
+                os.chmod(path, 0o600)
+            except BaseException:
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(temporary)
+                raise
+            return path
+        except (OSError, ValueError) as exc:
+            LOGGER.warning(
+                "failed to write turn overlay file turn=%s seq=%s: %s",
+                turn.turn_id,
+                seq,
+                exc,
+            )
+            return None
+
+    @staticmethod
+    def _remove_turn_overlay_file(turn: Turn, seq: int) -> None:
+        path = turn.overlay_files.pop(seq, None)
+        if path is None:
+            return
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+
     async def _push_aki_interjection(
         self,
         turn: Turn,
@@ -4533,19 +4755,12 @@ class GatewayServer:
     ) -> None:
         if not turn.bridge_turn_started or not self._aki_bridge_available():
             return
-        content = render_new_message(
+        content = self._render_during_work_message(
             text,
             sender=sender,
             sender_id=sender_id,
-            source="agent" if from_agent else "user",
-            phase="final",
             seq=seq,
-            untrusted=True,
-            during_work=True,
-            note=(
-                "这条消息在当前 turn 运行期间到达，先纳入再继续。"
-                "它可能补充或修正正在进行的工作，不要忽略。"
-            ),
+            from_agent=from_agent,
         )
         try:
             await self.backend.update_aki_turn(
@@ -4697,7 +4912,18 @@ class GatewayServer:
         turn.finished_at = time.time()
         turn.state = "finished"
         assistant_text = "".join(turn.assistant_parts)
-        if assistant_text:
+        guard_targets: list[tuple[str, str, str]] = []
+        if (
+            reason == "completed"
+            and assistant_text
+            and not contains_no_reply_marker(assistant_text)
+        ):
+            guard_targets = self._unfinished_wait_targets(turn)
+        if guard_targets:
+            turn.wait_guard_blocked = True
+            self.channel_conn.discard_turn_output(turn.turn_id)
+            self._enqueue_wait_guard_turn(turn, guard_targets)
+        if assistant_text and not turn.wait_guard_blocked:
             await self._emit(
                 turn,
                 "assistant_message",
@@ -4709,7 +4935,7 @@ class GatewayServer:
             if reason == "completed":
                 if turn.origin in ("proactive", "solo_notice"):
                     await self._publish_proactive_text(turn, assistant_text)
-                elif turn.origin != "mqtt":
+                elif turn.origin not in ("mqtt", WAIT_GUARD_ORIGIN):
                     self._notify_layer(self._layer_own_character(), assistant_text)
         data: dict[str, Any] = {
             "reason": reason,
@@ -4719,6 +4945,11 @@ class GatewayServer:
             "result": turn.final_result.get("result"),
             "duration_ms": round(((turn.finished_at or time.time()) - (turn.started_at or time.time())) * 1000),
         }
+        if turn.wait_guard_blocked:
+            data["wait_guard"] = True
+            data["wait_targets"] = [
+                name or label for _member_id, name, label in guard_targets
+            ]
         if extra:
             data.update(extra)
         await self._emit(turn, "turn_end", data)
@@ -4732,24 +4963,26 @@ class GatewayServer:
             with contextlib.suppress(Exception):
                 await self.backend.end_aki_turn(turn.turn_id)
             turn.bridge_turn_started = False
-        self._queue_unhandled_busy_messages(turn)
-        if turn.bridge_snapshot_id is not None:
-            task = asyncio.create_task(
-                self._restore_channel_turn_bridge(turn),
-                name=f"channel-bridge-rollback:{turn.turn_id}",
-            )
-            self._turn_tasks.add(task)
-            task.add_done_callback(self._turn_tasks.discard)
-            return
-        if turn.conversation_snapshot is not None:
-            task = asyncio.create_task(
-                self._restore_channel_turn(turn),
-                name=f"channel-rollback:{turn.turn_id}",
-            )
-            self._turn_tasks.add(task)
-            task.add_done_callback(self._turn_tasks.discard)
-            return
-        await self._finalize_turn_state(turn)
+        task = asyncio.create_task(
+            self._complete_finished_turn(turn),
+            name=f"channel-finalize:{turn.turn_id}",
+        )
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+
+    async def _complete_finished_turn(self, turn: Turn) -> None:
+        """Complete rollback, overlay persistence and turn handoff in order."""
+        try:
+            if turn.bridge_snapshot_id is not None:
+                await self._restore_channel_turn_bridge(turn)
+            elif turn.conversation_snapshot is not None:
+                await self._restore_channel_turn(turn)
+        finally:
+            try:
+                await self._finalize_turn_overlays(turn)
+            finally:
+                self._queue_unhandled_busy_messages(turn)
+                await self._finalize_turn_state(turn)
 
     def _queue_unhandled_busy_messages(self, turn: Turn) -> None:
         queued = 0
@@ -4803,8 +5036,6 @@ class GatewayServer:
                 await self._restore_conversation_snapshot(turn.conversation_snapshot)
         except Exception:
             LOGGER.exception("channel conversation rollback failed id=%s", turn.turn_id)
-        finally:
-            await self._finalize_turn_state(turn)
 
     async def _restore_channel_turn_bridge(self, turn: Turn) -> None:
         try:
@@ -4819,8 +5050,267 @@ class GatewayServer:
             )
             if turn.conversation_snapshot is not None:
                 await self._restore_conversation_snapshot(turn.conversation_snapshot)
-        finally:
-            await self._finalize_turn_state(turn)
+
+    @staticmethod
+    def _jsonl_row_text(row: Mapping[str, Any]) -> str:
+        message = row.get("message")
+        if not isinstance(message, Mapping):
+            return ""
+        return _content_text(message.get("content"))
+
+    @classmethod
+    def _is_human_channel_user_row(cls, row: Mapping[str, Any]) -> bool:
+        message = row.get("message")
+        if not isinstance(message, Mapping) or message.get("role") != "user":
+            return False
+        metadata = message.get("metadata")
+        if isinstance(metadata, Mapping) and metadata.get("compaction"):
+            return False
+        text = cls._jsonl_row_text(row)
+        return (
+            "[akid MQTT channel message]" in text
+            and "\nmessage:\n" in text
+        )
+
+    @classmethod
+    def _find_user_role_index(
+        cls,
+        rows: Sequence[Mapping[str, Any]],
+        *,
+        expected_prompt: str = "",
+        human_only: bool = False,
+    ) -> int | None:
+        fallback: int | None = None
+        for index in range(len(rows) - 1, -1, -1):
+            row = rows[index]
+            message = row.get("message")
+            if (
+                row.get("type") != "message"
+                or not isinstance(message, Mapping)
+                or message.get("role") != "user"
+            ):
+                continue
+            metadata = message.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("compaction"):
+                continue
+            text = cls._jsonl_row_text(row)
+            if expected_prompt and expected_prompt in text:
+                return index
+            if cls._is_human_channel_user_row(row):
+                if fallback is None:
+                    fallback = index
+                continue
+            if not human_only and fallback is None:
+                fallback = index
+        return fallback
+
+    @staticmethod
+    def _replace_messages_file(path: Path, data: bytes) -> None:
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            os.chmod(path, 0o600)
+        except BaseException:
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(temporary)
+            raise
+
+    async def _merge_consumed_user_messages(
+        self, turn: Turn, messages: Sequence[Mapping[str, Any]]
+    ) -> None:
+        """Append provider-consumed human messages to the latest human user role."""
+        if not messages:
+            return
+        if turn.origin not in ("mqtt", WAIT_GUARD_ORIGIN):
+            raise ValueError("consumed overlay messages require a channel turn")
+        path = self._conversation_dir() / "messages.jsonl"
+        original = path.read_bytes()
+        lines = original.splitlines(keepends=True)
+        rows: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            if not line.strip():
+                rows.append({})
+                continue
+            try:
+                value = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise ValueError(
+                    f"conversation row {index + 1} is not valid JSON"
+                ) from exc
+            if not isinstance(value, dict):
+                raise ValueError(f"conversation row {index + 1} is not an object")
+            rows.append(value)
+        human_only = turn.origin_is_agent or turn.origin == WAIT_GUARD_ORIGIN
+        target_index = self._find_user_role_index(
+            rows,
+            expected_prompt="" if human_only else turn.message,
+            human_only=human_only,
+        )
+        if target_index is None:
+            raise ValueError("no human user role available for channel merge")
+        target = rows[target_index]
+        message = target.get("message")
+        if not isinstance(message, dict):
+            raise ValueError("target user role has no message object")
+        content = message.get("content")
+        if isinstance(content, str):
+            parts: list[dict[str, Any]] = [{"type": "text", "text": content}]
+        elif isinstance(content, list):
+            parts = [
+                dict(part)
+                if isinstance(part, dict)
+                else {"type": "text", "text": str(part)}
+                for part in content
+            ]
+        else:
+            parts = []
+        blocks: list[str] = []
+        for item in sorted(
+            messages,
+            key=lambda value: (
+                int(value.get("inserted_at_ms") or value.get("sent_at") or 0),
+                int(value.get("seq") or 0),
+            ),
+        ):
+            record_item = item if isinstance(item, dict) else dict(item)
+            record = self._build_insertion_record(turn, record_item)
+            blocks.append(str(record["content"]))
+        rendered = render_user_insertions(
+            blocks, turn_id=turn.turn_id, during_work=True
+        )
+        if rendered:
+            parts.append({"type": "text", "text": rendered})
+        message["content"] = parts
+        metadata = message.get("metadata")
+        if isinstance(metadata, dict):
+            metadata["updated_at"] = now_iso()
+        lines[target_index] = (
+            json.dumps(target, ensure_ascii=False, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        try:
+            self._replace_messages_file(path, b"".join(lines))
+            await self.backend.reload_conversation(
+                conversation_id=self.config.conversation_id,
+                agent_id=self.config.agent_id,
+            )
+        except Exception:
+            with contextlib.suppress(Exception):
+                self._replace_messages_file(path, original)
+                await self.backend.reload_conversation(
+                    conversation_id=self.config.conversation_id,
+                    agent_id=self.config.agent_id,
+                )
+            raise
+        turn.user_role_entry_id = str(target.get("id") or "")
+        turn.merged_user_messages.extend(dict(item) for item in messages)
+
+    def _enqueue_merged_overlay_turn(
+        self, turn: Turn, messages: Sequence[Mapping[str, Any]]
+    ) -> None:
+        ordered = sorted(
+            messages,
+            key=lambda value: (
+                int(value.get("seq") or 0),
+                int(value.get("sent_at") or 0),
+            ),
+        )
+        if not ordered:
+            return
+        text = "\n\n".join(
+            str(item.get("text") or "").strip()
+            for item in ordered
+            if str(item.get("text") or "").strip()
+        )
+        attachments: list[ChannelImageAttachment] = []
+        participants: set[str] = set()
+        for item in ordered:
+            attachments.extend(item.get("attachments") or ())
+            participants.update(item.get("participants") or ())
+        last = ordered[-1]
+        client_message_id = ""
+        for item in reversed(ordered):
+            client_message_id = str(item.get("client_message_id") or "").strip()
+            if client_message_id:
+                break
+        lock_authorized, lock_authorization = self._channel_lock_authorization(
+            text, from_agent=False
+        )
+        self._enqueue_channel_turn(
+            str(last.get("sender") or turn.channel_sender or "user"),
+            str(last.get("sender_id") or turn.origin_sender_id or ""),
+            text,
+            origin_is_agent=False,
+            channel_message_seq=int(last.get("seq") or 0) or None,
+            participants=frozenset(participants),
+            attachments=tuple(attachments),
+            sent_at=int(last.get("sent_at") or 0),
+            lock_authorized=lock_authorized,
+            lock_authorization=lock_authorization,
+            client_message_id=client_message_id or None,
+        )
+        LOGGER.info(
+            "merged unconsumed overlay messages into a persistent turn "
+            "turn=%s count=%s seq=%s",
+            turn.turn_id,
+            len(ordered),
+            last.get("seq"),
+        )
+
+    def _cleanup_turn_overlay_files(self, turn: Turn) -> None:
+        for path in list(turn.overlay_files.values()):
+            with contextlib.suppress(FileNotFoundError):
+                path.unlink()
+        turn.overlay_files.clear()
+        with contextlib.suppress(OSError):
+            (self._turn_overlay_dir() / turn.turn_id).rmdir()
+
+    async def _finalize_turn_overlays(self, turn: Turn) -> None:
+        human_items: list[dict[str, Any]] = []
+        agent_items: list[dict[str, Any]] = []
+        for item in turn.busy_messages:
+            if bool(item.get("origin_is_agent", False)):
+                agent_items.append(item)
+            else:
+                human_items.append(item)
+        turn.busy_messages = agent_items
+        human_items.sort(
+            key=lambda item: (
+                int(item.get("seq") or 0),
+                int(item.get("sent_at") or 0),
+            )
+        )
+        consumed: list[dict[str, Any]] = []
+        unconsumed: list[dict[str, Any]] = []
+        for item in human_items:
+            try:
+                seq = int(item.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            if seq > 0 and seq in turn.waited_user_seqs:
+                self._remove_turn_overlay_file(turn, seq)
+                continue
+            path = turn.overlay_files.get(seq)
+            if path is not None and not path.exists():
+                turn.overlay_consumed_seqs.add(seq)
+                consumed.append(item)
+            else:
+                unconsumed.append(item)
+        if consumed:
+            try:
+                await self._merge_consumed_user_messages(turn, consumed)
+            except Exception:
+                LOGGER.exception(
+                    "failed to merge consumed channel messages into user role "
+                    "turn=%s; keeping them consumed without a duplicate turn",
+                    turn.turn_id,
+                )
+        self._enqueue_merged_overlay_turn(turn, unconsumed)
+        self._cleanup_turn_overlay_files(turn)
 
     async def _finalize_turn_state(self, turn: Turn) -> None:
         if self._wait_user_active:
@@ -6857,9 +7347,16 @@ class GatewayServer:
             if busy:
                 await self._refresh_channel_transcript()
             return
-        active = self.active
-        if from_agent and (active is not None or self.queue):
-            if active is not None and directly_targeted:
+        # A turn that has already sent its end event must not swallow a message
+        # that arrived at the boundary. Route it through the normal queue path
+        # instead of appending it to a turn whose busy list is about to drain.
+        active = (
+            self.active
+            if self.active is not None and not self.active.end_sent
+            else None
+        )
+        if from_agent and active is not None:
+            if directly_targeted:
                 active.busy_messages.append(
                     {
                         "sender": sender,
@@ -6875,44 +7372,31 @@ class GatewayServer:
                         "client_message_id": client_message_id,
                     }
                 )
-                await self._push_aki_interjection(
-                    active,
-                    text,
-                    display_sender,
-                    member_id or sender_id,
-                    entry.seq,
-                    from_agent=True,
-                )
             await self._refresh_channel_transcript()
-            await self._update_busy_turn_overlay(active)
             return
         if not from_agent and active is not None:
-            active.busy_messages.append(
-                {
-                    "sender": sender,
-                    "sender_id": member_id or sender_id,
-                    "text": text,
-                    "seq": entry.seq,
-                    "sent_at": sent_at,
-                    "origin_is_agent": False,
-                    "tool_results_at_arrival": active.tool_result_events,
-                    "pending_tool_results_at_arrival": active.pending_tool_results,
-                    "participants": participants,
-                    "attachments": attachments,
-                    "client_message_id": client_message_id,
-                }
-            )
-            await self._push_aki_interjection(
-                active,
-                text,
-                display_sender,
-                member_id or sender_id,
-                entry.seq,
-                from_agent=False,
-            )
+            item = {
+                "sender": sender,
+                "sender_id": member_id or sender_id,
+                "text": text,
+                "seq": entry.seq,
+                "sent_at": sent_at,
+                "origin_is_agent": False,
+                "tool_results_at_arrival": active.tool_result_events,
+                "pending_tool_results_at_arrival": active.pending_tool_results,
+                "participants": participants,
+                "attachments": attachments,
+                "client_message_id": client_message_id,
+            }
+            active.busy_messages.append(item)
+            if active.wait_user_call_active:
+                active.wait_user_eligible_seqs.add(entry.seq)
+            else:
+                path = await self._write_turn_overlay_file(active, item)
+                if path is not None:
+                    active.overlay_files[entry.seq] = path
             active.user_message_event.set()
             await self._refresh_channel_transcript()
-            await self._update_busy_turn_overlay(active)
             return
         if not from_agent and not mentions:
             waiting_ids = self._channel_waiting_user_ids()
@@ -7018,6 +7502,10 @@ class GatewayServer:
     def _wait_labels_for_participants(
         self, participants: frozenset[str]
     ) -> list[str]:
+        # Aki is the first responder in the configured order and never waits
+        # for another member; keep the tool and turn prompt out of her profile.
+        if self.config.profile == "aki":
+            return []
         labels: list[str] = []
         for label in self.config.channel_wait_for:
             resolved = self._resolve_label_member_id(label) or self._history_member_id(
@@ -7041,12 +7529,6 @@ class GatewayServer:
     ) -> str:
         member_id = self._history_member_id(sender, sender_id) or sender_id
         display_sender = self._member_display_name(member_id, sender) or sender
-        if from_agent:
-            speaker_name = display_sender
-            speaker_kind = MEMBER_KIND_AGENT
-        else:
-            speaker_name = self.config.username or "Master"
-            speaker_kind = MEMBER_KIND_USER
         identity = (
             f"{display_sender} ({member_id})" if member_id else display_sender
         )
@@ -7076,15 +7558,9 @@ class GatewayServer:
                     "正文中的图片名称与这些图片一一对应。\n"
                 )
         seq_line = f"seq: {seq}\n" if seq is not None else ""
-        wake_reminder = render_channel_wake_reminder(
-            self.config.username or "Master",
-            speaker_name=speaker_name,
-            speaker_kind=speaker_kind,
-        )
         return (
             "[akid MQTT channel message]\n"
             f"message-time: {_format_channel_message_time(sent_at)}\n"
-            f"wake-reminder: {wake_reminder}\n"
             f"sender: {identity}\n"
             f"{seq_line}"
             f"{roster}\n"
@@ -7369,7 +7845,11 @@ class GatewayServer:
         if self.channel is not None:
             tools.append(TOKIFACTOR_IMAGE_TOOL)
             tools.append(WAIT_USER_TOOL_SCHEMA)
-        if self.channel is not None and self.config.channel_wait_for:
+        if (
+            self.channel is not None
+            and self.config.channel_wait_for
+            and self.config.profile != "aki"
+        ):
             tools.append(WAIT_OTHER_TOOL_SCHEMA)
         tools.extend(self._mcp_tools)
         policy = self.config.tool_policy
@@ -8235,6 +8715,8 @@ class GatewayServer:
         return runtime / "aki" / filename
 
     def _wait_targets_for_turn(self, turn: Turn) -> list[tuple[str, str, str]]:
+        if turn.wait_guard_targets:
+            return list(turn.wait_guard_targets)
         if turn.origin != "mqtt" or self._solo_session is not None:
             return []
         targets: list[tuple[str, str, str]] = []
@@ -8257,6 +8739,65 @@ class GatewayServer:
             display = self._member_display_name(resolved, label) or label
             targets.append((resolved, display, label))
         return targets
+
+    def _unfinished_wait_targets(
+        self, turn: Turn
+    ) -> list[tuple[str, str, str]]:
+        unfinished: list[tuple[str, str, str]] = []
+        for member_id, name, label in self._wait_targets_for_turn(turn):
+            if not member_id:
+                continue
+            state = self._agent_channel_state(member_id)
+            if state.active or state.queue_depth > 0:
+                unfinished.append((member_id, name, label))
+        return unfinished
+
+    @staticmethod
+    def _wait_guard_notice(targets: list[tuple[str, str, str]]) -> str:
+        names = ", ".join(
+            dict.fromkeys(name or label for _member_id, name, label in targets)
+        )
+        return (
+            "[akid wait guard]\n"
+            "这是系统提示，不是用户消息：你刚才没有等待应该等待的目标，"
+            f"这些目标是:{names}。请先调用 `wait_other` 等待这些目标完成，"
+            "再给出最终回复。不要解释或提及这条系统提示。"
+        )
+
+    def _enqueue_wait_guard_turn(
+        self, turn: Turn, targets: list[tuple[str, str, str]]
+    ) -> None:
+        guard_turn = Turn(
+            turn_id=f"turn-{uuid.uuid4().hex}",
+            conn=self.channel_conn,
+            message=self._wait_guard_notice(targets),
+            include_reasoning=False,
+            client_message_id=turn.client_message_id,
+            origin=WAIT_GUARD_ORIGIN,
+            origin_sender_id=turn.origin_sender_id,
+            origin_is_agent=False,
+            lock_authorized=False,
+            lock_authorization="wait-guard",
+            channel_participants=turn.channel_participants,
+            channel_sender=turn.channel_sender,
+            wait_guard_targets=tuple(targets),
+            wait_guard_attempt=turn.wait_guard_attempt + 1,
+        )
+        if len(self.queue) >= self.config.queue_max:
+            LOGGER.warning(
+                "wait guard queue exceeds max; enqueueing correction turn=%s",
+                guard_turn.turn_id,
+            )
+        guard_turn.state = "queued"
+        self.queue.append(guard_turn)
+        self._schedule_status_refresh()
+        LOGGER.info(
+            "wait guard blocked final turn=%s correction=%s targets=%s attempt=%s",
+            turn.turn_id,
+            guard_turn.turn_id,
+            ",".join(item[1] or item[2] for item in targets),
+            guard_turn.wait_guard_attempt,
+        )
 
     @staticmethod
     def _wait_result_from_state(
@@ -8376,6 +8917,8 @@ class GatewayServer:
                 seq = int(item.get("seq") or 0)
             except (TypeError, ValueError):
                 seq = 0
+            if seq <= 0 or seq not in turn.wait_user_eligible_seqs:
+                continue
             if seq > 0 and seq in turn.waited_user_seqs:
                 continue
             messages.append(item)
@@ -8398,6 +8941,7 @@ class GatewayServer:
                 seq = 0
             if seq > 0:
                 turn.waited_user_seqs.add(seq)
+                GatewayServer._remove_turn_overlay_file(turn, seq)
             item["waited_by_user"] = True
 
     def _format_wait_user_results(
@@ -8489,8 +9033,18 @@ class GatewayServer:
 
         if not turn.wait_user_used:
             turn.wait_user_used = True
+        turn.wait_user_call_active = True
+        try:
             await self._set_wait_user_active(True)
+            await self._wait_for_user_messages(turn, tool_call_id, timeout_s)
+        finally:
+            turn.wait_user_call_active = False
+            with contextlib.suppress(Exception):
+                await self._set_wait_user_active(False)
 
+    async def _wait_for_user_messages(
+        self, turn: Turn, tool_call_id: str, timeout_s: int
+    ) -> None:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         while True:

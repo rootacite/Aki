@@ -112,20 +112,18 @@ deny。同一个 mod 也限制 `Read`/`Grep`/`Glob` 等读取工具：只允许�
 MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的 `[writable] dirs` 保持为空，
 bubblewrap 仍作为底层写入边界。
 
-`<channel-wake-routing>` 是持久 system prompt 块，明确 Agent-Agent 唤醒规则：
+`<channel-wake-routing>` 是英文持久 system prompt 块，明确 Agent-Agent 唤醒规则：
 有 `@成员` 时只唤醒被点名的成员；回复任意位置出现 `@<username>` 时强制只唤醒该 username、不唤醒任何其他成员，
 仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
-都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；每轮 user 消息
-per-turn `<channel-turn>` 里的 `<reply-target>` 会说明“如果你认为当前只需要回复用户”，并提示可用
-`@<username>`（任意位置）只唤醒用户；`<wake-reminder>` 只保留 `^` 排除规则。
+都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；`^` 排除规则和
+“只回复用户时使用 `@<username>`”的提示也属于这个持久块，不再在每轮 user 消息或
+`<channel-turn>` 中重复。
 
 `<channel-policy>` 保存静态频道规则并写入持久 system prompt；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。
 bridge 模式下 `<channel-turn>` 只作为 turn overlay 拼进实际 API 请求的 system prompt，
 不写回 agent record 或 `system-prompt.json`。akid 只接受带 `aki_bridge` 的定制 Letta；
-否则启动直接报错退出。每轮 user 消息只额外重复一条 `wake-reminder`，不复制完整 turn 块。
-这条 `wake-reminder` 还会通过 `当前正在和你说话的是 ${{USERNAME}}` 模板写明当前说话者：
-用户发言填入 profile 的 `[gateway] username`，智能体发言填入成员名，不追加类型标签。bridge 模式下
+否则启动直接报错退出。bridge 模式下
 `<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，不写入持久 user message，
 turn 结束后自然消失。运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`
 和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
@@ -179,18 +177,73 @@ magic` 相同视为同一个群聊，每个 profile 在
 `<live-context>` 在 bridge 模式下同样只作为 per-turn overlay 追加在实际 API 请求末尾，
 不写回 agent record / `system-prompt.json`。它每轮重新采集桌面快照。
 
-当一个智能体正在工作时，新消息先只更新 transcript 并标记 `during-work="true"`，供下一次
-API call 使用。若当前 turn 后续仍有 tool call/API call，用户消息视为已在该 turn 中消费；
-如果当前 turn 已进入最终响应、之后不再有 API call，则用户消息在 turn 结束时补成一个独立
-turn。其他智能体的消息无论是否跨过这个边界都不会补 turn，从而避免中间消息抢占发言。
-例外是被其他智能体明确 `@` 的最终消息：它按用户消息的消费规则处理，若没有后续 API call
-也会在 turn 结束时补成一个独立 turn；预算仍按 agent-to-agent 规则计算。
+当一个智能体正在工作时，真人新消息先写入群聊记录，再原子写入
+`AKI_TURN_OVERLAY_DIR/<turn_id>/<zero-padded-seq>-<uuid>.json`（目录 `0700`、文件
+`0600`）。文件记录 `schema=aki.turn-overlay.v1`、`turn_id`、稳定的
+`insertion_id`、频道 `seq`、`inserted_at`/`inserted_at_ms`、正文和附件；`content`
+是一个 `<user-insertion id=... seq=... inserted-at=... inserted-at-ms=...>` 块，不重复
+输出 during-work note。bridge 在每次 provider 请求前按插入时间读取当前 turn 的文件并
+删除文件，但会把已消费的插入保留到 turn 结束，在之后每次请求中重放为一个
+`<user-insertions turn_id=... count=N during-work="true">` 信封。这样 tool result 之后的
+请求仍能看到同一批补充消息，不会把之前的正确动作误判成幻觉。默认 overlay 目录是
+`backend_dir/aki-turn-overlays/<agent_id>`，由 akid 通过环境变量传给 Letta 子进程。
+
+若 turn 结束前仍有消费机会，文件会被下一次 API call 删除；若没有后续 API call，文件仍在，
+turn 退出时把所有未消费的真人消息按 `seq` 合并成一个新的持久用户 turn。已被 API call
+消费的真人消息则按顺序追加到当前 turn 最近一条真人 user role：用户触发的 turn 更新本次
+turn 的 user role，智能体触发的 turn 先回滚临时 prompt/assistant/tool 消息，再更新 snapshot
+中最近一条真人 user role。合并使用一个 `<user-insertions>` 文本 part，内部按插入时间排列
+多个 `<user-insertion>` 块，不新增独立 user 消息；
+写入 `messages.jsonl` 后通过 bridge `reload_conversation` 让下一次 API 请求读到合并结果。
+合并或 reload 失败时只记录错误，不把已消费消息退回未消费路径；它们已经进入过 provider
+上下文，重新排 turn 会让模型对同一句话再回复一次。未消费消息仍按文件是否仍存在判断。
+
+`wait_guard` correction turn 没有自己的频道 user role；它消费到的真人插入会合并到最近一条
+真人频道 user role，而不是因为 origin 不是 `mqtt` 退回成第二个用户 turn。这样护栏打回后
+模型在同一个 correction turn 里回复一次，turn 退出时只更新持久上下文，不重复产出。
+
+需要复现上游 provider 行为时，可分别开启 bridge 与 loopback proxy 的 API capture。
+Bridge 的 `AKI_API_CALL_CAPTURE` 记录 overlay 应用后的 provider 上下文；proxy 的
+`AKI_RAW_API_CALL_CAPTURE_DIR` 记录真正转发给上游的 JSON payload 与 body hash。两层都按
+profile 独立启用、目录 `0700`、文件 `0600`，并对大段 base64 做脱敏；它们是诊断工具，不是
+常规日志，排查结束后应删除 capture 目录。
+
+群聊记录本身始终在消息送达时立即追加，不等待 turn 结束，也不做插入块合并。用户在一次
+turn 中插入多条消息时，群聊历史里就是多条独立的普通用户消息；插入边界和插入时间只存在于
+provider overlay 与 conversation 的 user-role 合并结果中。
+
+`wait_user` 活跃期间到达的真人消息优先作为 `WAIT_USER_RESULT` 返回，不写 overlay 文件；
+已通过等待结果返回的 seq 不会在 turn 退出时重复补 turn。其他智能体的消息仍沿用原有逐个
+deferred 逻辑，不会跨消费边界补 turn；被明确 `@` 的智能体最终消息仍按原规则处理，预算按
+agent-to-agent 规则计算。turn 退出顺序固定为：结束 bridge turn → 完成必要回滚 → 合并已消费
+消息 → 入队未消费消息 → 清理 overlay 文件 → 完成 turn 状态。
 
 多智能体需要固定发言顺序时，每个 profile 可在 `[channel] wait_for` 中声明前序成员。
 配置非空时会注册隐藏 external tool `wait_other`：模型在最终回复前调用它，akid 等待
 这些前序成员当前的 `turn_end`，把最终回复作为工具结果返回。工具事件不写入频道；目标
 空闲时最多等 3 秒启动宽限，目标显式离线或 30 秒心跳超时后立即结束并报告掉线成员。
-已开始工作的目标没有固定完成超时。该机制是提示词驱动，不强制模型必须调用。
+已开始工作的目标没有固定完成超时。turn 提示使用全英文强制措辞（`You MUST call
+wait_other once`，并说明提前发言不合规）。该机制仍是提示词驱动，不强制模型必须调用。
+Aki 永远是前序成员的起点，配置和代码层都不注册/渲染 `wait_other`。
+
+### `wait_other` 的 final 护栏
+
+框架仍不会在 provider 请求前强制等待，也不会把成员改回串行化；`wait_other` 依然是模型
+应当主动调用的提示词工具。额外增加一层 final 兜底：当 turn 正常结束、准备发布最终回复时，
+akid 检查本轮 `wait_for` 目标的状态，只要任一目标仍然 `active` 或有排队 turn，就拒绝这次
+final 进入 MQTT/群聊。旧 turn 的 final 被丢弃，不发到频道，也不写频道历史；只发送一个
+带 `ignored=true` 的 ended 事件，让客户端关闭旧 turn。
+
+随后 akid 入队一个 `origin=wait_guard` 的系统 turn，注入：
+
+```text
+这是系统提示，不是用户消息：你刚才没有等待应该等待的目标，这些目标是:{targets}
+```
+
+该 turn 继承原 turn 的 participant、`wait_for` 目标和 `clientMessageId`，但不再消耗主动
+启动次数，也不获得非只读执行锁。模型可在其中正常调用 `wait_other`；等到目标完成后再输出
+的 final 会走正常频道发布。若新 final 到达时目标仍在工作，护栏会再次拒绝并生成下一轮
+correction turn。这样既不改变并发和推理时序，也避免模型忽略提示词时提前抢答。
 
 频道还会注册隐藏 external tool `wait_user(timeout_s)`。它只允许由真人消息触发的 turn 调用，
 只等待该 turn 触发者的下一条真人消息；`timeout_s` 必须是 1–25 的整数。新消息到达后立即
