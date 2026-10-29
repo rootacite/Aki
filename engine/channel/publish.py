@@ -7,16 +7,25 @@ import contextlib
 import json
 import time
 import uuid
+from pathlib import Path
+from typing import Any
 from engine.tokifactor import (
     CONTROL_TOPIC,
+    FILE_CHUNK_BYTES,
+    FILE_TOPIC,
+    MAX_FILE_BYTES,
     MAX_IMAGE_BYTES,
     MAX_MESSAGE_ATTACHMENTS,
     MAX_MESSAGE_IMAGE_BYTES,
     PICTURE_TOPIC,
     detect_image_mime,
+    encode_file_abort,
+    encode_file_chunk,
     encode_picture_abort,
     encode_picture_payloads,
     encode_text_payloads,
+    sanitize_file_name,
+    sha256_file,
 )
 from .constants import ChannelUnavailable
 
@@ -220,6 +229,85 @@ class PublishMixin:
             "name": caption or "",
             "attachment_index": int(attachment_index),
             "attachment_count": int(attachment_count),
+        }
+
+
+    async def publish_file(
+        self,
+        path: Path,
+        *,
+        name: str = "",
+        source_path: str = "",
+        message_id: str = "",
+    ) -> dict[str, Any]:
+        """Publish one local file as tokifactor file-transfer chunks."""
+        client = self._client
+        if client is None or not self._connected:
+            raise ChannelUnavailable("channel is not connected")
+        stat = await asyncio.to_thread(path.stat)
+        size = stat.st_size
+        if size > MAX_FILE_BYTES:
+            raise ValueError(f"file exceeds {MAX_FILE_BYTES} bytes")
+        digest = await asyncio.to_thread(sha256_file, path)
+        transfer_id = message_id or str(uuid.uuid4())
+        file_name = sanitize_file_name(name or path.name)
+        source = source_path or str(path)
+        total = max(1, (size + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES)
+        event_at = int(time.time() * 1000)
+
+        def read_slice(index: int) -> bytes:
+            with path.open("rb") as handle:
+                handle.seek(index * FILE_CHUNK_BYTES)
+                return handle.read(FILE_CHUNK_BYTES)
+
+        semaphore = asyncio.Semaphore(8)
+
+        async def publish_one(index: int) -> None:
+            async with semaphore:
+                data = await asyncio.to_thread(read_slice, index)
+                payload = encode_file_chunk(
+                    data,
+                    self.magic,
+                    transfer_id=transfer_id,
+                    index=index,
+                    total=total,
+                    digest=digest,
+                    name=file_name,
+                    sender=self.sender_name,
+                    sender_id=self.sender_id,
+                    avatar_hash=self._avatar_hash,
+                    sent_at=event_at,
+                    size=size,
+                    source_path=source,
+                )
+                await client.publish(FILE_TOPIC, payload.encode("utf-8"), qos=1)
+
+        async with self._file_lock:
+            try:
+                await asyncio.gather(
+                    *(publish_one(index) for index in range(total))
+                )
+            except Exception:
+                with contextlib.suppress(Exception):
+                    abort = encode_file_abort(
+                        transfer_id,
+                        sender=self.sender_name,
+                        sender_id=self.sender_id,
+                        reason="fail",
+                    )
+                    await client.publish(FILE_TOPIC, abort.encode("utf-8"), qos=1)
+                raise
+        self._files_sent += 1
+        self._last_file_at = time.time()
+        return {
+            "transfer_id": transfer_id,
+            "bytes": size,
+            "chunks": total,
+            "name": file_name,
+            "path": source,
+            "topic": FILE_TOPIC,
+            "message_id": transfer_id,
+            "sha256": digest,
         }
 
 

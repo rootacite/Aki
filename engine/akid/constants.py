@@ -41,6 +41,8 @@ _NO_REPLY_MARKER_RE = re.compile(
 
 TOKIFACTOR_IMAGE_TOOL_NAME = "tokifactor_send_image"
 
+TOKIFACTOR_FILE_TOOL_NAME = "tokifactor_send_file"
+
 CAMERA_TOOL_NAME = "camera_take_photo"
 
 SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
@@ -51,6 +53,7 @@ SEARCH_CHAT_HISTORY_TOOL_NAME = "search_chat_history"
 
 EXTERNAL_TOOL_NAMES = {
     TOKIFACTOR_IMAGE_TOOL_NAME,
+    TOKIFACTOR_FILE_TOOL_NAME,
     CAMERA_TOOL_NAME,
     SCREENSHOT_TOOL_NAME,
     IMAGE_GENERATION_TOOL_NAME,
@@ -184,6 +187,34 @@ TOKIFACTOR_IMAGE_TOOL = {
     },
     "auto_background": False,
     "timeout_ms": 180000,
+}
+
+
+TOKIFACTOR_FILE_TOOL = {
+    "name": TOKIFACTOR_FILE_TOOL_NAME,
+    "label": "Send tokifactor file",
+    "description": (
+        "Send an existing local file to the shared tokifactor channel using "
+        "tokifactor's file-transfer protocol. The path must be absolute and "
+        "readable; the containing directory does not need to be writable or "
+        "registered. The transfer is recorded in group or solo channel history "
+        "as a short message containing only the sender and file path; it does "
+        "not start any member turn. This tool does not require the execution "
+        "lock. Returns the transfer id, byte count, chunk count, and name."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Absolute path to an existing local file.",
+            },
+        },
+        "required": ["path"],
+        "additionalProperties": False,
+    },
+    "auto_background": False,
+    "timeout_ms": 600000,
 }
 
 
@@ -385,6 +416,7 @@ CAPABILITIES = {
     "multiclient": True,
     "writable_dirs": True,
     "tokifactor_image_tool": True,
+    "tokifactor_file_tool": True,
     "camera_tool": True,
     "screenshot_tool": True,
     "image_generation_tool": True,

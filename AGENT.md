@@ -297,12 +297,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   写入 `/tmp` 与 `~/.local/share/tmp`，并做 realpath 校验；同一 mod 也限制
   `Read/Grep/Glob` 只能读临时目录和 Letta MemFS/工具归档，不能调查仓库代码。
   `[tools] allow` 额外包含隐藏工具 `wait_other`、`wait_user`；`[writable] dirs` 为空，bubblewrap 作为第二层边界。
-  已注册桌面截图、相机、频道发图、MiniMax 文生图 `generate_image`，并启用桌面实况。
+  已注册桌面截图、相机、频道发图与发文件、MiniMax 文生图 `generate_image`，并启用桌面实况。
   文生图走 `[upstream.minimax]` 与 `[image]`，固定 `image-01`、base64 回传和
   `/tmp/aki/images` 输出；生成结果只返回路径与元数据，分享时再调用
-  `tokifactor_send_image`。`generate_image` 与 `tokifactor_send_image` 都是非只读工具，
-  但显式免执行锁，不需要先调用 `acquire_execution_lock`；生图审批仍由
-  `[image] require_approval` 控制。`generate_image` 还是 Haru 的
+  `tokifactor_send_image`。`generate_image`、`tokifactor_send_image` 与
+  `tokifactor_send_file` 都是非只读工具，但显式免执行锁，不需要先调用
+  `acquire_execution_lock`；生图审批仍由 `[image] require_approval` 控制。
+  `generate_image` 还是 Haru 的
   exclusive tool：其他成员不会注册该工具，会在 `<tool-ownership>` 中看到
   “图片创作/文生图归 Haru”并以 `@Haru` 转交。MCP、TTS、视频和 ComfyUI 留到后续阶段。
 - 频道 turn 时间：每条 user role 频道 prompt 的前缀包含
@@ -314,9 +315,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `${{USERNAME}}` 占位符替换为 profile 的 `[gateway] username`，智能体发言使用成员名，
   不再追加类型标签。运行时不再生成 prompt journal；`scripts/restore-channel-prompts.py`
   和 `scripts/migrate-channel-prompts.py` 仅用于迁移历史记录，默认 dry-run。
-- 唤醒规则集中在英文持久 `<channel-wake-routing>`：`@成员` 只唤醒被点名者，`^成员` 排除
-  指定成员，无标记则唤醒全部其他在线成员；“只回复用户时使用 `@<username>`”和 `^` 排除
-  提示也写在这里，不再在每轮 user message 或 `<turn-control>` 中重复。Aki 的
+- 唤醒规则集中在英文持久 `<channel-wake-routing>`：显式 `@成员` 只唤醒被点名者并优先于
+  `@<username>`，`^成员` 排除指定成员；没有显式 `@成员` 时，`@<username>` 只唤醒用户而不
+  触发全局唤醒，无任何标记则唤醒全部其他在线成员；“只回复用户时使用 `@<username>`”和
+  `^` 排除提示也写在这里，不再在每轮 user message 或 `<turn-control>` 中重复。Aki 的
   `<channel-wait-for>` 为空，且代码层禁止 Aki 注册/渲染 `wait_other`。
 - `wait_for` 的 final 兜底护栏：turn 正常结束时，如果配置的前序成员仍在 working 或有排队
   turn，akid 丢弃本次 final（不进 MQTT、群聊和频道历史），只发送 `ignored=true` 的 ended
@@ -357,6 +359,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片，不为此调用
   `tokifactor_send_image`。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
   user role 中新增的多模态 base64 和后续消息全部消失。
+- 频道文件：`tokifactor_send_file` 读取任意可读的绝对路径文件，不要求所在目录可写或已注册，
+  按 tokifactor 的 `tokifactor/file` 分片协议加密发布。发送成功后在当前群聊
+  或独处历史中追加一条短记录：正文只写发送者文件路径，发送者/成员身份沿用普通历史字段；
+  该记录不创建、不唤醒任何成员 turn。其他 profile 订阅文件分片时先落盘到自己的
+  `~/.aki/channel-media/<channel-key>/<profile>/files/`，只记录历史、不启动 turn；若分片里
+  带原始路径且本机文件的大小和 SHA-256 与传输一致，历史记录原始路径，否则记录本地落盘路径。
+  文件记录不会作为多模态输入，需要内容时再由 Agent 读取记录的路径。
 - 内联表情：每个 profile 可从 `assets/emoji/<profile>/index.json` 获得自己的表情目录。
   akid 只把经过校验的 `name`/`desc` 注入 `<channel-policy>` 内的 `<emoji-catalog>`，
   不把图片、路径或 base64 放进 prompt。对模型公开的唯一规范格式是

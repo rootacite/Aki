@@ -242,6 +242,9 @@ class AvatarsMixin:
             "images_sent": self._images_sent,
             "images_received": self._images_received,
             "last_image_at": self._last_image_at,
+            "files_sent": self._files_sent,
+            "files_received": self._files_received,
+            "last_file_at": self._last_file_at,
             "session": {
                 "client_id": self.session_client_id,
                 "persistent": True,

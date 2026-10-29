@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import tempfile
 import unittest
+from pathlib import Path
 
 from engine.tokifactor import (
     AvatarEnvelope,
+    FileChunkAssembler,
     TextChunkAssembler,
     TextEnvelope,
     decode_envelope,
@@ -15,6 +18,8 @@ from engine.tokifactor import (
     encode_envelope,
     encode_avatar_have,
     encode_avatar_want,
+    encode_file_abort,
+    encode_file_payloads,
     encode_text_payloads,
     encode_picture_abort,
     encode_picture_payloads,
@@ -22,6 +27,7 @@ from engine.tokifactor import (
     decrypt_bytes,
     looks_like_chunk,
     message_id_for,
+    parse_file_chunk,
     parse_text_chunk,
     parse_avatar_envelope,
 )
@@ -337,6 +343,71 @@ class TokifactorWireTests(unittest.TestCase):
         self.assertIsNotNone(chunk)
         assert chunk is not None
         self.assertTrue(chunk["text_commit"])
+
+    def test_file_payload_round_trip_with_path_metadata(self) -> None:
+        data = b"file body\x00\xff" + b"x" * (150 * 1024)
+        transfer_id, payloads = encode_file_payloads(
+            data,
+            MAGIC,
+            sender="akid",
+            sender_id="akid",
+            name="../../notes.txt",
+            source_path="/tmp/notes.txt",
+        )
+        self.assertTrue(transfer_id)
+        self.assertEqual(len(payloads), 3)
+        pieces: list[bytes] = []
+        for payload in payloads:
+            chunk = parse_file_chunk(payload)
+            self.assertIsNotNone(chunk)
+            assert chunk is not None
+            self.assertEqual(chunk["name"], "notes.txt")
+            self.assertEqual(chunk["source_path"], "/tmp/notes.txt")
+            self.assertEqual(chunk["size"], len(data))
+            encrypted = base64.b64decode(chunk["encrypted_data"], validate=True)
+            pieces.append(decrypt_bytes(encrypted, MAGIC))
+        self.assertEqual(b"".join(pieces), data)
+
+    def test_file_assembler_writes_verified_payload(self) -> None:
+        data = b"assembled file" * 9000
+        transfer_id, payloads = encode_file_payloads(
+            data,
+            MAGIC,
+            sender="Fuyu",
+            sender_id="fuyu-1",
+            name="report.bin",
+            source_path="/home/test/report.bin",
+        )
+        with tempfile.TemporaryDirectory() as tempdir:
+            assembler = FileChunkAssembler(MAGIC, Path(tempdir))
+            result = None
+            for payload in payloads:
+                chunk = parse_file_chunk(payload)
+                self.assertIsNotNone(chunk)
+                assert chunk is not None
+                result = assembler.add(chunk)
+            self.assertIsNotNone(result)
+            assert result is not None
+            self.assertEqual(result.transfer_id, transfer_id)
+            self.assertEqual(result.sender, "Fuyu")
+            self.assertEqual(result.sender_id, "fuyu-1")
+            self.assertEqual(result.name, "report.bin")
+            self.assertEqual(result.source_path, "/home/test/report.bin")
+            self.assertEqual(result.size, len(data))
+            self.assertEqual(Path(result.staged_path).read_bytes(), data)
+            self.assertEqual(
+                result.sha256, hashlib.sha256(data).hexdigest()
+            )
+
+    def test_file_abort_shape(self) -> None:
+        payload = encode_file_abort(
+            "transfer-file", sender="akid", sender_id="akid", reason="fail"
+        )
+        chunk = parse_file_chunk(payload)
+        self.assertIsNotNone(chunk)
+        assert chunk is not None
+        self.assertTrue(chunk["abort"])
+        self.assertEqual(chunk["transfer_id"], "transfer-file")
 
     def test_picture_abort_shape(self) -> None:
         payload = encode_picture_abort(

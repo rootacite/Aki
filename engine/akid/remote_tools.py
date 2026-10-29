@@ -148,6 +148,52 @@ class RemoteToolsMixin:
         await self._external_tool_success(turn, tool_call_id, text)
 
 
+    async def _handle_tokifactor_file_tool(
+        self,
+        turn: Turn,
+        tool_call_id: str,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        if self.channel is None:
+            await self._external_tool_failure(
+                turn, tool_call_id, "tokifactor file not sent: channel is disabled"
+            )
+            return
+        if self.config.tokifactor_file_require_approval:
+            allow, reason = await self._request_approval(
+                turn,
+                approval_id=f"external-{tool_call_id}",
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_input=tool_input,
+                extra={"external": True, "channel": "tokifactor-file"},
+            )
+            if not allow:
+                await self._external_tool_failure(
+                    turn,
+                    tool_call_id,
+                    f"tokifactor file not sent: {reason or 'denied'}",
+                )
+                return
+        try:
+            result = await self._execute_tokifactor_send_file(tool_input)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._external_tool_failure(
+                turn, tool_call_id, f"tokifactor file send failed: {exc}"
+            )
+            return
+        text = (
+            "sent tokifactor file "
+            f"transfer_id={result['transfer_id']} bytes={result['bytes']} "
+            f"chunks={result['chunks']} name={result['name']} path={result['path']} "
+            f"topic={result['topic']}"
+        )
+        await self._external_tool_success(turn, tool_call_id, text)
+
+
     async def _handle_image_generation_tool(
         self,
         turn: Turn,

@@ -130,7 +130,9 @@ Before calling a non-read-only tool, call `acquire_execution_lock`. The lock is 
 
 Exception: tools listed in `<tool-ownership>` as exclusive to you are profile-scoped state tools authorized by ownership; they do not require the device-wide lock, and you should not call `acquire_execution_lock` before them. Never use that exception for another member's exclusive tools.
 
-`generate_image` and `tokifactor_send_image` are explicitly lock-exempt. You may call them directly without `acquire_execution_lock`; approval policy is configured separately. Do not use this exemption for other tools.
+`generate_image`, `tokifactor_send_image`, and `tokifactor_send_file` are explicitly lock-exempt. You may call them directly without `acquire_execution_lock`; approval policy is configured separately. Do not use this exemption for other tools.
+
+Channel files: `tokifactor_send_file` publishes the file through tokifactor and records a short channel-history entry containing only the sender and the file path. It never starts a member turn, so do not call it when the user wants a reply or reaction; send a normal message for that.
 
 Channel images: dynamic history records only `{"name":"图片1","path":"/local/path"}` and never base64. Images in the new message that triggered the current turn are already attached as multimodal input in their listed order, so you do not need `ViewImage` for them. Older history images require `ViewImage` on the recorded path. To embed an image in one outgoing channel message, do not call `tokifactor_send_image`; write `#[/absolute/path/to/image]` in the final reply. The directive becomes the image attachment name and is removed from the published text.
 

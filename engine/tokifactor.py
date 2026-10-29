@@ -11,13 +11,17 @@ status, and offline messages.
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
 import os
+import re
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Mapping
 
 try:  # pragma: no cover - availability is covered by the runtime check below
@@ -57,12 +61,18 @@ MAX_INBOUND_CHUNKS = 512
 MAX_INBOUND_CHUNK_BYTES = 2 * 1024 * 1024
 INCOMPLETE_TIMEOUT_S = 5.0
 PICTURE_TOPIC = "tokifactor/picture"
+FILE_TOPIC = "tokifactor/file"
 AVATAR_TOPIC = "tokifactor/avatar"
 CONTROL_TOPIC = "tokifactor/control"
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_MESSAGE_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_MESSAGE_ATTACHMENTS = 4
 MAX_ATTACHMENT_NAME_CHARS = 64
+FILE_CHUNK_BYTES = 64 * 1024
+MAX_FILE_BYTES = 256 * 1024 * 1024
+MAX_INBOUND_FILE_CHUNKS = 65536
+MAX_FILE_NAME_CHARS = 200
+FILE_TRANSFER_TIMEOUT_S = 60.0
 STRUCTURED_FIELDS = (
     "schema",
     "kind",
@@ -160,6 +170,20 @@ class ImageEnvelope:
 
 
 @dataclass(frozen=True)
+class FileEnvelope:
+    sender: str
+    staged_path: str
+    sender_id: str = ""
+    name: str = ""
+    source_path: str = ""
+    sent_at: int = 0
+    size: int = 0
+    transfer_id: str = ""
+    avatar_hash: str = ""
+    sha256: str = ""
+
+
+@dataclass(frozen=True)
 class AvatarEnvelope:
     type: str
     id: str
@@ -178,6 +202,22 @@ class _InboundTransfer:
     sent_at: int = 0
     metadata: dict[str, str] = field(default_factory=dict)
     size: int = 0
+    last_seen: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class _InboundFileTransfer:
+    total: int
+    expected_hash: str
+    directory: Path
+    sender: str = "Unknown"
+    sender_id: str = ""
+    sent_at: int = 0
+    name: str = ""
+    source_path: str = ""
+    size: int = 0
+    received: int = 0
+    parts: set[int] = field(default_factory=set)
     last_seen: float = field(default_factory=time.monotonic)
 
 
@@ -333,6 +373,24 @@ def _int_value(value: Any, default: int = 0) -> int:
         return default
 
 
+def sanitize_file_name(raw: str) -> str:
+    leaf = raw.replace("\\", "/").rsplit("/", 1)[-1].replace("\x00", "").strip()
+    if leaf in ("", ".", ".."):
+        return "file.bin"
+    return leaf[:MAX_FILE_NAME_CHARS]
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
 def encode_avatar_have(sender_id: str, avatar_hash: str, data: str) -> str:
     return _encode_object(
         [
@@ -469,6 +527,79 @@ def parse_text_chunk(payload: str) -> dict[str, Any] | None:
     }
 
 
+def parse_file_chunk(payload: str) -> dict[str, Any] | None:
+    try:
+        value = json.loads(payload)
+    except ValueError:
+        value = None
+    if not isinstance(value, dict):
+        value = {
+            key: extract_string(payload, key)
+            for key in (
+                "id",
+                "hash",
+                "encrypted_data",
+                "name",
+                "sender",
+                "senderId",
+                "avatarHash",
+                "sentAt",
+                "size",
+                "path",
+                "status",
+                "reason",
+            )
+        }
+    transfer_id = str(value.get("id") or "")
+    sender = str(value.get("sender") or "Unknown")
+    sender_id = str(value.get("senderId") or "")
+    sent_at = _int_value(value.get("sentAt"))
+    if str(value.get("status") or "").lower() == "abort":
+        return {
+            "abort": True,
+            "transfer_id": transfer_id.split(":", 1)[0],
+            "sender": sender,
+            "sender_id": sender_id,
+            "sent_at": sent_at,
+            "reason": str(value.get("reason") or "cancel"),
+        }
+    parts = transfer_id.split(":")
+    if len(parts) != 3 or not parts[0]:
+        return None
+    try:
+        index = int(parts[1])
+        total = int(parts[2])
+    except ValueError:
+        return None
+    if index < 0 or total <= 0 or index >= total or total > MAX_INBOUND_FILE_CHUNKS:
+        return None
+    encrypted = value.get("encrypted_data")
+    digest = value.get("hash")
+    if not isinstance(encrypted, str) or not encrypted or not isinstance(digest, str) or not digest:
+        return None
+    try:
+        size = int(value.get("size") or 0)
+    except (TypeError, ValueError):
+        size = 0
+    if size < 0 or size > MAX_FILE_BYTES:
+        return None
+    return {
+        "abort": False,
+        "transfer_id": parts[0],
+        "index": index,
+        "total": total,
+        "hash": digest,
+        "encrypted_data": encrypted,
+        "name": sanitize_file_name(str(value.get("name") or "")),
+        "sender": sender,
+        "sender_id": sender_id,
+        "avatar_hash": str(value.get("avatarHash") or ""),
+        "sent_at": sent_at,
+        "size": size,
+        "source_path": str(value.get("path") or ""),
+    }
+
+
 class TextChunkAssembler:
     def __init__(self, magic_string: str) -> None:
         self.magic_string = magic_string
@@ -535,6 +666,146 @@ class TextChunkAssembler:
         cutoff = time.monotonic() - INCOMPLETE_TIMEOUT_S
         for key in [key for key, value in self._transfers.items() if value.last_seen < cutoff]:
             self._transfers.pop(key, None)
+
+
+class FileChunkAssembler:
+    """Assemble file chunks on disk so large transfers do not grow memory."""
+
+    def __init__(
+        self,
+        magic_string: str,
+        staging_root: Path | None = None,
+    ) -> None:
+        self.magic_string = magic_string
+        self.staging_root = Path(staging_root) if staging_root is not None else None
+        self._transfers: dict[str, _InboundFileTransfer] = {}
+        self._temporary_root: Path | None = None
+
+    def add(self, chunk: dict[str, Any]) -> FileEnvelope | None:
+        self._expire()
+        transfer_id = str(chunk.get("transfer_id") or "")
+        if not transfer_id:
+            return None
+        transfer = self._transfers.get(transfer_id)
+        if chunk.get("abort"):
+            self._discard(transfer_id)
+            return None
+        index = int(chunk.get("index", 0))
+        total = int(chunk.get("total", 0))
+        if total <= 0 or total > MAX_INBOUND_FILE_CHUNKS or index < 0 or index >= total:
+            self._discard(transfer_id)
+            return None
+        if transfer is None:
+            transfer = _InboundFileTransfer(
+                total=total,
+                expected_hash=str(chunk.get("hash") or ""),
+                directory=self._transfer_directory(transfer_id),
+                sender=str(chunk.get("sender") or "Unknown"),
+                sender_id=str(chunk.get("sender_id") or ""),
+                sent_at=_int_value(chunk.get("sent_at")),
+                name=sanitize_file_name(str(chunk.get("name") or "")),
+                source_path=str(chunk.get("source_path") or ""),
+                size=int(chunk.get("size") or 0),
+            )
+            self._transfers[transfer_id] = transfer
+        if transfer.total != total:
+            self._discard(transfer_id)
+            return None
+        try:
+            encrypted = base64.b64decode(str(chunk.get("encrypted_data") or ""), validate=True)
+            clear = decrypt_bytes(encrypted, self.magic_string)
+        except (ValueError, DecodeError):
+            return None
+        if index in transfer.parts:
+            transfer.last_seen = time.monotonic()
+            return None
+        transfer.received += len(clear)
+        if transfer.received > MAX_FILE_BYTES:
+            self._discard(transfer_id)
+            return None
+        try:
+            transfer.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if transfer.directory.is_symlink() or not transfer.directory.is_dir():
+                raise ValueError("file transfer staging path is not a directory")
+            part = transfer.directory / f"{index}.part"
+            temporary = part.with_name(f".{part.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_bytes(clear)
+                os.chmod(temporary, 0o600)
+                os.replace(temporary, part)
+            finally:
+                with contextlib.suppress(OSError):
+                    temporary.unlink()
+        except OSError:
+            self._discard(transfer_id)
+            return None
+        transfer.parts.add(index)
+        transfer.last_seen = time.monotonic()
+        if len(transfer.parts) < total:
+            return None
+        payload = transfer.directory / "payload"
+        try:
+            with payload.open("wb") as output:
+                for part_index in range(total):
+                    part = transfer.directory / f"{part_index}.part"
+                    with part.open("rb") as source:
+                        while True:
+                            block = source.read(1024 * 1024)
+                            if not block:
+                                break
+                            output.write(block)
+                    part.unlink(missing_ok=True)
+            actual = sha256_file(payload)
+        except OSError:
+            self._discard(transfer_id)
+            return None
+        self._transfers.pop(transfer_id, None)
+        if actual.lower() != transfer.expected_hash.lower():
+            with contextlib.suppress(OSError):
+                payload.unlink()
+            with contextlib.suppress(OSError):
+                transfer.directory.rmdir()
+            return None
+        return FileEnvelope(
+            sender=transfer.sender,
+            staged_path=str(payload),
+            sender_id=transfer.sender_id,
+            name=transfer.name,
+            source_path=transfer.source_path,
+            sent_at=transfer.sent_at,
+            size=transfer.received,
+            transfer_id=transfer_id,
+            avatar_hash=str(chunk.get("avatar_hash") or ""),
+            sha256=actual,
+        )
+
+    def _transfer_directory(self, transfer_id: str) -> Path:
+        if self.staging_root is None:
+            if self._temporary_root is None:
+                self._temporary_root = Path(tempfile.mkdtemp(prefix="aki-files-"))
+            root = self._temporary_root
+        else:
+            root = self.staging_root
+        safe = re.sub(r"[^A-Za-z0-9._-]", "_", transfer_id)[:96] or "transfer"
+        return root / safe
+
+    def _discard(self, transfer_id: str) -> None:
+        transfer = self._transfers.pop(transfer_id, None)
+        if transfer is None:
+            return
+        with contextlib.suppress(OSError):
+            for path in transfer.directory.iterdir():
+                path.unlink(missing_ok=True)
+            transfer.directory.rmdir()
+
+    def _expire(self) -> None:
+        cutoff = time.monotonic() - FILE_TRANSFER_TIMEOUT_S
+        for key in [
+            key
+            for key, value in self._transfers.items()
+            if value.last_seen < cutoff
+        ]:
+            self._discard(key)
 
 
 class ImageChunkAssembler:
@@ -688,6 +959,97 @@ def encode_text_payloads(
         chunk = _encode_object(pairs)
         payloads.append(chunk)
     return payloads
+
+
+def encode_file_chunk(
+    data: bytes,
+    magic_string: str,
+    *,
+    transfer_id: str,
+    index: int,
+    total: int,
+    digest: str,
+    name: str,
+    sender: str,
+    sender_id: str,
+    avatar_hash: str = "",
+    sent_at: int = 0,
+    size: int = 0,
+    source_path: str = "",
+) -> str:
+    encrypted = base64.b64encode(encrypt_bytes(data, magic_string)).decode("ascii")
+    pairs = [
+        ("id", f"{transfer_id}:{index}:{total}"),
+        ("hash", digest),
+        ("encrypted_data", encrypted),
+        ("name", sanitize_file_name(name)),
+        ("sender", sender),
+        ("senderId", sender_id),
+        ("avatarHash", avatar_hash),
+        ("size", str(max(0, size))),
+    ]
+    if sent_at > 0:
+        pairs.append(("sentAt", str(sent_at)))
+    if source_path:
+        pairs.append(("path", source_path))
+    return _encode_object(pairs)
+
+
+def encode_file_payloads(
+    data: bytes,
+    magic_string: str,
+    *,
+    sender: str,
+    sender_id: str,
+    name: str,
+    avatar_hash: str = "",
+    sent_at: int | None = None,
+    source_path: str = "",
+) -> tuple[str, list[str]]:
+    transfer_id = str(uuid.uuid4())
+    digest = hashlib.sha256(data).hexdigest()
+    total = max(1, (len(data) + FILE_CHUNK_BYTES - 1) // FILE_CHUNK_BYTES)
+    event_at = int(sent_at if sent_at is not None else time.time() * 1000)
+    payloads = [
+        encode_file_chunk(
+            data[index * FILE_CHUNK_BYTES : (index + 1) * FILE_CHUNK_BYTES],
+            magic_string,
+            transfer_id=transfer_id,
+            index=index,
+            total=total,
+            digest=digest,
+            name=name,
+            sender=sender,
+            sender_id=sender_id,
+            avatar_hash=avatar_hash,
+            sent_at=event_at,
+            size=len(data),
+            source_path=source_path,
+        )
+        for index in range(total)
+    ]
+    return transfer_id, payloads
+
+
+def encode_file_abort(
+    transfer_id: str,
+    *,
+    sender: str,
+    sender_id: str,
+    reason: str = "fail",
+) -> str:
+    return _encode_object(
+        [
+            ("id", f"{transfer_id}:0:1"),
+            ("hash", ""),
+            ("encrypted_data", ""),
+            ("name", ""),
+            ("sender", sender),
+            ("senderId", sender_id),
+            ("status", "abort"),
+            ("reason", reason or "fail"),
+        ]
+    )
 
 
 def detect_image_mime(data: bytes) -> str | None:

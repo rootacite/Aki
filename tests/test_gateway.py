@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -42,7 +43,7 @@ from engine.live_context import (
     render_turn_control,
 )
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
-from engine.tokifactor import ImageEnvelope, TextEnvelope
+from engine.tokifactor import FileEnvelope, ImageEnvelope, TextEnvelope
 from engine.member_identity import legacy_member_id
 from tests.fake_mqtt_broker import FakeMqttBroker
 from tests.test_image_generation import FakeMiniMaxImageAPI
@@ -166,6 +167,7 @@ class FakeChannel:
         self.published: list[tuple[str, Any]] = []
         self.events: list[dict[str, Any]] = []
         self.images: list[dict[str, Any]] = []
+        self.files: list[dict[str, Any]] = []
         self.control: list[tuple[str, dict[str, str]]] = []
         self.connected = True
 
@@ -216,6 +218,27 @@ class FakeChannel:
         if text.strip() or not results:
             await self.publish_text(text, metadata, message_id=message_id)
         return {"message_id": message_id, "images": results}
+
+    async def publish_file(
+        self,
+        path: Path,
+        *,
+        name: str = "",
+        source_path: str = "",
+        message_id: str = "",
+    ) -> dict[str, Any]:
+        stat = path.stat()
+        result = {
+            "transfer_id": f"fake-file-transfer-{len(self.files) + 1}",
+            "bytes": stat.st_size,
+            "chunks": 1,
+            "name": name or path.name,
+            "path": source_path or str(path),
+            "topic": "tokifactor/file",
+            "message_id": message_id or f"fake-file-transfer-{len(self.files) + 1}",
+        }
+        self.files.append({"path": str(path), **result})
+        return result
 
     async def publish_notice(self, text: str) -> None:
         self.published.append(("notice", text))
@@ -425,6 +448,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         wait_backend: bool = True,
         channel: Any | None = None,
         image_require_approval: bool = False,
+        file_require_approval: bool = False,
         mqtt_enabled: bool = False,
         mqtt_host: str = "127.0.0.1",
         mqtt_port: int = 1883,
@@ -478,6 +502,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             bwrap_bin=bwrap_bin,
             writable_state=writable_state,
             tokifactor_image_require_approval=image_require_approval,
+            tokifactor_file_require_approval=file_require_approval,
             mqtt_enabled=mqtt_enabled,
             mqtt_host=mqtt_host,
             mqtt_port=mqtt_port,
@@ -1566,11 +1591,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         wake_block = server._channel_wake_routing_block()
         self.assertIn("<channel-wake-routing", wake_block)
         self.assertIn(
-            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
+            "If the reply contains `@MemberName `: wake ONLY the mentioned members",
             wake_block,
         )
         self.assertIn(
-            "If there is no `@` but the reply contains `^MemberName`", wake_block
+            "If the reply contains no `@MemberName ` but contains `@Master`", wake_block
         )
         self.assertIn("use `@Master`; the marker may appear anywhere in the reply", wake_block)
 
@@ -1696,6 +1721,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         await wait_until(lambda: len(fake_channel.final_texts()) == 4)
         self.assertEqual(fake_channel.events_of("turn")[-1]["wake"], "all")
+
+        state = ChannelTurnState(text="@Master\n@Fuyu 提醒 Fuyu。")
+        await server.channel_conn._flush_progress(
+            "turn-master-with-mention", 5, state, force=True, phase="final"
+        )
+        await wait_until(lambda: len(fake_channel.final_texts()) == 5)
+        master_mention_event = fake_channel.events_of("turn")[-1]
+        self.assertEqual(master_mention_event["text"], "@Fuyu 提醒 Fuyu。")
+        self.assertEqual(master_mention_event["wake"], "mentions")
+        self.assertEqual(master_mention_event["wakeIds"], "fuyu")
 
     async def test_agent_reply_wake_scope_controls_turns(self) -> None:
         fake_channel = FakeChannel()
@@ -5180,6 +5215,86 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await respond_approval(server, approval["approval_id"], allow=True)
         await task
         self.assertEqual(len(fake_channel.images), 1)
+
+    async def test_tokifactor_file_external_tool_records_path_without_extra_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        await wait_until(lambda: server._external_tools_registered)
+        file_path = self.root / "notes.txt"
+        file_path.write_text("hello from the file tool", encoding="utf-8")
+        result = await channel_send(server, f"EXTERNAL_FILE:{file_path}")
+        self.assertFalse(result.events_of("approval"))
+        self.assertEqual(len(fake_channel.files), 1)
+        self.assertEqual(fake_channel.files[0]["path"], str(file_path))
+        self.assertIn("external tool result: sent tokifactor file", result.final_text)
+        entry = next(
+            entry for entry in reversed(server._channel_history)
+            if entry.text == str(file_path)
+        )
+        self.assertTrue(entry.from_agent)
+        self.assertEqual(entry.message_id, fake_channel.files[0]["transfer_id"])
+        self.assertEqual(len(fake_channel.final_texts()), 1)
+        self.assertIsNone(server.active)
+        self.assertFalse(server.queue)
+
+    async def test_tokifactor_file_external_tool_allows_readonly_source(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        await wait_until(lambda: server._external_tools_registered)
+        file_path = ROOT / "README.md"
+        self.assertTrue(file_path.is_file())
+        result = await channel_send(server, f"EXTERNAL_FILE:{file_path}")
+        self.assertEqual(len(fake_channel.files), 1)
+        self.assertEqual(fake_channel.files[0]["path"], str(file_path))
+        self.assertIn("external tool result: sent tokifactor file", result.final_text)
+
+    async def test_tokifactor_file_external_tool_can_require_approval(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, file_require_approval=True
+        )
+        await wait_until(lambda: server._external_tools_registered)
+        file_path = self.root / "approval-file.txt"
+        file_path.write_text("approval needed", encoding="utf-8")
+        task = asyncio.create_task(
+            channel_send(server, f"EXTERNAL_FILE:{file_path}")
+        )
+        approval = await wait_for_approval(server)
+        self.assertEqual(approval["tool_name"], "tokifactor_send_file")
+        await respond_approval(server, approval["approval_id"], allow=True)
+        await task
+        self.assertEqual(len(fake_channel.files), 1)
+
+    async def test_incoming_file_records_sender_and_path_without_turn(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        data = b"incoming file body"
+        source = self.root / "received-source.bin"
+        source.write_bytes(data)
+        incoming = self.root / "incoming-payload"
+        incoming.mkdir()
+        staged = incoming / "payload"
+        staged.write_bytes(data)
+        await server._on_channel_file(
+            FileEnvelope(
+                sender="Fuyu",
+                sender_id="fuyu-1",
+                name="report.bin",
+                source_path=str(source),
+                staged_path=str(staged),
+                sent_at=1234,
+                size=len(data),
+                transfer_id="transfer-file-1",
+                sha256=hashlib.sha256(data).hexdigest(),
+            )
+        )
+        entry = server._channel_history[-1]
+        self.assertEqual(entry.text, str(source))
+        self.assertEqual(entry.message_id, "transfer-file-1")
+        self.assertEqual(entry.sent_at, 1234)
+        self.assertIsNone(server.active)
+        self.assertFalse(server.queue)
+        self.assertFalse(fake_channel.events_of("turn"))
 
     def _fake_ffmpeg(self) -> Path:
         path = self.root / "fake-ffmpeg"

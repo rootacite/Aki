@@ -39,6 +39,7 @@ from .constants import (
     IMAGE_GENERATION_TOOL_NAME,
     LOGGER,
     SCREENSHOT_TOOL_NAME,
+    TOKIFACTOR_FILE_TOOL_NAME,
     TOKIFACTOR_IMAGE_TOOL_NAME,
 )
 from .paths import (
@@ -288,6 +289,7 @@ class HealthMixin:
             "mcp_native_servers": list(self._mcp_native_active_servers),
             "require_approval": {
                 TOKIFACTOR_IMAGE_TOOL_NAME: self.config.tokifactor_image_require_approval,
+                TOKIFACTOR_FILE_TOOL_NAME: self.config.tokifactor_file_require_approval,
                 CAMERA_TOOL_NAME: self.config.camera_require_approval,
                 SCREENSHOT_TOOL_NAME: self.config.screenshot_require_approval,
                 IMAGE_GENERATION_TOOL_NAME: bool(

@@ -40,6 +40,7 @@ from .constants import (
     LOGGER,
     MCP_TOOL_PREFIX,
     SCREENSHOT_TOOL_NAME,
+    TOKIFACTOR_FILE_TOOL_NAME,
     TOKIFACTOR_IMAGE_TOOL_NAME,
 )
 
@@ -115,6 +116,7 @@ class ExclusiveMixin:
             return
         if tool_name not in (
             TOKIFACTOR_IMAGE_TOOL_NAME,
+            TOKIFACTOR_FILE_TOOL_NAME,
             CAMERA_TOOL_NAME,
             SCREENSHOT_TOOL_NAME,
             IMAGE_GENERATION_TOOL_NAME,
@@ -124,6 +126,10 @@ class ExclusiveMixin:
             return
         if tool_name == TOKIFACTOR_IMAGE_TOOL_NAME:
             await self._handle_tokifactor_image_tool(
+                turn, tool_call_id, tool_name, tool_input
+            )
+        elif tool_name == TOKIFACTOR_FILE_TOOL_NAME:
+            await self._handle_tokifactor_file_tool(
                 turn, tool_call_id, tool_name, tool_input
             )
         elif tool_name == SCREENSHOT_TOOL_NAME:

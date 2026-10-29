@@ -63,6 +63,17 @@ class FakeChannel:
     async def publish_control(self, _text, metadata, **kwargs) -> None:
         self.controls.append(dict(metadata))
 
+    async def publish_file(self, path, *, name="", source_path="", message_id=""):
+        return {
+            "transfer_id": message_id or "solo-file-transfer",
+            "bytes": path.stat().st_size,
+            "chunks": 1,
+            "name": name or path.name,
+            "path": source_path or str(path),
+            "topic": "tokifactor/file",
+            "message_id": message_id or "solo-file-transfer",
+        }
+
 
 class SoloModeTests(unittest.TestCase):
     def test_magic_is_stable_and_member_specific(self) -> None:
@@ -437,6 +448,40 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.server.channel_history_path = path
         self.server._persist_channel_history()
         self.assertIn('"seq":1', path.read_text(encoding="utf-8"))
+
+    async def test_solo_file_tool_records_sender_and_path_in_solo_history(self) -> None:
+        await self.server._on_channel_control(
+            TextEnvelope(
+                sender="Master",
+                text="solo start",
+                sender_id="master",
+                metadata={
+                    "schema": "akid.v1",
+                    "kind": "solo_start",
+                    "protocolVersion": "1",
+                    "memberKind": "user",
+                    "soloId": "solo-file-1",
+                    "soloTargetId": "legacy_aki",
+                    "soloTargetName": "Aki",
+                    "soloStartedAt": "2026-10-27T10:00:00Z",
+                },
+            )
+        )
+        self.assertIsNotNone(self.server._solo_session)
+        file_path = self.root / "solo-notes.txt"
+        file_path.write_text("private notes", encoding="utf-8")
+        await self.server._execute_tokifactor_send_file({"path": str(file_path)})
+        solo_rows = self.server.solo_channel_history_path.read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertTrue(any(str(file_path) in row for row in solo_rows))
+        group_path = self.server.group_channel_history_path
+        if group_path.is_file():
+            self.assertNotIn(
+                str(file_path), group_path.read_text(encoding="utf-8")
+            )
+        self.assertIsNone(self.server.active)
+        self.assertFalse(self.server.queue)
 
     async def test_solo_session_is_summarized_and_kept_out_of_group_memory(self) -> None:
         await self.server._on_channel_control(

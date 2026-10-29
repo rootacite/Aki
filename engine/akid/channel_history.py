@@ -6,8 +6,10 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import time
 import uuid
+from pathlib import Path
 from engine.aki_config import atomic_write
 from engine.emoji_catalog import load_emoji_entries
 from engine.channel_history import (
@@ -23,8 +25,11 @@ from engine.member_profile import (
     normalize_member_kind,
 )
 from engine.tokifactor import (
+    FileEnvelope,
     MAX_ATTACHMENT_NAME_CHARS,
     detect_image_mime,
+    sanitize_file_name,
+    sha256_file,
 )
 from .constants import (
     CHANNEL_TRANSCRIPT_MAX_RECORDS,
@@ -161,6 +166,88 @@ class ChannelHistoryMixin:
             return None
 
 
+    def _channel_file_root(self) -> Path:
+        return self._channel_media_root() / "files"
+
+
+    def _channel_file_staging_root(self) -> Path:
+        return self._channel_file_root() / ".incoming"
+
+
+    def _store_channel_file(self, file: FileEnvelope) -> str | None:
+        root = self._channel_file_root()
+        name = sanitize_file_name(file.name)
+        directory = root / self._safe_media_component(file.transfer_id or uuid.uuid4().hex)
+        try:
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if directory.is_symlink() or not directory.is_dir():
+                raise ValueError("channel file path is not a directory")
+            resolved_root = root.resolve(strict=True)
+            resolved_directory = directory.resolve(strict=True)
+            if resolved_root not in resolved_directory.parents:
+                raise ValueError("channel file path escaped its root")
+            destination = resolved_directory / name
+            source = Path(file.staged_path)
+            try:
+                os.replace(source, destination)
+            except OSError:
+                shutil.copyfile(source, destination)
+                source.unlink(missing_ok=True)
+            os.chmod(destination, 0o600)
+            with contextlib.suppress(OSError):
+                source.parent.rmdir()
+            return str(destination)
+        except OSError as exc:
+            LOGGER.warning("failed to store channel file: %s", exc)
+            return None
+
+
+    @staticmethod
+    def _channel_file_record_path(file: FileEnvelope, stored_path: str) -> str:
+        raw = file.source_path.strip()
+        if raw:
+            candidate = Path(raw)
+            try:
+                if candidate.is_absolute() and candidate.is_file():
+                    if (
+                        candidate.stat().st_size == file.size
+                        and file.sha256
+                        and sha256_file(candidate).lower() == file.sha256.lower()
+                    ):
+                        return str(candidate)
+            except OSError:
+                pass
+        return stored_path
+
+
+    def _cleanup_channel_files(self) -> None:
+        root = self._channel_file_root()
+        keep = {
+            entry.text
+            for entry in self._channel_history
+            if entry.text and entry.text.startswith("/")
+        }
+        if not root.is_dir() or root.is_symlink():
+            return
+        for directory in root.iterdir():
+            if directory.name == ".incoming":
+                continue
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            if str(directory) in keep:
+                continue
+            remaining = False
+            for path in directory.iterdir():
+                if str(path) in keep:
+                    remaining = True
+                elif path.is_file():
+                    with contextlib.suppress(OSError):
+                        path.unlink()
+            if not remaining:
+                with contextlib.suppress(OSError):
+                    directory.rmdir()
+
+
     def _cleanup_channel_media(self) -> None:
         root = self._channel_media_root()
         keep = {
@@ -172,6 +259,8 @@ class ChannelHistoryMixin:
         if not root.is_dir() or root.is_symlink():
             return
         for directory in root.iterdir():
+            if directory.name == "files":
+                continue
             if not directory.is_dir() or directory.is_symlink():
                 continue
             for path in directory.iterdir():
@@ -346,6 +435,7 @@ class ChannelHistoryMixin:
         )
         self._channel_transcript_status.pop("last_history_error", None)
         self._cleanup_channel_media()
+        self._cleanup_channel_files()
 
 
     def _emoji_entries(self) -> list[EmojiEntry]:

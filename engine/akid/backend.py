@@ -15,6 +15,7 @@ from .constants import (
     MCP_TOOL_PREFIX,
     SCREENSHOT_TOOL,
     SEARCH_CHAT_HISTORY_TOOL,
+    TOKIFACTOR_FILE_TOOL,
     TOKIFACTOR_IMAGE_TOOL,
     WAIT_OTHER_TOOL_SCHEMA,
     WAIT_USER_TOOL_SCHEMA,
@@ -74,6 +75,7 @@ class BackendMixin:
             tools.append(SCREENSHOT_TOOL)
         if self.channel is not None:
             tools.append(TOKIFACTOR_IMAGE_TOOL)
+            tools.append(TOKIFACTOR_FILE_TOOL)
             tools.append(WAIT_USER_TOOL_SCHEMA)
         if (
             self.channel is not None

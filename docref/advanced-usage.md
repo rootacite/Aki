@@ -157,7 +157,7 @@ Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和
 
 Haru profile 使用 `userdata3/`、`aki-haru` provider 和 7723 proxy 端口，默认模型句柄
 是 `aki-haru/gemini-3.8-flash`。她的 `[tools]` 段显式把工具收窄为 `Read,Write,Edit,ViewImage,
-Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
+Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
 从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
 bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
@@ -575,26 +575,27 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 不会猜测。
 
 每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。profile username 不在智能体成员
-列表中，普通回复直接说话即可；回复中任意位置的 `@<username>`（例如 `@Master`）表示这条回复
-只对该 username 说、无需打扰其他成员，会强制只唤醒该 username。本地 turn 不包含频道 transcript 或 turn
+列表中，普通回复直接说话即可；当回复没有显式 `@成员` 时，任意位置的 `@<username>`（例如
+`@Master`）表示这条回复只对该 username 说、无需打扰其他成员，会只唤醒该 username。若同时写了
+显式 `@成员`，则以 `@成员` 为准，`@<username>` 只从正文移除、不再抑制这些唤醒。本地 turn 不包含频道 transcript 或 turn
 块；`<channel-identity>` 与 `<channel-wake-routing>` 作为 turn overlay 刷新，`<live-context>` 在
 bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
 的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `<turn-control>` 中重复。
 
-- 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
-- 任意位置写 `@<username>`：如果你认为只需要回复该 username、无需打扰其他人，使用它；它会强制只唤醒该 username。该标记发布前会被移除。
-- 无 `@`、正文中写 `^成员名`：不唤醒被 `^` 排除的成员，其余其他在线成员仍会唤醒；标记发布前会被移除。
-- 无 `@`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
+- 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员；即使同时写了 `@<username>` 也如此。
+- 没有显式 `@成员`、但任意位置写 `@<username>`：只唤醒该 username，不触发全局唤醒；该标记发布前会被移除。
+- 无显式 `@成员`、无 `@<username>`、正文中写 `^成员名`：不唤醒被 `^` 排除的成员，其余其他在线成员仍会唤醒；标记发布前会被移除。
+- 无显式 `@成员`、无 `@<username>`、无 `^成员名`：唤醒所有其他在线成员，保持原有默认行为。
 
-因此，只想让用户看到、不要惊动其他 agent 时，可以在回复任意位置写 `@Master`；也可以继续
-使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。`@<username>` 可放在任意位置，并从发布内容中移除，但回复
-仍会写入频道消息记录。
+因此，只想让用户看到、不要惊动其他 agent，且没有显式点名成员时，可以在回复任意位置写
+`@Master`；也可以继续使用完整的 `^` 排除名单（例如 `^Aki ^Fuyu`）。`@<username>` 可放在任意位置，
+并从发布内容中移除，但回复仍会写入频道消息记录。
 
-出现 `@<username>` 时不唤醒任何其他成员；其他情况下 `^` 优先于 `@`：同一条回复里同时写
-`@Aki` 和 `^Aki` 时不会唤醒 Aki。非唤醒标记只接受已知 agent 成员的名字或别名，且不会对
-用户生效。
+没有显式 `@成员` 时，出现 `@<username>` 不唤醒任何其他成员；有显式 `@成员` 时，`@<username>`
+不会抑制这些唤醒，且 `^` 仍然优先于 `@`：同一条回复里同时写 `@Aki` 和 `^Aki` 时不会唤醒
+Aki。非唤醒标记只接受已知 agent 成员的名字或别名，且不会对用户生效。
 
 这些选择只影响立即唤醒范围；回复本身始终写入频道消息记录，供后续 turn 的
 `<channel-transcript>` 使用。群聊消息记录独立于该块是否持久化，始终保留在频道历史中。
@@ -773,6 +774,21 @@ akid 通过 Letta external tool 协议注册独立工具 `tokifactor_send_image`
   `--tokifactor-image-require-approval`。启用后本地客户端或频道
   `akid-approve` 都可以批准。
 - 返回 `transfer_id`、字节数、分片数和 MIME 类型。
+
+`tokifactor_send_file` 用于发送任意本地文件：
+
+```json
+{"path": "/tmp/example.pdf"}
+```
+
+- 只要求路径是绝对路径且文件可读；所在目录不需要可写，也不需要在可写目录注册表中。
+- 使用 tokifactor `FileChunk` 协议加密分片发布到 `tokifactor/file`，不占用整机执行锁。
+- 发送成功后，发送者历史只追加发送者与绝对路径，不生成普通文字消息，也不触发任何成员 turn。
+- 其他 profile 收到文件后写入自己的 `channel-media/<channel-key>/<profile>/files/`，历史同样
+  只记录发送者和路径，不触发 turn。群聊和独处分别写入各自历史。
+- 如需审批，可设置 `AKI_TOKIFACTOR_FILE_REQUIRE_APPROVAL=1` 或启动时加
+  `--tokifactor-file-require-approval`。
+- 返回 `transfer_id`、字节数、分片数、文件名和路径。
 
 ### 文生图（MiniMax）
 

@@ -419,6 +419,7 @@ class HaruLettaIntegrationTests(unittest.TestCase):
                         "acquire_execution_lock",
                         "search_chat_history",
                         "tokifactor_send_image",
+                        "tokifactor_send_file",
                         "wait_user",
                         "wait_other",
                     ],

@@ -12,15 +12,19 @@ from engine.mqtt_client import MqttClient
 from engine.tokifactor import (
     AVATAR_TOPIC,
     CONTROL_TOPIC,
+    FILE_TOPIC,
+    FileEnvelope,
     PICTURE_TOPIC,
     decrypt_bytes,
     decode_single_payload,
     encode_avatar_have,
     encode_avatar_want,
+    encode_file_payloads,
     encode_text_payloads,
     encrypt_bytes,
     ImageEnvelope,
     parse_avatar_envelope,
+    parse_file_chunk,
     parse_text_chunk,
 )
 from engine.tokifactor import TextEnvelope
@@ -57,6 +61,7 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
             sender_id="akid",
             on_text=self._on_text,
             on_image=self._on_image,
+            on_file=self._on_file,
             on_control=self._on_control,
         )
         self.peer: MqttClient | None = None
@@ -68,9 +73,18 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.control_messages: list[TextEnvelope] = []
         self.control_payloads: list[TextEnvelope] = []
         self.images_received: list[ImageEnvelope] = []
+        self.files_received: list[FileEnvelope] = []
 
     async def asyncTearDown(self) -> None:
         await self.channel.stop()
+        for file in self.files_received:
+            Path(file.staged_path).unlink(missing_ok=True)
+            file_dir = Path(file.staged_path).parent
+            if file_dir.name and file_dir.name != "tmp":
+                try:
+                    file_dir.rmdir()
+                except OSError:
+                    pass
         if self.peer is not None:
             await self.peer.close()
         await self.broker.stop()
@@ -93,6 +107,9 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
 
     async def _on_image(self, image: ImageEnvelope, replayed: bool = False) -> None:
         self.images_received.append(image)
+
+    async def _on_file(self, file: FileEnvelope, replayed: bool = False) -> None:
+        self.files_received.append(file)
 
     def _peer_message(self, topic: str, payload: bytes, replayed: bool = False) -> None:
         if topic == AVATAR_TOPIC:
@@ -450,6 +467,74 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.message_id, "mixed-1")
         self.assertEqual(image.name, "图片1")
         self.assertEqual(image.data, PNG_1X1)
+
+    async def test_file_transfer_round_trip(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-file-send-test",
+            on_message=lambda *_: None,
+        )
+        await self.peer.connect()
+        data = b"channel file transfer" * 5000
+        _, payloads = encode_file_payloads(
+            data,
+            MAGIC,
+            sender="alice",
+            sender_id="alice-1",
+            name="report.bin",
+            source_path="/home/alice/report.bin",
+        )
+        for payload in payloads:
+            await self.peer.publish(FILE_TOPIC, payload.encode("utf-8"), qos=1)
+        await wait_until(lambda: bool(self.files_received))
+        received = self.files_received[0]
+        self.assertEqual(received.sender, "alice")
+        self.assertEqual(received.sender_id, "alice-1")
+        self.assertEqual(received.name, "report.bin")
+        self.assertEqual(received.source_path, "/home/alice/report.bin")
+        self.assertEqual(Path(received.staged_path).read_bytes(), data)
+
+    async def test_publish_file_streams_encrypted_chunks(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        received: list[str] = []
+
+        async def on_peer_message(topic: str, payload: bytes, replayed: bool = False) -> None:
+            if topic == FILE_TOPIC:
+                received.append(payload.decode("utf-8"))
+
+        self.peer = MqttClient(
+            "127.0.0.1",
+            self.broker.port,
+            client_id="peer-file-receive-test",
+            on_message=on_peer_message,
+        )
+        await self.peer.connect()
+        await self.peer.subscribe(FILE_TOPIC, qos=1)
+        data = b"published file contents" * 6000
+        with tempfile.TemporaryDirectory() as tempdir:
+            path = Path(tempdir) / "payload.bin"
+            path.write_bytes(data)
+            result = await self.channel.publish_file(path, source_path=str(path))
+            await wait_until(lambda: len(received) == result["chunks"])
+        chunks = [parse_file_chunk(payload) for payload in received]
+        parsed = sorted(
+            (chunk for chunk in chunks if chunk is not None),
+            key=lambda chunk: chunk["index"],
+        )
+        self.assertEqual(len(parsed), result["chunks"])
+        self.assertEqual(parsed[0]["source_path"], str(path))
+        pieces = [
+            decrypt_bytes(
+                base64.b64decode(chunk["encrypted_data"], validate=True), MAGIC
+            )
+            for chunk in parsed
+        ]
+        self.assertEqual(b"".join(pieces), data)
 
     async def test_avatar_have_want_and_message_hash(self) -> None:
         self.channel = TokifactorChannel(

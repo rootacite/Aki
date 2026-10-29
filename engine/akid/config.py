@@ -83,6 +83,7 @@ class GatewayConfig:
     writable_state: Path | None = None
     letta_home: Path | None = None
     tokifactor_image_require_approval: bool = False
+    tokifactor_file_require_approval: bool = False
     camera_enabled: bool = True
     camera_require_approval: bool = True
     camera_device: str = "/dev/video0"

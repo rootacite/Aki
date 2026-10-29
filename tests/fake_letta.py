@@ -397,6 +397,47 @@ class FakeLetta:
                 }
             )
             return
+        if "EXTERNAL_FILE:" in content:
+            marker = "EXTERNAL_FILE:"
+            path_value = content.split(marker, 1)[1].splitlines()[0].strip()
+            tool_call_id = f"file-tool-{number}"
+            self.request_tool(
+                "tokifactor_send_file",
+                {"path": path_value},
+                tool_call_id,
+            )
+            emit(
+                {
+                    "type": "control_request",
+                    "request_id": f"ext-{tool_call_id}",
+                    "request": {
+                        "subtype": "execute_external_tool",
+                        "tool_call_id": tool_call_id,
+                        "tool_name": "tokifactor_send_file",
+                        "input": {"path": path_value},
+                    },
+                }
+            )
+            response = self.wait_for_response(f"ext-{tool_call_id}") or {}
+            parts = response.get("content") or []
+            text = "".join(
+                part.get("text", "")
+                for part in parts
+                if isinstance(part, dict) and part.get("type") == "text"
+            )
+            emitted = f"external tool result: {text}"
+            emit_chunk(
+                {"message_type": "assistant_message", "content": [{"type": "text", "text": emitted}]}
+            )
+            emit(
+                {
+                    "type": "result",
+                    "subtype": "success",
+                    "stop_reason": "end_turn",
+                    "result": emitted,
+                }
+            )
+            return
         if "EXTERNAL_CAMERA" in content:
             tool_call_id = f"camera-tool-{number}"
             camera_device = os.environ.get(

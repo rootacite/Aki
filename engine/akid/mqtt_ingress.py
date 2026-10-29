@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import time
+from pathlib import Path
 from engine.live_context import (
     CHANNEL_WAKE_ALL,
     CHANNEL_WAKE_MENTIONS,
@@ -16,7 +18,7 @@ from engine.member_profile import (
     MEMBER_KIND_USER,
     normalize_member_kind,
 )
-from engine.tokifactor import MAX_ATTACHMENT_NAME_CHARS
+from engine.tokifactor import FileEnvelope, MAX_ATTACHMENT_NAME_CHARS
 from .constants import (
     CHANNEL_IMAGE_GROUP_GRACE_S,
     CHANNEL_IMAGE_GROUP_TIMEOUT_S,
@@ -287,6 +289,50 @@ class MqttIngressMixin:
             )
         else:
             self._schedule_attachment_finalize(message_id, CHANNEL_IMAGE_GROUP_TIMEOUT_S)
+
+
+    async def _on_channel_file(self, file: FileEnvelope, replayed: bool = False) -> None:
+        transfer_id = file.transfer_id or ""
+        if transfer_id and any(
+            entry.message_id == transfer_id for entry in self._channel_history
+        ):
+            with contextlib.suppress(OSError):
+                Path(file.staged_path).unlink()
+            return
+        stored = await asyncio.to_thread(self._store_channel_file, file)
+        if stored is None:
+            with contextlib.suppress(OSError):
+                Path(file.staged_path).unlink()
+            return
+        record_path = await asyncio.to_thread(
+            self._channel_file_record_path, file, stored
+        )
+        sender = file.sender or "Unknown"
+        sender_id = file.sender_id or ""
+        member_id = self._history_member_id(sender, sender_id) or sender_id
+        display_sender = self._member_display_name(member_id, sender) or sender
+        from_agent = self._channel_sender_is_agent(sender, sender_id, {})
+        busy = self._channel_busy()
+        entry = self._record_channel_message(
+            sender=display_sender,
+            sender_id=member_id or sender_id,
+            text=record_path,
+            from_agent=from_agent,
+            message_id=transfer_id,
+            sent_at=file.sent_at,
+            phase="final",
+            arrived_while_busy=busy,
+        )
+        LOGGER.info(
+            "channel file message recorded without turn seq=%s transfer_id=%s "
+            "sender_id=%s path=%s",
+            entry.seq,
+            transfer_id or "unknown",
+            member_id or sender_id or "unknown",
+            record_path,
+        )
+        if busy:
+            await self._refresh_channel_transcript()
 
 
     def _take_complete_attachment_group(

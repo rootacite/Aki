@@ -385,6 +385,8 @@ class ServerMixin:
                 avatar_cache_path=self.channel_history_path.with_suffix(".avatars"),
                 on_text=self._on_channel_text,
                 on_image=self._on_channel_image,
+                on_file=self._on_channel_file,
+                file_staging_dir=self._channel_file_staging_root(),
                 on_control=self._on_channel_control,
                 on_connected=self._on_channel_connected,
                 logger=logging.getLogger("akid.channel"),

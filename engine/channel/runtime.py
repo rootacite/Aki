@@ -16,18 +16,22 @@ from engine.mqtt_client import (
 from engine.tokifactor import (
     AVATAR_TOPIC,
     CONTROL_TOPIC,
+    FILE_TOPIC,
+    FileChunkAssembler,
     ImageChunkAssembler,
     PICTURE_TOPIC,
     TextChunkAssembler,
     crypto_available,
     decode_single_payload,
     looks_like_chunk,
+    parse_file_chunk,
     parse_text_chunk,
 )
 from .constants import (
     CHANNEL_INBOX_MAX,
     DEDUP_MAX_IDS,
     DEFAULT_MAGIC,
+    FileHandler,
     REPLAY_GRACE_SECONDS,
     TEXT_TOPIC,
 )
@@ -50,6 +54,8 @@ class RuntimeMixin:
         avatar_cache_path: Path | None = None,
         on_text: TextHandler,
         on_image: ImageHandler | None = None,
+        on_file: FileHandler | None = None,
+        file_staging_dir: Path | None = None,
         on_control: ControlHandler | None = None,
         on_connected: Callable[[], Awaitable[None]] | None = None,
         logger: logging.Logger | None = None,
@@ -74,6 +80,7 @@ class RuntimeMixin:
         self._avatar_mime = avatar_mime
         self.on_text = on_text
         self.on_image = on_image
+        self.on_file = on_file
         self.on_control = on_control
         self.on_connected = on_connected
         self.logger = logger or logging.getLogger("akid.channel")
@@ -87,9 +94,11 @@ class RuntimeMixin:
         ] = asyncio.Queue(maxsize=CHANNEL_INBOX_MAX)
         self._publish_lock = asyncio.Lock()
         self._image_lock = asyncio.Lock()
+        self._file_lock = asyncio.Lock()
         self._avatar_publish_task: asyncio.Task[None] | None = None
         self._assembler = TextChunkAssembler(magic)
         self._image_assembler = ImageChunkAssembler(magic)
+        self._file_assembler = FileChunkAssembler(magic, file_staging_dir)
         self._recent: dict[str, float] = {}
         self.dedup_path = dedup_path
         self.avatar_cache_path = avatar_cache_path
@@ -110,6 +119,11 @@ class RuntimeMixin:
         self._seen_image_transfers: list[str] = []
         self._seen_image_transfer_set: set[str] = set()
         self._last_image_at: float | None = None
+        self._files_sent = 0
+        self._files_received = 0
+        self._seen_file_transfers: list[str] = []
+        self._seen_file_transfer_set: set[str] = set()
+        self._last_file_at: float | None = None
         self._avatar_published = False
         self._last_published_avatar_hash: str | None = None
         self._avatar_last_error: str | None = None
@@ -143,6 +157,9 @@ class RuntimeMixin:
         self.magic = magic
         self._assembler = TextChunkAssembler(magic)
         self._image_assembler = ImageChunkAssembler(magic)
+        self._file_assembler = FileChunkAssembler(
+            magic, self._file_assembler.staging_root
+        )
 
 
     def discard_inbox(self) -> int:
@@ -233,6 +250,12 @@ class RuntimeMixin:
                 except MqttError as exc:
                     self.logger.warning("picture subscription failed: %s", exc)
                 try:
+                    file_granted = await client.subscribe(FILE_TOPIC, qos=1)
+                    if file_granted == 0x80:
+                        raise MqttError("broker rejected file subscription")
+                except MqttError as exc:
+                    self.logger.warning("file subscription failed: %s", exc)
+                try:
                     control_granted = await client.subscribe(CONTROL_TOPIC, qos=0)
                     if control_granted == 0x80:
                         raise MqttError("broker rejected control subscription")
@@ -286,6 +309,9 @@ class RuntimeMixin:
             return
         if topic == PICTURE_TOPIC:
             await self._handle_picture_packet(payload, replayed)
+            return
+        if topic == FILE_TOPIC:
+            await self._handle_file_packet(payload, replayed)
             return
         if topic != self.topic:
             return
@@ -383,6 +409,55 @@ class RuntimeMixin:
             raise
         except Exception:
             self.logger.exception("channel image handler failed")
+
+
+    async def _handle_file_packet(self, payload: bytes, replayed: bool = False) -> None:
+        if self.on_file is None:
+            return
+        try:
+            text = payload.decode("utf-8")
+        except UnicodeDecodeError:
+            self._decode_failures += 1
+            return
+        chunk = parse_file_chunk(text)
+        if chunk is None:
+            self._decode_failures += 1
+            return
+        if chunk.get("abort"):
+            self._file_assembler.add(chunk)
+            return
+        if str(chunk.get("sender_id") or "") == self.sender_id:
+            return
+        await self._note_peer_avatar(
+            str(chunk.get("sender_id") or ""),
+            str(chunk.get("avatar_hash") or ""),
+            replayed=replayed,
+        )
+        file = self._file_assembler.add(chunk)
+        if file is None:
+            return
+        if file.transfer_id and file.transfer_id in self._seen_file_transfer_set:
+            with contextlib.suppress(OSError):
+                Path(file.staged_path).unlink()
+            return
+        if file.transfer_id:
+            self._seen_file_transfers.append(file.transfer_id)
+            self._seen_file_transfer_set.add(file.transfer_id)
+            if len(self._seen_file_transfers) > DEDUP_MAX_IDS:
+                removed = self._seen_file_transfers[:-DEDUP_MAX_IDS]
+                self._seen_file_transfers = self._seen_file_transfers[-DEDUP_MAX_IDS:]
+                for value in removed:
+                    self._seen_file_transfer_set.discard(value)
+        self._files_received += 1
+        self._last_file_at = time.time()
+        try:
+            await self.on_file(file, replayed)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            with contextlib.suppress(OSError):
+                Path(file.staged_path).unlink()
+            self.logger.exception("channel file handler failed")
 
 
     async def _handle_control_packet(self, payload: bytes) -> None:

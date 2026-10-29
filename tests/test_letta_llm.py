@@ -196,7 +196,7 @@ class LettaProviderMigrationTests(unittest.TestCase):
         self.assertIn("camera_take_photo", mod)
         self.assertIn("generate_image", mod)
         self.assertIn(
-            'const LOCK_EXEMPT = new Set(["generate_image", "tokifactor_send_image"])',
+            'const LOCK_EXEMPT = new Set(["generate_image", "tokifactor_send_file", "tokifactor_send_image"])',
             mod,
         )
         self.assertIn("LOCK_EXEMPT.has(toolName)", mod)

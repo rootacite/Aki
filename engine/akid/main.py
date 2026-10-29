@@ -106,6 +106,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="require approval for tokifactor_send_image (default: auto-approve)",
     )
+    parser.add_argument(
+        "--tokifactor-file-require-approval",
+        action="store_true",
+        help="require approval for tokifactor_send_file (default: auto-approve)",
+    )
     parser.add_argument("--log-level", default=os.environ.get("AKI_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
 
@@ -206,6 +211,8 @@ def main(argv: list[str] | None = None) -> int:
         config.sandbox_enabled = False
     if args.tokifactor_image_require_approval:
         config.tokifactor_image_require_approval = True
+    if args.tokifactor_file_require_approval:
+        config.tokifactor_file_require_approval = True
     try:
         asyncio.run(_serve(config))
     except RuntimeError as exc:

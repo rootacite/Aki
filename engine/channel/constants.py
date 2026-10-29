@@ -8,6 +8,7 @@ from typing import (
     Mapping,
 )
 from engine.tokifactor import (
+    FileEnvelope,
     ImageEnvelope,
     TextEnvelope,
 )
@@ -33,6 +34,8 @@ TextHandler = Callable[
 ]
 
 ImageHandler = Callable[[ImageEnvelope, bool], Awaitable[None]]
+
+FileHandler = Callable[[FileEnvelope, bool], Awaitable[None]]
 
 ControlHandler = Callable[[TextEnvelope], Awaitable[None]]
 

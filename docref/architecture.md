@@ -58,12 +58,14 @@
 工具是否只读由代码静态分类，不交给模型判断。`Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、
 `LS`、`ViewImage`、桌面截图、摄像头和 Tavily 的只读 MCP 工具可直接使用；`Bash`、
 `Memory`、`Agent`、写入/编辑/补丁、任务状态写入、发图、文生图、未知 MCP 以及所有未明确
-列出的工具都按非只读处理。`generate_image` 与 `tokifactor_send_image` 是显式的锁豁免工具：
+列出的工具都按非只读处理。`generate_image`、`tokifactor_send_image` 与
+`tokifactor_send_file` 是显式的锁豁免工具：
 仍是外部副作用并保留各自的审批策略，但不参与整机执行锁串行。截图、摄像头和生成图输出使用
 时间戳加随机后缀，避免并发调用互相覆盖。
 
 非只读工具默认受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn；
-`generate_image` 和 `tokifactor_send_image` 是显式豁免项。需要锁的模型必须先调用 `acquire_execution_lock`；
+`generate_image`、`tokifactor_send_image` 和 `tokifactor_send_file` 是显式豁免项。
+需要锁的模型必须先调用 `acquire_execution_lock`；
 锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是重试。锁由网关在 turn 正常结束、
 取消、异常或进程退出时自动释放。
 
@@ -101,8 +103,8 @@ Haru 的 profile 有显式 `[tools]` 段。akid 启动 Letta 时追加
 `generate_image` 同时也是 Haru 的 exclusive tool：其他 profile 不会在 schema 中看到它，
 `<tool-ownership>` 会把“图片创作/文生图”列在 Haru 名下，并要求其他成员用 `@Haru`
 转交；运行时所有权检查也会拒绝非 Haru 调用。它和 Aki 的日程工具一样走专属工具通道，
-但显式免整机执行锁。`tokifactor_send_image` 同样免锁，但它不是 exclusive tool，按频道成员
-各自的外部工具配置注册。
+但显式免整机执行锁。`tokifactor_send_image` 与 `tokifactor_send_file` 同样免锁，但它们不是 exclusive tool，
+按频道成员各自的外部工具配置注册。
 
 `aki-write-policy.ts` 是第二层写入约束：`Write`、`Edit`、`ApplyPatch` 和
 `write_artifact_file` 的 `file_path`/`path`/补丁目标必须是 `/tmp` 或
@@ -113,10 +115,10 @@ MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的
 bubblewrap 仍作为底层写入边界。
 
 `<channel-wake-routing>` 是英文 turn overlay 块，明确 Agent-Agent 唤醒规则：
-有 `@成员` 时只唤醒被点名的成员；回复任意位置出现 `@<username>` 时强制只唤醒该 username、不唤醒任何其他成员，
-仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
-都没有时唤醒全部其他在线成员。它每个 turn 按 profile username 渲染；`^` 排除规则和
-“只回复用户时使用 `@<username>`”的提示也属于这个 overlay 块，不再在每轮 user 消息或
+有显式 `@成员` 时只唤醒被点名的成员（即使同时出现 `@<username>`）；没有显式 `@成员` 而出现
+`@<username>` 时只唤醒该 username、不唤醒任何其他成员；无显式 `@成员`、无 `@<username>` 而有
+`^成员` 时不唤醒被排除的成员；三者都没有时唤醒全部其他在线成员。它每个 turn 按 profile
+username 渲染；`^` 排除规则和“没有显式成员点名、只回复用户时使用 `@<username>`”的提示也属于这个 overlay 块，不再在每轮 user 消息或
 `<turn-control>` 中重复。
 
 `<channel-policy>` 保存静态频道规则并作为稳定 system overlay 注入；`<turn-control>` 保存当前
@@ -154,6 +156,11 @@ user role，历史图片仍需 `ViewImage`。纯图片消息只入历史，不�
 Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同一消息的附件；akid 会
 校验路径、格式和大小，移除指令、先上传图片再提交正文。需要在一条消息中内嵌图片时不应调用
 `tokifactor_send_image`；该工具保留用于纯图片消息。
+
+`tokifactor_send_file` 使用 `tokifactor/file` 分片发布本地文件，路径限制与发图相同。
+发送方和接收方都只在频道历史中追加一条正文为文件路径的短记录，不创建 turn、不唤醒成员；
+接收方优先记录经大小和 SHA-256 校验匹配的原始路径，否则记录自己的落盘路径。群聊与独处
+各自写入对应历史。
 
 `<channel-transcript>` 直接使用记录中的 sender 名称，不再内嵌 `<profiles>` 或 `sender_id`；
 成员资料只由 `<channel-identity>` 和 per-turn roster 提供。每条消息为单行 JSON 转义格式，

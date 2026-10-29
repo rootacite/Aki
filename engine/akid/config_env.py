@@ -166,6 +166,9 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
     image_require_approval = os.environ.get(
         "AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL", "0"
     ).strip().lower() in ("1", "true", "yes", "on")
+    file_require_approval = os.environ.get(
+        "AKI_TOKIFACTOR_FILE_REQUIRE_APPROVAL", "0"
+    ).strip().lower() in ("1", "true", "yes", "on")
     letta_bin = os.environ.get("AKI_LETTA_BIN", "").strip() or aki.letta_bin
     layer_enabled = os.environ.get("AKI_LAYER_ENABLED")
     if layer_enabled is None:
@@ -280,6 +283,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
             else None
         ),
         tokifactor_image_require_approval=image_require_approval,
+        tokifactor_file_require_approval=file_require_approval,
         camera_enabled=aki.camera_enabled,
         camera_require_approval=aki.camera_require_approval,
         camera_device=aki.camera_device,

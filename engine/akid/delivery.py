@@ -12,6 +12,7 @@ from engine.letta_process import (
 )
 from engine.tokifactor import (
     MAX_ATTACHMENT_NAME_CHARS,
+    MAX_FILE_BYTES,
     MAX_IMAGE_BYTES,
     ImageEnvelope,
     detect_image_mime,
@@ -105,6 +106,48 @@ class DeliveryMixin:
         result = dict(first)
         result["path"] = str(path)
         result["name"] = name
+        return result
+
+
+    async def _execute_tokifactor_send_file(self, args: Mapping[str, Any]) -> dict[str, Any]:
+        channel = self.channel
+        if channel is None:
+            raise ValueError("tokifactor channel is disabled")
+        path_value = args.get("path")
+        if not isinstance(path_value, str) or not path_value.strip():
+            raise ValueError("path must be a non-empty string")
+        raw = Path(path_value).expanduser()
+        if not raw.is_absolute():
+            raise ValueError("file path must be absolute")
+        try:
+            path = raw.resolve(strict=True)
+        except OSError as exc:
+            raise ValueError("file does not exist") from exc
+        if not path.is_file():
+            raise ValueError("path must be a file")
+
+        def check_readable() -> None:
+            with path.open("rb") as handle:
+                handle.read(1)
+
+        try:
+            await asyncio.to_thread(check_readable)
+        except OSError as exc:
+            raise ValueError("file is not readable") from exc
+        size = path.stat().st_size
+        if size > MAX_FILE_BYTES:
+            raise ValueError(f"file exceeds {MAX_FILE_BYTES} bytes")
+        result = await channel.publish_file(path, source_path=str(path))
+        sent_at = int(time.time() * 1000)
+        self._record_channel_message(
+            sender=self.config.channel_name,
+            sender_id=self._channel_self_key(),
+            text=str(path),
+            from_agent=True,
+            message_id=str(result.get("message_id") or ""),
+            sent_at=sent_at,
+            phase="final",
+        )
         return result
 
 

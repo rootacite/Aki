@@ -54,7 +54,9 @@ LOCK_CONTROL_TOOLS = frozenset({LOCK_ACQUIRE_TOOL, LOCK_RELEASE_TOOL})
 # Tools with external side effects that the user explicitly chose not to
 # serialize behind the device-wide execution lock. They remain non-read-only
 # for approval and auditing purposes.
-LOCK_EXEMPT_TOOLS = frozenset({"generate_image", "tokifactor_send_image"})
+LOCK_EXEMPT_TOOLS = frozenset(
+    {"generate_image", "tokifactor_send_file", "tokifactor_send_image"}
+)
 
 LOCK_REQUIRED_ERROR = (
     "EXECUTION_LOCK_REQUIRED: this tool can modify state or produce external "

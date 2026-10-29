@@ -97,6 +97,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertIn("desktop_take_screenshot", config.tool_policy.allow)
         self.assertIn("camera_take_photo", config.tool_policy.allow)
         self.assertIn("tokifactor_send_image", config.tool_policy.allow)
+        self.assertIn("tokifactor_send_file", config.tool_policy.allow)
         self.assertIn("generate_image", config.tool_policy.allow)
         self.assertNotIn("Bash", config.tool_policy.allow)
         self.assertIn("Task", config.tool_policy.deny)
@@ -220,7 +221,7 @@ class HaruPersonaTests(unittest.TestCase):
             "There is no Bash",
             "There are no subagents",
             "Text-to-image is available through the `generate_image` tool",
-            "`generate_image` and `tokifactor_send_image` do not require the device-wide execution lock",
+            "`generate_image`, `tokifactor_send_image`, and `tokifactor_send_file` do not require the device-wide execution lock",
             "Do not use `Read`",
             "/tmp",
             "~/.local/share/tmp",

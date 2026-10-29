@@ -187,6 +187,7 @@ def render_execution_lock_mod() -> str:
         sorted(
             {
                 "tokifactor_send_image",
+                "tokifactor_send_file",
                 "camera_take_photo",
                 "desktop_take_screenshot",
                 "generate_image",
