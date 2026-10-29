@@ -1,0 +1,173 @@
+--- a/src/aki/bridge.ts
++++ b/src/aki/bridge.ts
+@@ -27,7 +27,7 @@
+ 
+ export interface AkiTurnContext {
+   system_append?: string;
+-  mid_system_append?: string;
++  user_message_prefix?: string;
+   user_messages?: AkiEphemeralMessage[];
+ }
+ 
+@@ -117,6 +117,35 @@
+   return current?.trim() ? `${current.trim()}\n\n${text}` : text;
+ }
+ 
++function prefixUserContent(
++  content: LocalUserMessage["content"],
++  prefix: string,
++): LocalUserMessage["content"] {
++  if (typeof content === "string") {
++    return content.trim() ? `${prefix}\n\n${content}` : prefix;
++  }
++  return [{ type: "text", text: `${prefix}\n\n` }, ...content];
++}
++
++function prependUserMessagePrefix(
++  messages: readonly LocalMessage[],
++  prefix: string | undefined,
++): LocalMessage[] {
++  const text = prefix?.trim();
++  if (!text) return messages as LocalMessage[];
++  for (let index = messages.length - 1; index >= 0; index -= 1) {
++    const message = messages[index];
++    if (!message || message.role !== "user") continue;
++    const next = [...messages];
++    next[index] = {
++      ...message,
++      content: prefixUserContent(message.content, text),
++    } as LocalUserMessage;
++    return next;
++  }
++  return messages as LocalMessage[];
++}
++
+ function contentParts(message: AkiEphemeralMessage): LocalUserMessage["content"] {
+   if (typeof message.content === "string") {
+     return [{ type: "text", text: message.content }];
+@@ -198,20 +227,21 @@
+     input.systemPrompt ?? input.agent.system,
+     turnContext.system_append,
+   );
+-  const midConversationSystemPrompt = appendBlock(
+-    input.midConversationSystemPrompt,
+-    turnContext.mid_system_append,
++  const userMessages = prependUserMessagePrefix(
++    input.uiMessages,
++    turnContext.user_message_prefix,
+   );
+-  if (!ephemeralMessages.length && systemPrompt === input.systemPrompt && midConversationSystemPrompt === input.midConversationSystemPrompt) {
++  if (
++    !ephemeralMessages.length &&
++    systemPrompt === input.systemPrompt &&
++    userMessages === input.uiMessages
++  ) {
+     return input;
+   }
+   const output = {
+     ...input,
+     ...(systemPrompt !== undefined ? { systemPrompt } : {}),
+-    ...(midConversationSystemPrompt !== undefined
+-      ? { midConversationSystemPrompt }
+-      : {}),
+-    uiMessages: [...input.uiMessages, ...ephemeralMessages] as LocalMessage[],
++    uiMessages: [...userMessages, ...ephemeralMessages] as LocalMessage[],
+   };
+   return output;
+ }
+@@ -397,8 +427,8 @@
+   return {
+     turn_id: activeTurn.turnId,
+     system_append: activeTurn.overlay.turn_context?.system_append ?? "",
+-    mid_system_append:
+-      activeTurn.overlay.turn_context?.mid_system_append ?? "",
++    user_message_prefix:
++      activeTurn.overlay.turn_context?.user_message_prefix ?? "",
+     overlay_user_messages:
+       activeTurn.overlay.turn_context?.user_messages ?? [],
+     pending_interjections: activeTurn.pendingInterjections,
+--- a/src/aki/bridge.test.ts
++++ b/src/aki/bridge.test.ts
+@@ -34,6 +34,20 @@
+   };
+ }
+ 
++function inputWithUsers(contents: string[]): ProviderTurnInput {
++  const base = input();
++  base.uiMessages = contents.map(
++    (content, index) =>
++      ({
++        id: `user-${index}`,
++        role: "user",
++        content,
++        timestamp: index,
++      }) as never,
++  );
++  return base;
++}
++
+ afterEach(() => {
+   endAkiTurn("turn-1");
+   endAkiTurn("turn-2");
+@@ -85,6 +99,61 @@
+     ]);
+   });
+ 
++  test("prepends volatile turn context to the current user message", () => {
++    beginAkiTurn("turn-1", {
++      turn_context: {
++        system_append: "stable overlay",
++        user_message_prefix: "<turn-control>dynamic</turn-control>",
++      },
++    });
++    const base = inputWithUsers(["older user", "current user"]);
++    const enriched = applyAkiProviderOverlay(base);
++    expect(enriched.systemPrompt).toBe("base system\n\nstable overlay");
++    expect(enriched.midConversationSystemPrompt).toBeUndefined();
++    expect(enriched.uiMessages[0]?.content).toBe("older user");
++    expect(enriched.uiMessages[1]?.content).toBe(
++      "<turn-control>dynamic</turn-control>\n\ncurrent user",
++    );
++    expect(base.uiMessages[1]?.content).toBe("current user");
++  });
++
++  test("does not overwrite mid-turn insertions when prefixing the user message", async () => {
++    const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
++    process.env.AKI_TURN_OVERLAY_DIR = directory;
++    try {
++      beginAkiTurn("turn-files", {
++        turn_context: { user_message_prefix: "volatile prefix" },
++      });
++      const turnDir = join(directory, "turn-files");
++      await mkdir(turnDir, { mode: 0o700 });
++      await writeFile(
++        join(turnDir, "00000001-insert.json"),
++        JSON.stringify({
++          turn_id: "turn-files",
++          seq: 1,
++          insertion_id: "insert-1",
++          inserted_at_ms: 100,
++          content: insertionContent(1, 100, "inserted while working"),
++        }),
++      );
++      const enriched = await applyAkiProviderOverlayWithFiles(
++        inputWithUsers(["older user", "current user"]),
++      );
++      expect(enriched.uiMessages[1]?.content).toBe(
++        "volatile prefix\n\ncurrent user",
++      );
++      const insertion = enriched.uiMessages[2]?.content as Array<{
++        type: string;
++        text: string;
++      }>;
++      expect(insertion[0]?.text).toContain("inserted while working");
++      expect(insertion[0]?.text).not.toContain("volatile prefix");
++    } finally {
++      delete process.env.AKI_TURN_OVERLAY_DIR;
++      await rm(directory, { recursive: true, force: true });
++    }
++  });
++
+   test("delivers interjections once at the next request boundary", () => {
+     beginAkiTurn("turn-1", {});
+     updateAkiTurn("turn-1", {

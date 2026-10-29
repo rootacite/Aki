@@ -12,6 +12,8 @@ class PromptLayoutTests(unittest.TestCase):
             block = render_format_guard(user_name)
             self.assertIn('<format-guard version="1">', block)
             self.assertIn(user_name, block)
+            self.assertIn("回复以人类聊天时使用的自然的短句为主", block)
+            self.assertIn("未明确要求时，不长篇分析", block)
 
     def test_turn_control_contains_control_fields_but_no_message_copy(self) -> None:
         member = ChannelMember(id="aki", name="Aki", is_self=True)

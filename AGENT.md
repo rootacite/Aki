@@ -401,10 +401,11 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
   - stable system overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
     <channel-identity> → <channel-context roster> → <format-guard>`。
-  - mid-system tail：`<turn-control> → <channel-transcript> → <solo-mode> →
-    <solo-memories> → <solo-transcript> → <live-context>`。
+  - per-turn user prefix：`<turn-control> → <channel-transcript> → <solo-mode> →
+    <solo-memories> → <solo-transcript> → <live-context>`，临时拼在当前 user role
+    消息开头，不写回持久消息。
   - akid 运行时不写 `agent.system` 或 `system-prompt.json.content`；所有 Aki 运行时块
-    都只通过 `turn_context.system_append` / `turn_context.mid_system_append` 进入请求。
+    都只通过 `turn_context.system_append` / `turn_context.user_message_prefix` 进入请求。
     没有 `aki_bridge` 的后端不允许启动。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
   schema 过滤、Letta ownership mod、akid 运行时校验和 `<tool-ownership>` 提示词共同

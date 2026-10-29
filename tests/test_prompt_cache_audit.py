@@ -92,6 +92,29 @@ class PromptCacheAuditTests(unittest.TestCase):
         self.assertNotIn("<turn-control", normalized["messages"][0]["content"])
         self.assertIn("<turn-control", normalized["messages"][1]["content"])
 
+    def test_accepts_turn_control_in_current_user_prefix(self) -> None:
+        audit = load_audit_module()
+        system = (
+            "<tool-ownership></tool-ownership>"
+            "<channel-policy></channel-policy>"
+            "<channel-wake-routing></channel-wake-routing>"
+            "<channel-identity></channel-identity>"
+            "<channel-context></channel-context>"
+            "<format-guard></format-guard>"
+        )
+        payload = {
+            "messages": [
+                {"role": "system", "content": system},
+                {
+                    "role": "user",
+                    "content": "<turn-control>dynamic</turn-control>\n\nhello",
+                },
+            ]
+        }
+        report = audit._report_profile("aki", [("marker", payload)] * 3)
+        self.assertEqual(report["profile"], "aki")
+        self.assertTrue(report["system_stable"])
+
 
 if __name__ == "__main__":
     unittest.main()

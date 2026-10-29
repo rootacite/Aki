@@ -155,7 +155,7 @@ def overlay_text(server: GatewayServer, *, update_index: int = -1) -> str:
         part
         for part in (
             str(context.get("system_append") or ""),
-            str(context.get("mid_system_append") or ""),
+            str(context.get("user_message_prefix") or ""),
         )
         if part
     )

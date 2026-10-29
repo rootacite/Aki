@@ -242,9 +242,9 @@ live context）都由 akid 在请求前作为 turn overlay 注入。脚本会先
 `~/.letta/backups/system-prompt-install-<timestamp>/`。修改 `prompts/aki-system.md` 后
 重新运行即可；`{CORE_MEMORY}` 占位符必须保留。
 
-编译后模型看到的固定顺序是 `base → core memory → stable system overlay → messages →
-mid-system tail`。stable system overlay 内部顺序为 `tool ownership → channel policy →
-wake routing → identity → roster → format guard`；mid-system tail 为
+编译后模型看到的固定顺序是 `base → core memory → stable system overlay → messages`。
+stable system overlay 内部顺序为 `tool ownership → channel policy →
+wake routing → identity → roster → format guard`；易变 per-turn tail 为
 `turn control → transcript → solo mode → solo memories → solo transcript → live context`：
 
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
@@ -260,10 +260,11 @@ wake routing → identity → roster → format guard`；mid-system tail 为
 7. `<channel-context>`：当前在线成员 roster，作为稳定 system overlay 注入。
 8. `<format-guard>`：Aki、Fuyu、Haru 全部启用，使用各自 username，作为稳定 system overlay 注入。
 9. `<turn-control>`：当前频道 turn 的 guidance、initiation budget、execution responder、
-   `wait_user` / `wait_other`；不复制消息正文。位于 mid-system tail。
-10. `<channel-transcript>`：只包含历史消息，不包含当前消息和 `new` 标记；位于 mid-system tail。
+   `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
+10. `<channel-transcript>`：只包含历史消息，不包含当前消息和 `new` 标记；临时拼在当前 user role
+    消息开头。
 11. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
-    位于 mid-system tail，不落盘。
+    临时拼在当前 user role 消息开头，不落盘。
 
 ### Aki 专属工具与触发器
 
@@ -557,8 +558,8 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 `<channel-wake-routing>` 中，在线成员列表
 `<channel-context>` 只在 turn overlay 中。运行时不会生成 prompt journal。其他智能体触发的 turn
 还会在 user role 的统一前缀中带 sender、seq、source 和正文。点名/未点名 guidance、
-initiation budget、execution responder 和 `wait_other` 提示都在 mid-system tail
-的 `<turn-control>` 中。
+initiation budget、execution responder 和 `wait_other` 提示都在 `<turn-control>` 中，
+并临时拼在当前 user role 消息开头。
 
 历史频道 prompt 的成员表迁移（仅用于旧数据）：
 

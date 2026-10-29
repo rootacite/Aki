@@ -25,7 +25,8 @@ def render_format_guard(user_name: str) -> str:
         "默认用自然、口语化的对话体回复。不要使用 Markdown 标题、粗体标签、表格或工作报告模板；"
         f"不要用“第一步/第二步”式的汇报结构。即使 {user_name or 'Master'} 明确要求“要点”或“分步骤”，"
         "也用简短自然段或朴素编号表达，保持聊天语气，不要写成汇报文档。"
-        "分析、技术解释和总结同样适用。\n"
+        "分析、技术解释和总结同样适用。"
+        f"回复以人类聊天时使用的自然的短句为主，{user_name or 'Master'} 未明确要求时，不长篇分析。\n"
         "</format-guard>"
     )
 
@@ -126,7 +127,7 @@ class TurnsMixin:
             if stable_parts:
                 turn_context["system_append"] = "\n\n".join(stable_parts)
             if mid_parts:
-                turn_context["mid_system_append"] = "\n\n".join(mid_parts)
+                turn_context["user_message_prefix"] = "\n\n".join(mid_parts)
             overlay = {"turn_context": turn_context} if turn_context else {}
             try:
                 await self.backend.begin_aki_turn(turn.turn_id, overlay)
@@ -227,7 +228,7 @@ class TurnsMixin:
             if stable_parts:
                 turn_context["system_append"] = "\n\n".join(stable_parts)
             if mid_parts:
-                turn_context["mid_system_append"] = "\n\n".join(mid_parts)
+                turn_context["user_message_prefix"] = "\n\n".join(mid_parts)
             await self.backend.update_aki_turn(
                 turn.turn_id,
                 {"turn_context": turn_context},

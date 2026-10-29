@@ -473,7 +473,7 @@ def _report_profile(
 ) -> dict[str, Any]:
     bodies: list[str] = []
     systems: list[str] = []
-    mid_systems: list[str] = []
+    runtime_tails: list[str] = []
     for marker, payload in payloads:
         body = json.dumps(
             {
@@ -495,17 +495,17 @@ def _report_profile(
             "",
         )
         systems.append(system)
-        mid_systems.extend(
+        runtime_tails.extend(
             _extract_text(message.get("content"))
-            for message in messages[1:]
-            if isinstance(message, dict) and message.get("role") == "system"
+            for message in messages
+            if isinstance(message, dict) and message.get("role") in ("system", "user")
         )
         if any(tag in system for tag in DYNAMIC_TAGS):
             raise RuntimeError(f"{profile} system prompt contains dynamic blocks")
         if not all(tag in system for tag in STABLE_TAGS):
             raise RuntimeError(f"{profile} system prompt is missing a stable block")
-    if not any("<turn-control" in system for system in mid_systems):
-        raise RuntimeError(f"{profile} mid-system tail is missing turn-control")
+    if not any("<turn-control" in text for text in runtime_tails):
+        raise RuntimeError(f"{profile} runtime overlay is missing turn-control")
     hashes = {hashlib.sha256(system.encode()).hexdigest() for system in systems}
     system_stable = len(hashes) == 1
     pairs: list[dict[str, Any]] = []
