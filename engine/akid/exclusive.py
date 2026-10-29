@@ -10,6 +10,15 @@ from engine.aki_config import (
     discover_profiles,
     load_config,
 )
+from engine.channel_history import read_channel_history
+from engine.chat_search import (
+    SEARCH_CHAT_HISTORY_TOOL_NAME,
+    SEARCH_DEFAULT_LIMIT,
+    SEARCH_MAX_LIMIT,
+    SEARCH_MAX_QUERY_CHARS,
+    SEARCH_SCOPES,
+    search_chat_history,
+)
 from engine.execution_policy import (
     LOCK_REQUIRED_ERROR,
     WAIT_OTHER_TOOL,
@@ -74,6 +83,11 @@ class ExclusiveMixin:
                 tool_call_id, ownership_denied_message(tool_name), True
             )
             return
+        if tool_name == SEARCH_CHAT_HISTORY_TOOL_NAME:
+            await self._handle_search_chat_history_tool(
+                turn, tool_call_id, tool_input
+            )
+            return
         if tool_name == IMAGE_GENERATION_TOOL_NAME:
             await self._handle_image_generation_tool(
                 turn, tool_call_id, tool_name, tool_input
@@ -122,6 +136,69 @@ class ExclusiveMixin:
             )
         else:
             await self._handle_camera_tool(turn, tool_call_id, tool_name, tool_input)
+
+
+    async def _handle_search_chat_history_tool(
+        self,
+        turn: Turn,
+        tool_call_id: str,
+        tool_input: Mapping[str, Any],
+    ) -> None:
+        raw_query = tool_input.get("query")
+        query = raw_query.strip() if isinstance(raw_query, str) else ""
+        if not query or len(query) > SEARCH_MAX_QUERY_CHARS:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "INVALID_ARGUMENT: query must be a string of 1 to 200 characters",
+            )
+            return
+        raw_limit = tool_input.get("limit", SEARCH_DEFAULT_LIMIT)
+        if isinstance(raw_limit, bool) or not isinstance(raw_limit, int):
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "INVALID_ARGUMENT: limit must be an integer from 1 to 50",
+            )
+            return
+        limit = int(raw_limit)
+        if limit < 1 or limit > SEARCH_MAX_LIMIT:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "INVALID_ARGUMENT: limit must be an integer from 1 to 50",
+            )
+            return
+        raw_scope = tool_input.get("scope", "all")
+        scope = raw_scope.strip().lower() if isinstance(raw_scope, str) else ""
+        if scope not in SEARCH_SCOPES:
+            await self._external_tool_failure(
+                turn,
+                tool_call_id,
+                "INVALID_ARGUMENT: scope must be one of all, group, solo",
+            )
+            return
+        group_entries = (
+            read_channel_history(self.group_channel_history_path)
+            if scope in ("all", "group")
+            else []
+        )
+        solo_entries = (
+            read_channel_history(self.solo_channel_history_path)
+            if scope in ("all", "solo")
+            else []
+        )
+        text = search_chat_history(
+            query=query,
+            limit=limit,
+            scope=scope,
+            group_entries=group_entries,
+            solo_entries=solo_entries,
+            solo_memory_sessions=(
+                self.solo_memory.sessions if scope in ("all", "solo") else []
+            ),
+        )
+        await self._external_tool_success(turn, tool_call_id, text)
 
 
     async def _handle_exclusive_tool(

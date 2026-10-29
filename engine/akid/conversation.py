@@ -17,6 +17,7 @@ from engine.letta_compact import run_letta_compact
 from engine.protocol import (
     ErrorCode,
     RpcError,
+    optional_bool,
     optional_string,
     require_int,
 )
@@ -104,6 +105,7 @@ class ConversationMixin:
         timeout = require_int(
             params, "timeout", default=900, minimum=30, maximum=3600
         )
+        omit_tool_results = optional_bool(params, "omit_tool_results", False)
         async with self._compact_lock:
             self._compacting = True
             try:
@@ -122,6 +124,7 @@ class ConversationMixin:
                         "cannot compact while a turn is active or queued",
                     )
 
+                result: dict[str, Any] | None = None
                 if self._aki_bridge_available():
                     try:
                         result = await self._compact_conversation_bridge(
@@ -143,76 +146,80 @@ class ConversationMixin:
                         result.get("num_messages_before"),
                         result.get("num_messages_after"),
                     )
-                    return {
-                        **result,
-                        "conversation_id": self.config.conversation_id,
-                        "backend_ready": True,
-                    }
-
-                with contextlib.suppress(Exception):
-                    await self.backend.stop()
-                failure: Exception | None = None
-                result: dict[str, Any] | None = None
-                try:
-                    result = await asyncio.to_thread(
-                        run_letta_compact,
-                        letta_bin=self.config.letta_bin,
-                        agent_id=self.config.agent_id,
-                        conversation_id=self.config.conversation_id,
-                        cwd=self.config.cwd,
-                        mode=mode,
-                        timeout=float(timeout),
-                        backend_dir=self.config.backend_dir,
-                        letta_home=(
-                            self.config.letta_home or self.writable.letta_home
-                        ),
-                        env=os.environ,
-                    )
-                except Exception as exc:
-                    failure = exc
-                finally:
+                else:
+                    with contextlib.suppress(Exception):
+                        await self.backend.stop()
+                    failure: Exception | None = None
                     try:
-                        self.backend.start()
-                        ready = await self._wait_backend_ready(60.0)
+                        result = await asyncio.to_thread(
+                            run_letta_compact,
+                            letta_bin=self.config.letta_bin,
+                            agent_id=self.config.agent_id,
+                            conversation_id=self.config.conversation_id,
+                            cwd=self.config.cwd,
+                            mode=mode,
+                            timeout=float(timeout),
+                            backend_dir=self.config.backend_dir,
+                            letta_home=(
+                                self.config.letta_home or self.writable.letta_home
+                            ),
+                            env=os.environ,
+                        )
                     except Exception as exc:
-                        LOGGER.exception("backend restart failed after compaction")
-                        ready = False
-                        if failure is None:
-                            failure = exc
+                        failure = exc
+                    finally:
+                        try:
+                            self.backend.start()
+                            ready = await self._wait_backend_ready(60.0)
+                        except Exception as exc:
+                            LOGGER.exception("backend restart failed after compaction")
+                            ready = False
+                            if failure is None:
+                                failure = exc
 
-                if failure is not None:
-                    raise RpcError(
-                        ErrorCode.COMPACT_FAILED,
-                        str(failure),
-                        {
-                            "conversation_id": self.config.conversation_id,
-                            "backend_ready": ready,
-                            "backend_error": getattr(self.backend, "last_error", None),
-                        },
+                    if failure is not None:
+                        raise RpcError(
+                            ErrorCode.COMPACT_FAILED,
+                            str(failure),
+                            {
+                                "conversation_id": self.config.conversation_id,
+                                "backend_ready": ready,
+                                "backend_error": getattr(self.backend, "last_error", None),
+                            },
+                        )
+                    if result is None:
+                        raise RpcError(
+                            ErrorCode.COMPACT_FAILED,
+                            "compaction returned no result",
+                            {"backend_ready": ready},
+                        )
+                    if not ready:
+                        raise RpcError(
+                            ErrorCode.COMPACT_FAILED,
+                            "conversation compacted but backend did not become ready",
+                            {
+                                **result,
+                                "backend_ready": False,
+                                "backend_error": getattr(self.backend, "last_error", None),
+                            },
+                        )
+                    LOGGER.info(
+                        "conversation compacted mode=%s reflection=%s before=%s after=%s",
+                        result.get("mode"),
+                        result.get("reflection"),
+                        result.get("num_messages_before"),
+                        result.get("num_messages_after"),
                     )
                 if result is None:
                     raise RpcError(
                         ErrorCode.COMPACT_FAILED,
                         "compaction returned no result",
-                        {"backend_ready": ready},
                     )
-                if not ready:
-                    raise RpcError(
-                        ErrorCode.COMPACT_FAILED,
-                        "conversation compacted but backend did not become ready",
-                        {
-                            **result,
-                            "backend_ready": False,
-                            "backend_error": getattr(self.backend, "last_error", None),
-                        },
-                    )
-                LOGGER.info(
-                    "conversation compacted mode=%s reflection=%s before=%s after=%s",
-                    result.get("mode"),
-                    result.get("reflection"),
-                    result.get("num_messages_before"),
-                    result.get("num_messages_after"),
-                )
+                if omit_tool_results:
+                    result = {
+                        **result,
+                        **await self._omit_conversation_tool_results(),
+                    }
                 return {
                     **result,
                     "conversation_id": self.config.conversation_id,
@@ -287,6 +294,137 @@ class ConversationMixin:
         return "timeout"
 
 
+    async def _omit_conversation_tool_results(self) -> dict[str, Any]:
+        omitted_content = "[Omitted]"
+        omitted_parts = [{"type": "text", "text": omitted_content}]
+        conversation_dir = self._conversation_dir()
+        path = conversation_dir / "messages.jsonl"
+        if not path.is_file():
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED,
+                "conversation messages file not found",
+                {"path": str(path)},
+            )
+        try:
+            original = path.read_bytes()
+        except OSError as exc:
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED,
+                f"cannot read conversation messages: {exc}",
+            ) from exc
+
+        replaced = 0
+        skipped = 0
+        lines = original.splitlines(keepends=True)
+        output: list[bytes] = []
+        for index, line in enumerate(lines):
+            if not line.strip():
+                output.append(line)
+                continue
+            try:
+                row = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, ValueError) as exc:
+                raise RpcError(
+                    ErrorCode.COMPACT_FAILED,
+                    f"conversation row {index + 1} is not valid JSON",
+                ) from exc
+            message = row.get("message") if isinstance(row, dict) else None
+            if not isinstance(message, dict) or message.get("role") != "toolResult":
+                output.append(line)
+                continue
+            content = message.get("content")
+            already_omitted = (
+                isinstance(content, str)
+                and content.strip() == omitted_content
+            ) or (
+                isinstance(content, list)
+                and bool(content)
+                and all(
+                    isinstance(part, dict)
+                    and part.get("type") == "text"
+                    and str(part.get("text") or "").strip() == omitted_content
+                    for part in content
+                )
+            )
+            if already_omitted:
+                skipped += 1
+                output.append(line)
+                continue
+            message["content"] = (
+                omitted_content
+                if isinstance(content, str)
+                else [dict(part) for part in omitted_parts]
+            )
+            output.append(
+                (
+                    json.dumps(row, ensure_ascii=False, separators=(",", ":"))
+                    + "\n"
+                ).encode("utf-8")
+            )
+            replaced += 1
+
+        if replaced == 0:
+            return {
+                "tool_results_replaced": 0,
+                "tool_results_skipped": skipped,
+                "omit_tool_results_backup": None,
+            }
+
+        try:
+            backup = self._backup_conversation(
+                conversation_dir, suffix="omit-tool-results"
+            )
+        except Exception as exc:
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED,
+                f"cannot back up conversation before omitting tool results: {exc}",
+            ) from exc
+
+        try:
+            self._replace_messages_file(path, b"".join(output))
+            await self.backend.reload_conversation(
+                conversation_id=self.config.conversation_id,
+                agent_id=self.config.agent_id,
+            )
+        except Exception as exc:
+            restore_error: Exception | None = None
+            try:
+                self._replace_messages_file(path, original)
+                await self.backend.reload_conversation(
+                    conversation_id=self.config.conversation_id,
+                    agent_id=self.config.agent_id,
+                )
+            except Exception as restore_exc:
+                restore_error = restore_exc
+            detail = {
+                "omit_tool_results_backup": str(backup),
+                "detail": str(exc),
+            }
+            if restore_error is not None:
+                detail["restore_detail"] = str(restore_error)
+                raise RpcError(
+                    ErrorCode.COMPACT_FAILED,
+                    "tool-result omission failed and conversation rollback also failed",
+                    detail,
+                ) from exc
+            raise RpcError(
+                ErrorCode.COMPACT_FAILED,
+                "tool-result omission failed; original conversation restored",
+                detail,
+            ) from exc
+        LOGGER.info(
+            "conversation tool results omitted replaced=%s skipped=%s backup=%s",
+            replaced,
+            skipped,
+            backup,
+        )
+        return {
+            "tool_results_replaced": replaced,
+            "tool_results_skipped": skipped,
+            "omit_tool_results_backup": str(backup),
+        }
+
+
     # ------------------------------------------------------------- conversation
     def _conversation_dir(self) -> Path:
         key = _b64url(f"{self.config.conversation_id}:{self.config.agent_id}")
@@ -297,18 +435,20 @@ class ConversationMixin:
         return self.config.backend_dir.parent / "backups"
 
 
-    def _backup_conversation(self, conversation_dir: Path) -> Path:
+    def _backup_conversation(
+        self, conversation_dir: Path, *, suffix: str = "reset"
+    ) -> Path:
         root = self._conversation_backup_root()
         root.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(root, 0o700)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        name = f"aki-{self.config.conversation_id}-reset-{stamp}"
+        name = f"aki-{self.config.conversation_id}-{suffix}-{stamp}"
         candidate = root / name
-        suffix = 1
+        counter = 1
         while candidate.exists():
-            candidate = root / f"{name}-{suffix}"
-            suffix += 1
+            candidate = root / f"{name}-{counter}"
+            counter += 1
         shutil.copytree(conversation_dir, candidate, symlinks=True)
         return candidate
 

@@ -158,6 +158,10 @@ def render_channel_policy(
         "</exclusive-domain-guidance>",
         "<output-rules>你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。</output-rules>",
         "<privacy-rules>独处会话只对被独处的成员可见。退出独处后，不要向其他成员转述、引用、总结或暗示独处中的任何内容；其他成员的群聊记录中不存在这些消息。</privacy-rules>",
+        "<chat-history-search>隐藏工具 `search_chat_history(query, limit=8, scope=all|group|solo)` "
+        "只搜索你自己可见的群聊、当前独处和归档独处；scope=all 包含三者。"
+        "独处搜索结果标记为私密，绝对不能向其他成员转述、引用或暗示。"
+        "不要向用户解释、提及或复述这个工具或搜索过程。</chat-history-search>",
         "<image-rules>频道消息中的图片附件以 {\"name\":\"图片名\",\"path\":\"本地路径\"} 记录；"
         "system prompt 中永远不会包含图片 base64。当前新消息的图片已经作为多模态输入直接附在 user 消息后，"
         "顺序与消息正文列出的图片名称一致，因此当前 turn 无需再调用 ViewImage。"

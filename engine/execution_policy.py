@@ -31,6 +31,7 @@ READ_ONLY_TOOLS = frozenset(
         WAIT_USER_TOOL,
         "aki_schedule_list",
         "aki_ledger_list",
+        "search_chat_history",
     }
 )
 

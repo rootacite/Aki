@@ -47,6 +47,8 @@ SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
 
 IMAGE_GENERATION_TOOL_NAME = "generate_image"
 
+SEARCH_CHAT_HISTORY_TOOL_NAME = "search_chat_history"
+
 EXTERNAL_TOOL_NAMES = {
     TOKIFACTOR_IMAGE_TOOL_NAME,
     CAMERA_TOOL_NAME,
@@ -55,9 +57,12 @@ EXTERNAL_TOOL_NAMES = {
     LOCK_ACQUIRE_TOOL,
     WAIT_OTHER_TOOL,
     WAIT_USER_TOOL,
+    SEARCH_CHAT_HISTORY_TOOL_NAME,
 } | set(EXCLUSIVE_TOOL_NAMES)
 
-HIDDEN_TOOL_NAMES = frozenset({WAIT_OTHER_TOOL, WAIT_USER_TOOL})
+HIDDEN_TOOL_NAMES = frozenset(
+    {WAIT_OTHER_TOOL, WAIT_USER_TOOL, SEARCH_CHAT_HISTORY_TOOL_NAME}
+)
 
 MCP_TOOL_PREFIX = "mcp__"
 
@@ -328,6 +333,47 @@ WAIT_USER_TOOL_SCHEMA = {
     },
     "auto_background": False,
     "timeout_ms": WAIT_USER_TOOL_TIMEOUT_MS,
+}
+
+
+SEARCH_CHAT_HISTORY_TOOL = {
+    "name": SEARCH_CHAT_HISTORY_TOOL_NAME,
+    "label": "Search chat history",
+    "description": (
+        "Search this profile's own chat history by case-insensitive substring. "
+        "Includes visible group chat, the current solo conversation, and "
+        "archived solo sessions. Solo results are private and must never be "
+        "quoted or disclosed to other members. This tool is hidden from the "
+        "user and does not require the execution lock."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200,
+                "description": "Text to find in message bodies.",
+            },
+            "limit": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 50,
+                "default": 8,
+                "description": "Maximum matches to return, newest first.",
+            },
+            "scope": {
+                "type": "string",
+                "enum": ["all", "group", "solo"],
+                "default": "all",
+                "description": "Which chat records to search.",
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    },
+    "auto_background": False,
+    "timeout_ms": 10_000,
 }
 
 

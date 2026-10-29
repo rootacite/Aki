@@ -203,7 +203,7 @@ wait_for = Aki,Fuyu
 [tools]
 # Haru 的建模能力显式收窄；Bash/子代理从 schema 中移除。
 toolset = letta
-allow = Read,Grep,Glob,LS,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image
+allow = Read,Grep,Glob,LS,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,wait_user,search_chat_history,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,generate_image
 deny = Bash,exec_command,write_stdin,Agent,Task,Workflow,Monitor,WatchPR,Wake
 write_roots = /tmp,~/.local/share/tmp
 

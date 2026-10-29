@@ -191,6 +191,7 @@ def render_execution_lock_mod() -> str:
                 "desktop_take_screenshot",
                 "generate_image",
                 "wait_other",
+                "search_chat_history",
             }
         )
     )

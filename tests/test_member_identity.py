@@ -308,7 +308,7 @@ class HistoryIdentityMigrationTests(unittest.TestCase):
             self.assertEqual(server._channel_history[0].sender_id, legacy_member_id("Aki"))
             self.assertEqual(legacy_member_id("Aki"), server._channel_self_key())
 
-    def test_transcript_renders_the_current_name(self) -> None:
+    def test_transcript_uses_the_recorded_sender_name(self) -> None:
         member_id = legacy_member_id("Aki")
         entries = [
             ChannelTranscriptEntry(
@@ -318,13 +318,9 @@ class HistoryIdentityMigrationTests(unittest.TestCase):
                 text="old message",
             )
         ]
-        rendered = render_channel_transcript(
-            entries,
-            members=[ChannelMember(id=member_id, name="秋", aliases=("Aki",))],
-            self_id=legacy_member_id("Fuyu"),
-        )
-        self.assertIn('sender="秋"', rendered)
-        self.assertNotIn('sender="Aki"', rendered)
+        rendered = render_channel_transcript(entries)
+        self.assertIn('Aki (user, at unknown, seq=1): "old message"', rendered)
+        self.assertNotIn("<profiles>", rendered)
 
 
 if __name__ == "__main__":

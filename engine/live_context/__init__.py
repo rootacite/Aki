@@ -71,7 +71,7 @@ from .transcript import (
     _channel_entry_sort_key,
     _channel_entry_time,
     _channel_transcript_entry,
-    _render_transcript_profiles,
+    _compact_history_line,
     _truncate_to_tokens,
     apply_channel_transcript,
     clear_channel_transcript,

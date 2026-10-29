@@ -417,6 +417,7 @@ class HaruLettaIntegrationTests(unittest.TestCase):
                     health["external_tools"]["tools"],
                     [
                         "acquire_execution_lock",
+                        "search_chat_history",
                         "tokifactor_send_image",
                         "wait_user",
                         "wait_other",

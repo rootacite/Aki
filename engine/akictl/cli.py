@@ -110,6 +110,8 @@ HELP_TEXT = (
     "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
     "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
     "  akictl compact [mode]      keep newest 40% by count, summarize the rest\n"
+    "  akictl compact [mode] --omit-tool-results\n"
+    "                             also replace persisted tool results with [Omitted]\n"
     "  akictl solo <member>       enter private solo mode with one member\n"
     "  akictl solo status         show the active solo session\n"
     "  akictl solo off            end solo mode\n"
@@ -200,6 +202,8 @@ def _compact(args: argparse.Namespace, profile: str = "aki") -> int:
     params: dict[str, Any] = {"timeout": args.timeout}
     if mode:
         params["mode"] = mode
+    if getattr(args, "omit_tool_results", False) is True:
+        params["omit_tool_results"] = True
     pkg().print(
         "compacting context and waiting for memory reflection...",
         file=sys.stderr,
@@ -414,6 +418,11 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
         type=int,
         default=900,
         help="seconds to wait for compaction and reflection (default: 900)",
+    )
+    parser.add_argument(
+        "--omit-tool-results",
+        action="store_true",
+        help="after successful compaction, replace persisted toolResult content with [Omitted]",
     )
     parsers["compact"] = parser
     parser = argparse.ArgumentParser(prog="akictl solo")

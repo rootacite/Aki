@@ -5669,6 +5669,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 overlay = overlay_text(server)
                 self.assertEqual(overlay.count("<live-context"), 1)
                 self.assertIn("echo channel", overlay)
+                self.assertIn("<format-guard", overlay)
+                self.assertLess(
+                    overlay.index("<live-context"),
+                    overlay.index("<format-guard"),
+                )
+                self.assertIn("不要使用 Markdown 标题", overlay)
                 self.assertNotIn("<live-context", system)
         finally:
             for sock in sockets:

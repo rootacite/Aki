@@ -14,6 +14,7 @@ from .constants import (
     LOGGER,
     MCP_TOOL_PREFIX,
     SCREENSHOT_TOOL,
+    SEARCH_CHAT_HISTORY_TOOL,
     TOKIFACTOR_IMAGE_TOOL,
     WAIT_OTHER_TOOL_SCHEMA,
     WAIT_USER_TOOL_SCHEMA,
@@ -55,6 +56,7 @@ class BackendMixin:
     def _external_tools(self) -> list[dict[str, Any]]:
         tools: list[dict[str, Any]] = [
             ACQUIRE_EXECUTION_LOCK_TOOL,
+            SEARCH_CHAT_HISTORY_TOOL,
         ]
         tools.extend(tools_for_profile(self.config.profile))
         if not (

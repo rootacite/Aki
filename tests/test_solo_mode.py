@@ -86,15 +86,11 @@ class SoloModeTests(unittest.TestCase):
         self.assertIn("深夜暗房", load_solo_scene("natsu", username="Master"))
 
     def test_group_and_solo_transcripts_are_separate_blocks(self) -> None:
-        members = [
-            ChannelMember(id="aki", name="Aki", aliases=("Aki",), is_self=True),
-            ChannelMember(id="master", name="Master", kind="user"),
-        ]
         group = [ChannelTranscriptEntry(1, "Master", "master", "群聊旧消息")]
         solo = [ChannelTranscriptEntry(1, "Master", "master", "独处私密消息")]
         system = apply_channel_transcript(
             "BASE\n",
-            render_channel_transcript(group, members=members, frozen=True),
+            render_channel_transcript(group, frozen=True),
         )
         system = apply_solo_mode(
             system,
@@ -107,7 +103,7 @@ class SoloModeTests(unittest.TestCase):
         )
         system = apply_solo_transcript(
             system,
-            render_solo_transcript(solo, members=members),
+            render_solo_transcript(solo),
         )
         self.assertIn('<channel-transcript', system)
         self.assertIn('frozen="true"', system)

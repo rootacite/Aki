@@ -85,7 +85,6 @@ class PromptsMixin:
                 for entry in entries
             ]
 
-        members = self._channel_member_views()
         solo_mode_block = ""
         if self._solo_session is not None:
             group_entries = with_attachment_state(
@@ -97,8 +96,6 @@ class PromptsMixin:
                 group_entries,
                 new_seq=new_seq,
                 budget_tokens=self.config.channel_transcript_budget_tokens,
-                members=members,
-                self_id=self._channel_self_key(),
                 frozen=True,
             )
             solo_entries = with_attachment_state(
@@ -111,8 +108,6 @@ class PromptsMixin:
                 budget_tokens=self.config.aki.solo_transcript_budget_tokens
                 if self.config.aki is not None
                 else 64 * 1024,
-                members=members,
-                self_id=self._channel_self_key(),
             )
             scene = self._solo_scene or load_solo_scene(
                 self.config.profile,
@@ -141,8 +136,6 @@ class PromptsMixin:
                 ),
                 new_seq=new_seq,
                 budget_tokens=self.config.channel_transcript_budget_tokens,
-                members=members,
-                self_id=self._channel_self_key(),
             )
             solo_block = ""
             rendered_entries = len(self._channel_history)

@@ -91,6 +91,42 @@ def make_git_repo(path: Path) -> None:
 
 
 class SoloMemoryStoreTests(unittest.TestCase):
+    def test_rendered_memories_are_compact_and_omit_internal_ids(self) -> None:
+        session = SoloMemorySession(
+            session_id="internal-session-id",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            summary="第一行\n第二行",
+            archived=True,
+            entries=[
+                SoloMemoryEntry(
+                    id="sme_internal_id",
+                    seq=7,
+                    role="user",
+                    sender="Master",
+                    timestamp="2026-10-27T10:01:00Z",
+                    text='旧秘密\n带 "引号" 和 \\ 反斜杠',
+                    tokens=10,
+                )
+            ],
+        )
+        rendered = render_solo_memories([session])
+        self.assertIn('budget_tokens="65536"', rendered)
+        self.assertNotIn("internal-session-id", rendered)
+        self.assertNotIn("sme_internal_id", rendered)
+        self.assertIn(
+            '<solo started_at="2026-10-27T10:00:00Z" '
+            'ended_at="2026-10-27T10:10:00Z" archived="true">',
+            rendered,
+        )
+        self.assertIn('summary: "第一行\\n第二行"', rendered)
+        self.assertIn(
+            'Master (user, at 2026-10-27T10:01:00Z, seq=7): '
+            '"旧秘密\\n带 \\"引号\\" 和 \\\\ 反斜杠"',
+            rendered,
+        )
+        self.assertNotIn("<message ", rendered)
+
     def test_memory_prompt_keeps_core_blocks_and_ignores_inline_tool_reference(
         self,
     ) -> None:

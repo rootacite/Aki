@@ -130,7 +130,7 @@ turn 结束后自然消失。运行时不再写 prompt journal；`scripts/restor
 和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
 
 最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 system prompt，
-默认最多 64K **token**（不是 64K 字节），按时间保留最近消息并标记 `new="true"`。bridge 模式下
+默认最多 32K **token**（不是 32K 字节），按时间保留最近消息并以紧凑单行格式标记 `new`。bridge 模式下
 该块只存在于 turn overlay，不写入持久 system prompt；群聊消息本身仍永久保存在
 `~/.aki/channel-history`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
@@ -155,10 +155,9 @@ Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同�
 校验路径、格式和大小，移除指令、先上传图片再提交正文。需要在一条消息中内嵌图片时不应调用
 `tokifactor_send_image`；该工具保留用于纯图片消息。
 
-`<channel-transcript>` 内的 `<profiles>` 只列出当前实际出现在 transcript 中的非自身
-发送者，不与 `<channel-identity>` 重复；简介受 transcript 总 token 预算约束，并标记
-`untrusted="true"`。简介变化后，per-turn `<channel-context>` 立即使用最新资料；持久化
-transcript 在下一次频道消息或 turn 刷新时更新。`<channel-identity>` 示例：
+`<channel-transcript>` 直接使用记录中的 sender 名称，不再内嵌 `<profiles>` 或 `sender_id`；
+成员资料只由 `<channel-identity>` 和 per-turn roster 提供。每条消息为单行 JSON 转义格式，
+例如 `Master (user, at ..., seq=384): "...\n..."`；不再使用逐条 XML。`<channel-identity>` 示例：
 
 ```xml
 <channel-identity version="1">
@@ -172,8 +171,12 @@ transcript 在下一次频道消息或 turn 刷新时更新。`<channel-identity
 `<channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
 magic` 相同视为同一个群聊，每个 profile 在
 `~/.aki/channel-history/<channel-key>/<profile>.jsonl` 保存自己看到的记录。重启后会重新
-加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 64K token
+加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 32K token
 预算约束。
+
+所有 profile 还注册对用户隐藏的只读工具 `search_chat_history(query, limit, scope)`，只搜索
+调用者自己的群聊、当前独处和归档独处记录。匹配为大小写不敏感子串，结果按时间倒序；独处结果
+明确标记为私密，禁止向其他成员转述。
 
 `<live-context>` 在 bridge 模式下同样只作为 per-turn overlay 追加在实际 API 请求末尾，
 不写回 agent record / `system-prompt.json`。它每轮重新采集桌面快照。

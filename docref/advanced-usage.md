@@ -200,6 +200,7 @@ systemctl --user edit akid@.service   # Environment="AKI_COMPACTION_RATIO=0.5"
 ```bash
 akictl compact                    # 默认：保留最新 40% 消息，摘要其余部分
 akictl compact sliding_window     # 指定模式
+akictl compact sliding_window --omit-tool-results  # 成功后把持久 toolResult 正文替换为 [Omitted]
 akictl fuyu compact all           # 对 fuyu profile 执行
 akictl compact --timeout 1800     # 等待压缩与记忆整理的最长秒数
 ```
@@ -260,7 +261,7 @@ solo memories → shared memory → channel turn → transcript → roster → l
    initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
    bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
 8. `<channel-transcript>`：仅频道来源的 turn 包含；bridge 模式下同样只走 turn overlay，
-   不写回持久 system prompt；其中有 `<profiles>` 和 `<messages>`。
+   不写回持久 system prompt；消息为单行 JSON 转义格式，不再内嵌 `<profiles>` 或 `sender_id`。
 9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
    bridge 模式下作为 per-turn overlay，始终最后追加、不落盘。
 
@@ -521,6 +522,7 @@ akictl identity rename 秋          # 改名；旧 Name 永久保留为别名
 akictl recompile                  # 从 MemFS 重编译当前会话 prompt
 akictl compact                    # 压缩上下文并触发一次记忆整理
 akictl compact all                # 指定 Letta compaction 模式
+akictl compact all --omit-tool-results  # 压缩和整理成功后省略持久工具结果正文
 akictl reset                      # 重置 default 会话（先备份）
 ```
 

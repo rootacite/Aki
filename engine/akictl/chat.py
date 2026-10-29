@@ -38,6 +38,16 @@ from .support import (
 from .access import pkg
 
 
+def _parse_compact_args(tokens: list[str]) -> dict[str, Any]:
+    params: dict[str, Any] = {}
+    for token in tokens:
+        if token == "--omit-tool-results":
+            params["omit_tool_results"] = True
+        elif "mode" not in params:
+            params["mode"] = token
+    return params
+
+
 
 def _channel_history_file(args: argparse.Namespace, profile: str) -> Path:
     config = _profile_config(profile, getattr(args, "config_path", None))
@@ -328,7 +338,7 @@ def repl(
         "akictl MQTT REPL. Commands: /status /health /history [n] /allow <dir> "
         "/disallow <dir> /allowlist /memory ... /mqtt ... /mcp ... /model [set <id>] "
         "/reasoning [set <level>] /avatar /username /set-username <name> "
-        "/recompile /compact [mode] /reset /quit",
+        "/recompile /compact [mode] [--omit-tool-results] /reset /quit",
         file=sys.stderr,
     )
     while True:
@@ -405,9 +415,7 @@ def repl(
                 _print_json(_rpc_call(client, "aki.conversation.recompile"))
             elif prompt == "/compact" or prompt.startswith("/compact "):
                 rest = prompt.split()[1:]
-                params: dict[str, Any] = {}
-                if rest:
-                    params["mode"] = rest[0]
+                params = _parse_compact_args(rest)
                 _print_json(
                     _rpc_call(
                         client,

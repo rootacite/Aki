@@ -260,8 +260,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：当前是 `aki/grok-4.6`（reasoning `low`，上下文 500,000）；其他已启用模型可在
-  `aki/deepseek-flash`、`aki/gemini-3.8-flash` 和 `aki/gemma-4-26b-a4b-it` 之间切换。
+- 模型：当前是 `aki/gemma-4-26b-a4b-it`（local-gemma @ `127.0.0.1:10000`，上下文
+  192,000；采样 `temperature=1.0`、`top_p=0.95`、`top_k=64`，reasoning 预算固定为
+  `reasoning_budget_tokens=2048`）；其他已启用模型可在 `aki/deepseek-flash`、
+  `aki/gemini-3.8-flash` 和 `aki/grok-4.6` 之间切换。
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
 - 基础 system prompt：`prompts/aki-system.md`，由
   `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
@@ -365,7 +367,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `want`，收到显式 `want` 才回完整 `have`，连接成功不再广播头像。Linux
   `tokifactord` 只有在前端连接 `tokifactord.sock` 时才请求头像。
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
-- 上下文预算：500,000 tokens；达到 50%（250,000 tokens）触发 compaction。
+- 上下文预算：Aki 为 192,000 tokens；达到 90%（172,800 tokens）触发 compaction。
+  该覆盖由 `akid@aki.service.d/compaction.conf` 的 `AKI_COMPACTION_RATIO=0.9` 提供，
+  其他 profile 仍使用默认 0.5。
 - 会话模型：单会话，固定使用 `default` conversation。唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
