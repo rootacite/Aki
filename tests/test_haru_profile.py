@@ -175,6 +175,14 @@ class HaruConfigTests(unittest.TestCase):
         self.assertNotIn("--tools", base)
         self.assertNotIn("--toolset", base)
         self.assertNotIn("--disallowedTools", base)
+        self.assertEqual(
+            base[base.index("--reflection-trigger") + 1],
+            "step-count",
+        )
+        self.assertEqual(
+            base[base.index("--reflection-step-count") + 1],
+            "25",
+        )
 
 
 class HaruPersonaTests(unittest.TestCase):

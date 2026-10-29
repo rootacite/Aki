@@ -191,8 +191,7 @@ systemctl --user edit akid@.service   # Environment="AKI_COMPACTION_RATIO=0.5"
 ```
 
 该行为由 `patches/letta-code/0002-aki-compaction-policy.patch` 实现；修改比例后需要重新构建
-并重启对应服务（默认值已内置为 0.5，通常不需要显式设置）。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction；压缩完成后，
-`reflectionTrigger = compaction-event` 会继续触发 MemFS 记忆整理。旧的
+并重启对应服务（默认值已内置为 0.5，通常不需要显式设置）。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction。压缩完成后不会单独触发 reflection；当前项目使用 `reflectionTrigger = step-count`（阈值 25），累计 25 个未反思 step 后触发 MemFS 记忆整理，backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式传入。旧的
 `scripts/patch-letta-compaction.py` 仅用于尚未迁移的外部 Letta 安装。
 
 也可以随时手动触发同一套流程：

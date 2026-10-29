@@ -38,6 +38,9 @@ from .constants import (
 from .paths import default_backend_dir
 
 
+REFLECTION_TRIGGER = "step-count"
+REFLECTION_STEP_COUNT = 25
+
 
 @dataclass
 class GatewayConfig:
@@ -167,6 +170,10 @@ def build_letta_command(config: GatewayConfig) -> list[str]:
         "--output-format",
         "stream-json",
         "--include-partial-messages",
+        "--reflection-trigger",
+        REFLECTION_TRIGGER,
+        "--reflection-step-count",
+        str(REFLECTION_STEP_COUNT),
         "--permission-mode",
         "standard",
     ]

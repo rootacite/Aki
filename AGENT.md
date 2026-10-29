@@ -33,18 +33,29 @@
 - 若用户明确要求不要部署，才可以跳过；此时必须在最终回复中说明“未部署”，不能把源码完成
   当成运行状态完成。
 
-### 0.1 强制：测试不得污染真实 conversation
+### 0.1 强制：测试后回滚的正确方法
 
-任何自动化测试、集成测试或手工验证都必须使用隔离上下文：临时 `HOME`、`LETTA_HOME`、
-backend 目录、conversation id、端口和频道。不得读取后写入、reset、compact、删除或向真实
-用户的 conversation 发送测试消息。
+测试回滚必须同时覆盖四层，不能只删除可见消息：
 
-- 测试前后必须核对真实 `~/.letta` 会话、agent record、MemFS、频道历史及其 mtime/计数，
-  证明生产数据没有被改动。
-- 如果测试已经影响这台机器的真实 conversation（包括新增、修改、删除消息，改写 system
-  prompt，触发 compaction，或污染频道历史），必须先备份现场，再完整回滚到测试前状态。
-- 回滚后要重新核对会话结构、in-context 消息、频道历史和成员上下文，确认没有残留测试内容。
-- 在污染确认与回滚完成之前，不得宣布任务完成；无法确认是否污染时，按“已污染”处理并先核查。
+1. 主上下文：`~/.letta/lc-local-backend/conversations/<conversation>/messages.jsonl` 和 `conversation.json` 的 `in_context_message_ids`。
+2. 频道记录：`~/.aki/channel-history/<channel>/<profile>.jsonl` 和 `<profile>.seen.json`。
+3. Reflection transcript：`~/.letta/transcripts/<agent_id>/<conversation>/transcript.jsonl`。
+4. Reflection state：同目录 `state.json`。测试生成的 `payload-auto-*.json` 不会自动复用，但可能被手工复用；需要保留的移入 evidence 目录。
+
+操作顺序：
+
+- 先备份上述文件并生成 SHA256SUMS；需要时停掉对应 akid 服务，避免编辑时后端继续写入。
+- 只删除明确的测试内容。测试 user 行可能引出不含测试标记的 assistant/reasoning 行（例如 `[NO_REPLY]`、解释性回复），因此按“测试 user 行到下一条非测试 user 行”整段删除，而不是只按 `ACK-*` / `CACHE-TEST` 文本匹配。
+- 删除后按剩余 transcript 重算 state，不要按删除行数盲减：
+  - `total_completed_steps` = 剩余 assistant 行数；
+  - `reflected_through_message_id` = 最后一条剩余 assistant 的 `source_message_id`；
+  - `reflected_completed_steps` = 截至该 anchor 的 assistant 行数（anchor 为最后一条时等于总数）；
+  - `steps_since_last_successful_reflection = total - reflected`，正常应为 0。
+- 重启服务并确认 backend ready；重新核对 messages、solo/群聊历史、transcript 无测试标记，state 的 steps 为 0，anchor 存在。
+- 测试改过模型/provider/config 时，恢复 agent record/model settings 并重启 backend，验证实际模型。
+- Reflection 子代理的修改在独立 worktree 中；测试产生 dirty worktree 时不得 merge，先保留现场或按备份回滚。
+- 旧 payload、备份、反思子代理 conversation、API capture 不属于 live 上下文，但可能含测试内容；确认不需作为证据后再删除，或移入 evidence 目录，避免被手工复用。
+- 只有四层都核对完成才算回滚完成；只回滚 messages/channel 而留下 transcript/state，会让 reflection 计数继续偏高。
 
 ## 1. 产品定位
 
@@ -381,7 +392,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 会话模型：单会话，固定使用 `default` conversation。唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
-- 记忆整理：`reflectionTrigger = compaction-event`，压缩后由 reflection 将稳定信息写入 MemFS。
+- 记忆整理：`reflectionTrigger = step-count`，阈值 25；累计 25 个未反思 step 后由 reflection 将稳定信息写入 MemFS。backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式生效。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 采集一次桌面快照。`<live-context>` 只作为 per-turn overlay 追加在
   实际 API 请求末尾，不写回持久 system prompt。截图只放路径与元数据，默认 64K token 上限。
