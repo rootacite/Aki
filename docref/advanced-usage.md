@@ -301,7 +301,7 @@ aki-layer 右侧垂直中部会显示一张用户状态卡，数据直接来自�
 默认 socket 为 `$XDG_RUNTIME_DIR/aki/akid.sock`。手动运行时：
 
 ```bash
-AKI_SOCKET=/tmp/aki/akid.sock python3 engine/akid.py
+AKI_SOCKET=/tmp/aki/akid.sock python3 -m engine.akid
 ```
 
 ### 首选 GUI：tokifactor
@@ -899,22 +899,25 @@ bridge 模式下，akid 在每个 turn 真正开始前采集一次桌面快照�
 
 ### Provider API call capture
 
-排查上游模型行为（例如 `finish_reason: content_filter`）时，可以按 profile 开启两层只追加的
-JSONL capture；默认关闭，不影响正常请求：
+排查上游模型行为（例如 `finish_reason: content_filter`）时，可以按 profile 开启调试输出；
+默认关闭，不影响正常请求：
 
 - Bridge 层：设置 `AKI_API_CALL_CAPTURE=<dir>`，在每次 provider `streamOnce` 前记录加完
   turn overlay 后的 `system_prompt`、`messages`、`tools`、模型、conversation 和
   `overlay.turn_id`。文件名是 `api-calls-<agent-id>.jsonl`。
-- Proxy 层：设置 `AKI_RAW_API_CALL_CAPTURE_DIR=<dir>`，在 loopback proxy 真正转发前记录
-  最终 JSON payload、上游模型、URL、body 大小和 SHA-256。文件名是
-  `raw-api-calls-<profile>.jsonl`。
+- Proxy 层：设置 `AKI_PROXY_DEBUG_SOCKET=1`，在
+  `/tmp/akid/proxy-debug-<profile>.sock` 提供实时 Unix socket。连接后先收到 `hello`
+  与最近事件回放，然后实时收到 `request`、`response_start`、`response_chunk`、
+  `response_end`、`error` 事件。可用
+  `socat -u UNIX-CONNECT:/tmp/akid/proxy-debug-aki.sock -` 查看。
 
-两层记录都使用目录 `0700`、文件 `0600`；大于 1000 字符的 base64 `data` 会替换为
-`[base64 omitted]`，超长字符串会截断。不要长期保留包含私密对话的 capture，排查完成后删除
-对应目录。systemd 服务可通过 `akid@<profile>.service.d/` 与
-`akid-proxy@<profile>.service.d/` 的 `Environment=` drop-in 单独开启。
+Proxy socket 目录使用 `0700`、socket 使用 `0600`，仅同 uid 可连；事件中的敏感 header 会
+脱敏，大于 1000 字符的 base64 `data` 会替换为 `[base64 omitted]`，单事件超过 2 MiB 时
+会截断 payload。事件只保留在内存 ring buffer，不落盘。systemd 服务可通过
+`akid@<profile>.service.d/` 与 `akid-proxy@<profile>.service.d/` 的 `Environment=`
+drop-in 单独开启。
 
-相关环境变量和参数：`AKI_LIVE_CONTEXT_ENABLED`、`AKI_LIVE_CONTEXT_BUDGET_TOKENS`、
+相关环境变量和参数：`AKI_PROXY_DEBUG_SOCKET`、`AKI_LIVE_CONTEXT_ENABLED`、`AKI_LIVE_CONTEXT_BUDGET_TOKENS`、
 `AKI_ZSH_HISTORY`、`AKI_PS_BIN`、`AKI_QDBUS_BIN`、`AKI_LIVE_CONTEXT_TIMEOUT`；
 `--no-live-context`、`--live-context-budget-tokens`、`--zsh-history`、`--ps-bin`、
 `--qdbus-bin`、`--live-context-timeout`。`aki.health` 和 `aki.status` 的

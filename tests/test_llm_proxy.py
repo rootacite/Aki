@@ -127,27 +127,42 @@ class LlmProxyTests(unittest.IsolatedAsyncioTestCase):
         payload = await asyncio.wait_for(reader.read(4096), timeout=2)
         self.assertIn(b"404", payload)
 
-    async def test_captures_raw_forwarded_provider_request(self) -> None:
+    async def test_streams_debug_request_and_response_events(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             route = next(iter(self.proxy.routes.values()))
+            socket_path = Path(directory) / "debug.sock"
             proxy = LlmProxy(
                 "127.0.0.1",
                 0,
                 "loopback-token",
                 (route,),
                 profile="haru",
-                capture_dir=directory,
+                debug_socket=socket_path,
             )
             await proxy.start()
             writer = None
+            debug_writer = None
             try:
+                debug_reader, debug_writer = await asyncio.open_unix_connection(
+                    str(socket_path)
+                )
+                hello = json.loads(
+                    await asyncio.wait_for(debug_reader.readline(), timeout=2)
+                )
+                self.assertEqual(hello["event"], "hello")
+                self.assertEqual(hello["profile"], "haru")
                 reader, writer = await asyncio.open_connection(
                     "127.0.0.1", proxy.port
                 )
                 body = json.dumps(
                     {
                         "model": "local-model",
-                        "messages": [{"role": "user", "content": "hello capture"}],
+                        "messages": [{"role": "user", "content": "hello debug"}],
+                        "tools": [
+                            {"type": "function", "function": {"name": "Grep"}},
+                            {"type": "function", "function": {"name": "Glob"}},
+                            {"type": "function", "function": {"name": "LS"}},
+                        ],
                     }
                 ).encode()
                 writer.write(
@@ -168,18 +183,42 @@ class LlmProxyTests(unittest.IsolatedAsyncioTestCase):
                 self.release_upstream.set()
                 await asyncio.wait_for(reader.read(4096), timeout=2)
 
-                path = Path(directory) / "raw-api-calls-haru.jsonl"
-                record = json.loads(path.read_text(encoding="utf-8").splitlines()[-1])
-                self.assertEqual(record["profile"], "haru")
-                self.assertEqual(record["model"], "local-model")
-                self.assertEqual(record["upstream_model"], "upstream-model")
-                self.assertEqual(record["payload"]["model"], "upstream-model")
+                events = []
+                while True:
+                    line = await asyncio.wait_for(debug_reader.readline(), timeout=2)
+                    self.assertTrue(line)
+                    event = json.loads(line)
+                    events.append(event)
+                    if event["event"] == "response_end":
+                        break
+                request = next(event for event in events if event["event"] == "request")
+                self.assertEqual(request["profile"], "haru")
+                self.assertEqual(request["requested_model"], "local-model")
+                self.assertEqual(request["upstream_model"], "upstream-model")
+                self.assertEqual(request["payload"]["model"], "upstream-model")
                 self.assertEqual(
-                    record["payload"]["messages"][0]["content"], "hello capture"
+                    request["payload"]["messages"][0]["content"], "hello debug"
                 )
-                self.assertNotIn("authorization", record)
-                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(request["tool_names"], ["Glob", "Grep", "LS"])
+                response_start = next(
+                    event for event in events if event["event"] == "response_start"
+                )
+                self.assertEqual(response_start["status"], 200)
+                chunks = "".join(
+                    event["data"]
+                    for event in events
+                    if event["event"] == "response_chunk"
+                )
+                self.assertEqual(chunks, "datamore!")
+                response_end = events[-1]
+                self.assertEqual(response_end["status"], 200)
+                self.assertEqual(response_end["bytes"], 9)
+                self.assertEqual(socket_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(socket_path.parent.stat().st_mode & 0o777, 0o700)
             finally:
+                if debug_writer is not None:
+                    debug_writer.close()
+                    await debug_writer.wait_closed()
                 if writer is not None:
                     writer.close()
                     await writer.wait_closed()

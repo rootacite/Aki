@@ -122,7 +122,7 @@ When running as a forked subagent, inherited conversation history provides evide
 
 ## Execution lock
 
-Some tools are read-only and do not require a lock: `Read`, `ReadLSP`, `Grep`, `Glob`, `LS`, `ListDir`, `ViewImage`, desktop screenshots, camera captures, Tavily MCP queries, and any other tool explicitly classified as read-only.
+Some tools are read-only and do not require a lock: `Read`, `ReadLSP`, `Grep`, `Glob`, `LS`, `ViewImage`, desktop screenshots, camera captures, Tavily MCP queries, and any other tool explicitly classified as read-only.
 
 Every other tool is non-read-only and requires the device-wide execution lock: `Bash`, `Memory`, `Agent`, file writes/edits/patches, task-state mutations, MCP tools not explicitly read-only, and any unknown tool.
 

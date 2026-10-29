@@ -1,0 +1,43 @@
+diff --git a/src/tools/toolset-catalog.ts b/src/tools/toolset-catalog.ts
+index 1111111..2222222 100644
+--- a/src/tools/toolset-catalog.ts
++++ b/src/tools/toolset-catalog.ts
+@@ -39,6 +39,9 @@ export const TOOLSET_CATALOG: Readonly<Record<ToolsetName, ToolsetDefinition>> =
+         "exec_command",
+         "write_stdin",
+         "Read",
++        "Grep",
++        "Glob",
++        "LS",
+         "Edit",
+         "Write",
+         "ViewImage",
+@@ -69,6 +72,9 @@ export const TOOLSET_CATALOG: Readonly<Record<ToolsetName, ToolsetDefinition>> =
+         "Edit",
+         "TaskStop",
+         "Read",
++        "Grep",
++        "Glob",
++        "LS",
+         "Skill",
+         "Memory",
+         "CodeMode",
+diff --git a/src/tools/toolset-catalog.test.ts b/src/tools/toolset-catalog.test.ts
+index 3333333..4444444 100644
+--- a/src/tools/toolset-catalog.test.ts
++++ b/src/tools/toolset-catalog.test.ts
+@@ -19,6 +19,14 @@ test("advertises the supported toolset choices", () => {
+   ]);
+ });
+ 
++test("Aki presets expose the read-only search tools", () => {
++  for (const id of ["default", "letta"] as const) {
++    expect(TOOLSET_CATALOG[id].tools).toEqual(
++      expect.arrayContaining(["Grep", "Glob", "LS"]),
++    );
++  }
++});
++
+ test("client options contain only toolset protocol metadata", () => {
+   for (const option of TOOLSET_OPTIONS) {
+     expect(Object.keys(option).sort()).toEqual([

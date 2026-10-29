@@ -290,7 +290,7 @@ const PROFILE = {profile_literal};
 const WRITE_ROOTS = {roots}.map(expandRoot);
 const DENY_TOOLS = new Set({denied});
 const WRITE_TOOLS = new Set(["Write", "Edit", "ApplyPatch", "write_artifact_file"]);
-const READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "ListDir", "read_artifact_file"]);
+const READ_TOOLS = new Set(["Read", "Grep", "Glob", "LS", "read_artifact_file"]);
 const LETTA_HOME = process.env.LETTA_HOME
   ? resolve(process.env.LETTA_HOME)
   : resolve(homedir(), ".letta");
@@ -356,8 +356,8 @@ function writeTargets(toolName, args) {{
   return typeof value === "string" && value.trim() ? [value] : [];
 }}
 
-function readTargets(toolName, args) {{
-  const value = args.file_path || args.path || (toolName === "Grep" || toolName === "Glob" ? args.pattern : "");
+function readTargets(toolName, args, workingDirectory) {{
+  const value = args.file_path || args.path || ((toolName === "Grep" || toolName === "Glob") ? workingDirectory : "");
   return typeof value === "string" && value.trim() ? [value] : [];
 }}
 
@@ -375,7 +375,7 @@ function check(event) {{
   }}
   const workingDirectory = event.workingDirectory || event.cwd || process.cwd();
   if (READ_TOOLS.has(toolName)) {{
-    const rawTargets = readTargets(toolName, event.args || {{}});
+    const rawTargets = readTargets(toolName, event.args || {{}}, workingDirectory);
     if (rawTargets.length === 0) {{
       return deny(
         `HARU_READ_DENIED: ${{toolName}} did not include a path. ` +

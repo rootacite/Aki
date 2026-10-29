@@ -19,7 +19,6 @@ READ_ONLY_TOOLS = frozenset(
         "Grep",
         "Glob",
         "LS",
-        "ListDir",
         "ViewImage",
         "read_artifact_file",
         "TaskGet",

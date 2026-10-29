@@ -232,7 +232,7 @@ Wants=akid-proxy@%i.service
 
 [Service]
 Type=simple
-ExecStart={python_bin} {repo / 'engine' / 'akid.py'} --profile %i
+ExecStart={python_bin} -m engine.akid --profile %i
 WorkingDirectory={repo}
 Environment="PYTHONUNBUFFERED=1"
 Environment="AKI_LETTA_BIN={letta_bin or repo / 'bin' / 'letta-aki'}"

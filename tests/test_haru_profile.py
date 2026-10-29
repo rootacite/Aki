@@ -86,6 +86,10 @@ class HaruConfigTests(unittest.TestCase):
         self.assertTrue(config.tool_policy.explicit)
         self.assertEqual(config.tool_policy.toolset, "letta")
         self.assertIn("Write", config.tool_policy.allow)
+        self.assertIn("Grep", config.tool_policy.allow)
+        self.assertIn("Glob", config.tool_policy.allow)
+        self.assertIn("LS", config.tool_policy.allow)
+        self.assertNotIn("ListDir", config.tool_policy.allow)
         self.assertIn("acquire_execution_lock", config.tool_policy.allow)
         self.assertIn("wait_other", config.tool_policy.allow)
         self.assertIn("wait_user", config.tool_policy.allow)
@@ -151,6 +155,10 @@ class HaruConfigTests(unittest.TestCase):
         self.assertIn("--tools", command)
         allowed = command[command.index("--tools") + 1].split(",")
         self.assertIn("Write", allowed)
+        self.assertIn("Grep", allowed)
+        self.assertIn("Glob", allowed)
+        self.assertIn("LS", allowed)
+        self.assertNotIn("ListDir", allowed)
         self.assertIn("wait_other", allowed)
         self.assertNotIn("Bash", allowed)
         self.assertIn("--disallowedTools", command)
@@ -304,6 +312,21 @@ console.log(JSON.stringify(results));
         for index in (8, 9, 10, 12, 13, 14):
             self.assertEqual(results[index]["decision"], "deny", index)
         self.assertEqual(results[11]["decision"], "allow")
+
+    def test_search_tools_use_path_or_working_directory(self) -> None:
+        cases = [
+            {"toolName": "Grep", "args": {"pattern": "x", "path": "/tmp"}, "workingDirectory": str(self.repo), "phase": "approval"},
+            {"toolName": "Grep", "args": {"pattern": "x"}, "workingDirectory": str(self.repo), "phase": "approval"},
+            {"toolName": "Glob", "args": {"pattern": "*.md", "path": "~/.letta/lc-local-backend/memfs/agent/memory"}, "workingDirectory": str(self.repo), "phase": "approval"},
+            {"toolName": "LS", "args": {"path": "/tmp"}, "workingDirectory": str(self.repo), "phase": "approval"},
+            {"toolName": "LS", "args": {"path": str(self.repo)}, "workingDirectory": str(self.repo), "phase": "approval"},
+            {"toolName": "Glob", "args": {"pattern": "*.md"}, "workingDirectory": "/tmp", "phase": "approval"},
+        ]
+        results = self.check(cases)
+        for index in (0, 2, 3, 5):
+            self.assertEqual(results[index]["decision"], "allow", index)
+        for index in (1, 4):
+            self.assertEqual(results[index]["decision"], "deny", index)
 
 
 if __name__ == "__main__":

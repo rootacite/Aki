@@ -378,7 +378,8 @@ class HaruLettaIntegrationTests(unittest.TestCase):
             akid = self._spawn(
                 [
                     sys.executable,
-                    str(ROOT / "engine" / "akid.py"),
+                    "-m",
+                    "engine.akid",
                     "--profile",
                     "haru",
                     "--mqtt-host",

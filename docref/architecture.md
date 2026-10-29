@@ -56,7 +56,7 @@
 ## 非只读执行锁
 
 工具是否只读由代码静态分类，不交给模型判断。`Read`、`ReadLSP`、`Grep`、`Glob`、`LS`、
-`ListDir`、`ViewImage`、桌面截图、摄像头和 Tavily 的只读 MCP 工具可直接使用；`Bash`、
+`LS`、`ViewImage`、桌面截图、摄像头和 Tavily 的只读 MCP 工具可直接使用；`Bash`、
 `Memory`、`Agent`、写入/编辑/补丁、任务状态写入、发图、文生图、未知 MCP 以及所有未明确
 列出的工具都按非只读处理。`generate_image` 与 `tokifactor_send_image` 是显式的锁豁免工具：
 仍是外部副作用并保留各自的审批策略，但不参与整机执行锁串行。截图、摄像头和生成图输出使用
@@ -203,11 +203,12 @@ turn 的 user role，智能体触发的 turn 先回滚临时 prompt/assistant/to
 真人频道 user role，而不是因为 origin 不是 `mqtt` 退回成第二个用户 turn。这样护栏打回后
 模型在同一个 correction turn 里回复一次，turn 退出时只更新持久上下文，不重复产出。
 
-需要复现上游 provider 行为时，可分别开启 bridge 与 loopback proxy 的 API capture。
+需要复现上游 provider 行为时，可分别开启 bridge 与 loopback proxy 的调试输出。
 Bridge 的 `AKI_API_CALL_CAPTURE` 记录 overlay 应用后的 provider 上下文；proxy 的
-`AKI_RAW_API_CALL_CAPTURE_DIR` 记录真正转发给上游的 JSON payload 与 body hash。两层都按
-profile 独立启用、目录 `0700`、文件 `0600`，并对大段 base64 做脱敏；它们是诊断工具，不是
-常规日志，排查结束后应删除 capture 目录。
+`AKI_PROXY_DEBUG_SOCKET=1` 在 `/tmp/akid/proxy-debug-<profile>.sock` 提供实时 NDJSON
+流，记录真正转发给上游的请求、`tool_names`、响应状态与 SSE/JSON 回复。socket 目录
+`0700`、文件 `0600`、仅同 uid 可连，并对敏感 header 与大段 base64 做脱敏；它们是诊断工具，
+不是常规日志，排查结束后应关闭或删除。
 
 群聊记录本身始终在消息送达时立即追加，不等待 turn 结束，也不做插入块合并。用户在一次
 turn 中插入多条消息时，群聊历史里就是多条独立的普通用户消息；插入边界和插入时间只存在于
@@ -275,7 +276,7 @@ QoS 1 文本事件（`kind=wait_user`）即时广播；该事件不进入频道�
 频道消息使用 tokifactor 相同的线格式：`HKDF-SHA256` 派生密钥，
 `nonce || AES-GCM-SIV` 密文，Base64 后发布；短消息是 `TextEnvelope` JSON，
 长消息是加密的 `TextChunk` 分片。实现位于 `engine/tokifactor.py`、
-`engine/mqtt_client.py` 和 `engine/channel.py`。
+`engine/mqtt_client.py` 和 `engine/channel/`。
 
 akid 使用基于 `sender_id + broker + topic + magic` 的稳定 MQTT client id 和非 clean
 session，因此 broker 会在 akid 离线时保留 text/picture/file 的 QoS 1 消息；control 和 avatar
@@ -348,11 +349,11 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 
 ## 文件布局
 
-- `engine/akid.py`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
+- `engine/akid/`：asyncio Unix socket server、JSON-RPC 分发、turn 队列与审批。
 - `engine/tool_ownership.py`：专属工具注册表、owner 校验和 `<tool-ownership>` 渲染。
 - `engine/schedule_store.py`：Aki 日程持久化、重复规则和 missed 处理。
 - `engine/life_ledger.py`：Aki 独立生活账本与 16 KiB 硬上限。
-- `engine/presence.py`：evdev/logind 活动采样、工作/深夜/归来触发器。
+- `engine/presence/`：evdev/logind 活动采样、工作/深夜/归来触发器。
 - `engine/operation_journal.py`：归来上下文使用的工具调用台账。
 - `engine/layer_process.py`：拉起并监督 `aki-layer` 透明画布进程。
 - `engine/akid_proxy.py`：独立的 per-profile loopback LLM proxy systemd 进程。
@@ -362,7 +363,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/sandbox_exec.py`：在 bwrap 内启动 Letta 及其全部子进程。
 - `engine/protocol.py`：NDJSON、JSON-RPC 错误码与事件模型。
 - `engine/client.py`：同步本地管理客户端库。
-- `engine/akictl.py`、`bin/akictl`：MQTT 对话客户端 + 本地管理 CLI。
+- `engine/akictl/`、`bin/akictl`：MQTT 对话客户端 + 本地管理 CLI。
 - `engine/channel_history.py`：akid 与 CLI 共用的频道历史 key/路径 helper。
 - `engine/solo_memory.py`：独处会话存储、摘要、确定性整轮预算淘汰与 MemFS 归档。
 - `engine/public_memory.py`：跨 profile 去重保存 final 群聊消息，提供共享公共记忆索引。

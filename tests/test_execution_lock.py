@@ -32,7 +32,6 @@ class ExecutionPolicyTests(unittest.TestCase):
             "Grep",
             "Glob",
             "LS",
-            "ListDir",
             "ViewImage",
             "desktop_take_screenshot",
             "camera_take_photo",
@@ -73,6 +72,8 @@ class ExecutionPolicyTests(unittest.TestCase):
             prompt = (root / "prompts" / name).read_text(encoding="utf-8")
             self.assertIn("## Execution lock", prompt)
             self.assertIn("Some tools are read-only", prompt)
+            self.assertIn("`Grep`, `Glob`, `LS`", prompt)
+            self.assertNotIn("ListDir", prompt)
             self.assertIn("requires the device-wide execution lock", prompt)
             self.assertIn("`tokifactor_send_image` are explicitly lock-exempt", prompt)
             self.assertIn(

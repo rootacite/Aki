@@ -4,19 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import hashlib
 import hmac
 import json
 import logging
 import os
 import ssl
 import time
-from pathlib import Path
+import uuid
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from engine.aki_config import ModelRoute, parse_upstream_proxy
 from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
+from engine.proxy_debug import DebugResponse, ProxyDebugStream, resolve_debug_socket
 
 LOGGER = logging.getLogger("akid.llm_proxy")
 
@@ -72,24 +72,6 @@ def _authorized(headers: Mapping[str, str], token: str) -> bool:
     return hmac.compare_digest(supplied, token)
 
 
-def _capture_safe(value: object, depth: int = 0) -> object:
-    if depth > 12:
-        return "[depth limit]"
-    if isinstance(value, str):
-        return value if len(value) <= 300_000 else value[:300_000] + "\n...[truncated]"
-    if isinstance(value, list):
-        return [_capture_safe(item, depth + 1) for item in value]
-    if isinstance(value, dict):
-        captured: dict[str, object] = {}
-        for key, item in value.items():
-            if key == "data" and isinstance(item, str) and len(item) > 1000:
-                captured[key] = "[base64 omitted]"
-            else:
-                captured[key] = _capture_safe(item, depth + 1)
-        return captured
-    return value
-
-
 class LlmProxy:
     def __init__(
         self,
@@ -101,7 +83,7 @@ class LlmProxy:
         ssl_context: ssl.SSLContext | None = None,
         grok_oauth: GrokOAuthProvider | None = None,
         profile: str = "",
-        capture_dir: str | os.PathLike[str] | None = None,
+        debug_socket: str | os.PathLike[str] | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -115,17 +97,20 @@ class LlmProxy:
         self.grok_oauth = grok_oauth
         if needs_grok_oauth and self.grok_oauth is None:
             self.grok_oauth = GrokOAuthProvider(upstream_proxy=self.upstream_proxy)
-        configured_capture = capture_dir or os.environ.get(
-            "AKI_RAW_API_CALL_CAPTURE_DIR", ""
-        )
-        self.capture_dir = (
-            Path(configured_capture).expanduser() if str(configured_capture).strip() else None
-        )
         self.profile = profile
-        self._capture_lock = asyncio.Lock()
+        configured_debug = debug_socket or os.environ.get("AKI_PROXY_DEBUG_SOCKET", "")
+        self.debug_socket = resolve_debug_socket(configured_debug, profile)
+        self.debug: ProxyDebugStream | None = None
         self._server: asyncio.Server | None = None
 
     async def start(self) -> None:
+        if self.debug_socket is not None:
+            try:
+                self.debug = ProxyDebugStream(self.debug_socket, self.profile)
+                await self.debug.start()
+            except Exception as exc:
+                LOGGER.error("proxy debug stream unavailable path=%s error=%s", self.debug_socket, exc)
+                self.debug = None
         self._server = await asyncio.start_server(self._handle, self.host, self.port)
         sockets = self._server.sockets or []
         if not sockets:
@@ -146,21 +131,27 @@ class LlmProxy:
 
     async def stop(self) -> None:
         server = self._server
-        if server is None:
-            return
-        server.close()
-        await server.wait_closed()
-        self._server = None
+        if server is not None:
+            server.close()
+            await server.wait_closed()
+            self._server = None
+        debug = self.debug
+        self.debug = None
+        if debug is not None:
+            await debug.stop()
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         started = time.monotonic()
+        request_id = uuid.uuid4().hex
         model_id = "-"
         upstream_host = "-"
         status = 500
         try:
-            status, model_id, upstream_host = await self._dispatch(reader, writer)
+            status, model_id, upstream_host = await self._dispatch(reader, writer, request_id)
         except Exception:
             LOGGER.exception("llm proxy request failed")
+            if self.debug is not None:
+                self.debug.publish_error(request_id, status=502, error="upstream unavailable")
             if not writer.is_closing():
                 writer.write(_status_json(502, "upstream unavailable"))
                 status = 502
@@ -179,7 +170,10 @@ class LlmProxy:
             )
 
     async def _dispatch(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        request_id: str,
     ) -> tuple[int, str, str]:
         self._last_path = "-"
         try:
@@ -242,25 +236,32 @@ class LlmProxy:
         if route.extra_body:
             payload.update(route.extra_body)
         forwarded = json.dumps(payload).encode("utf-8")
-        await self._capture_provider_request(
-            path=path,
-            model_id=model_id,
-            route=route,
-            payload=payload,
-            forwarded=forwarded,
-        )
+        if self.debug is not None:
+            self.debug.publish_request(
+                request_id,
+                path=path,
+                requested_model=model_id,
+                upstream_model=route.upstream_model,
+                upstream_url=route.url,
+                payload=payload,
+                forwarded=forwarded,
+            )
         parsed = urlsplit(route.url)
         upstream_host = parsed.hostname or "-"
         api_key = route.api_key
         extra_headers: dict[str, str] = {}
         if route.auth == "grok-oauth":
             if self.grok_oauth is None:
+                if self.debug is not None:
+                    self.debug.publish_error(request_id, status=502, error="grok oauth is not configured")
                 writer.write(_status_json(502, "grok oauth is not configured"))
                 return 502, model_id, upstream_host
             try:
                 credentials = await asyncio.to_thread(self.grok_oauth.credentials)
             except GrokOAuthError as exc:
                 LOGGER.warning("grok oauth unavailable: %s", exc)
+                if self.debug is not None:
+                    self.debug.publish_error(request_id, status=502, error="grok oauth unavailable")
                 writer.write(_status_json(502, "grok oauth unavailable"))
                 return 502, model_id, upstream_host
             api_key = credentials.access_token
@@ -276,6 +277,8 @@ class LlmProxy:
                 ssl_context=self.ssl_context,
                 use_proxy=route.use_proxy,
                 extra_headers=extra_headers,
+                debug=self.debug,
+                request_id=request_id,
             )
         except OSError as exc:
             LOGGER.warning(
@@ -284,61 +287,11 @@ class LlmProxy:
                 type(exc).__name__,
                 exc,
             )
+            if self.debug is not None:
+                self.debug.publish_error(request_id, status=502, error="upstream unavailable")
             writer.write(_status_json(502, "upstream unavailable"))
             return 502, model_id, upstream_host
         return status, model_id, upstream_host
-
-    async def _capture_provider_request(
-        self,
-        *,
-        path: str,
-        model_id: str,
-        route: ModelRoute,
-        payload: Mapping[str, object],
-        forwarded: bytes,
-    ) -> None:
-        directory = self.capture_dir
-        if directory is None:
-            return
-        record = {
-            "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            "pid": os.getpid(),
-            "profile": self.profile,
-            "path": path,
-            "model": model_id,
-            "upstream_model": route.upstream_model,
-            "upstream_url": route.url,
-            "body_bytes": len(forwarded),
-            "body_sha256": hashlib.sha256(forwarded).hexdigest(),
-            "payload": _capture_safe(payload),
-        }
-        line = (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
-            "utf-8"
-        )
-        safe_profile = "".join(
-            character if character.isalnum() or character in "_.-" else "_"
-            for character in (self.profile or "proxy")
-        )
-        target = directory / f"raw-api-calls-{safe_profile}.jsonl"
-
-        def write() -> None:
-            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-            os.chmod(directory, 0o700)
-            fd = os.open(target, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-            try:
-                with os.fdopen(fd, "ab", closefd=False) as handle:
-                    handle.write(line)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            finally:
-                os.close(fd)
-            os.chmod(target, 0o600)
-
-        try:
-            async with self._capture_lock:
-                await asyncio.to_thread(write)
-        except OSError as exc:
-            LOGGER.warning("raw API capture failed: %s", exc)
 
 
 async def _read_headers(reader: asyncio.StreamReader) -> tuple[bytes, bytes]:
@@ -401,6 +354,8 @@ async def _forward(
     ssl_context: ssl.SSLContext | None = None,
     use_proxy: bool = True,
     extra_headers: Mapping[str, str] | None = None,
+    debug: ProxyDebugStream | None = None,
+    request_id: str = "",
 ) -> int:
     host = parsed.hostname
     if not host:
@@ -439,7 +394,12 @@ async def _forward(
         upstream_writer.write(("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1"))
         upstream_writer.write(body)
         await upstream_writer.drain()
-        status = await _relay_response(upstream_reader, client)
+        status = await _relay_response(
+            upstream_reader,
+            client,
+            debug=debug,
+            request_id=request_id,
+        )
         return status
     finally:
         upstream_writer.close()
@@ -570,7 +530,13 @@ async def _read_connect_status(reader: asyncio.StreamReader) -> int:
     return int(parts[1])
 
 
-async def _relay_response(upstream: asyncio.StreamReader, client: asyncio.StreamWriter) -> int:
+async def _relay_response(
+    upstream: asyncio.StreamReader,
+    client: asyncio.StreamWriter,
+    *,
+    debug: ProxyDebugStream | None = None,
+    request_id: str = "",
+) -> int:
     data = b""
     while b"\r\n\r\n" not in data:
         chunk = await upstream.read(4096)
@@ -588,63 +554,99 @@ async def _relay_response(upstream: asyncio.StreamReader, client: asyncio.Stream
     await client.drain()
     status = _status_code(head)
     headers = _header_map(head)
-    if "content-length" in headers:
+    response_debug: DebugResponse | None = None
+    if debug is not None:
         try:
-            length = int(headers["content-length"])
-        except ValueError as exc:
-            raise OSError("bad content-length") from exc
-        pending = rest
-        if len(pending) > length:
-            pending = pending[:length]
-        if pending:
-            client.write(pending)
+            response_debug = debug.begin_response(
+                request_id,
+                status=status,
+                headers=headers,
+            )
+        except Exception:
+            LOGGER.exception("proxy debug response start failed")
+
+    def emit_chunk(chunk: bytes) -> None:
+        if response_debug is None or not chunk:
+            return
+        try:
+            response_debug.chunk(chunk)
+        except Exception:
+            LOGGER.exception("proxy debug response chunk failed")
+
+    truncated = False
+    try:
+        if "content-length" in headers:
+            try:
+                length = int(headers["content-length"])
+            except ValueError as exc:
+                raise OSError("bad content-length") from exc
+            pending = rest
+            if len(pending) > length:
+                pending = pending[:length]
+            if pending:
+                client.write(pending)
+                await client.drain()
+                emit_chunk(pending)
+            remaining = length - len(pending)
+            while remaining > 0:
+                chunk = await upstream.read(min(65536, remaining))
+                if not chunk:
+                    truncated = True
+                    break
+                remaining -= len(chunk)
+                client.write(chunk)
+                await client.drain()
+                emit_chunk(chunk)
+            return status
+        if "chunked" in headers.get("transfer-encoding", ""):
+            buffer = rest
+            while True:
+                while b"\r\n" not in buffer:
+                    chunk = await upstream.read(4096)
+                    if not chunk:
+                        truncated = True
+                        return status
+                    buffer += chunk
+                line, buffer = buffer.split(b"\r\n", 1)
+                client.write(line + b"\r\n")
+                size_text = line.split(b";", 1)[0].strip()
+                try:
+                    size = int(size_text, 16)
+                except ValueError as exc:
+                    raise OSError("bad chunk size") from exc
+                while len(buffer) < size + 2:
+                    chunk = await upstream.read(65536)
+                    if not chunk:
+                        truncated = True
+                        return status
+                    buffer += chunk
+                client.write(buffer[: size + 2])
+                await client.drain()
+                if size > 0:
+                    emit_chunk(buffer[:size])
+                buffer = buffer[size + 2 :]
+                if size == 0:
+                    if buffer:
+                        client.write(buffer)
+                        await client.drain()
+                    return status
+        if rest:
+            client.write(rest)
             await client.drain()
-        remaining = length - len(pending)
-        while remaining > 0:
-            chunk = await upstream.read(min(65536, remaining))
+            emit_chunk(rest)
+        while True:
+            chunk = await upstream.read(65536)
             if not chunk:
-                break
-            remaining -= len(chunk)
+                return status
             client.write(chunk)
             await client.drain()
-        return status
-    if "chunked" in headers.get("transfer-encoding", ""):
-        buffer = rest
-        while True:
-            while b"\r\n" not in buffer:
-                chunk = await upstream.read(4096)
-                if not chunk:
-                    return status
-                buffer += chunk
-            line, buffer = buffer.split(b"\r\n", 1)
-            client.write(line + b"\r\n")
-            size_text = line.split(b";", 1)[0].strip()
+            emit_chunk(chunk)
+    finally:
+        if response_debug is not None:
             try:
-                size = int(size_text, 16)
-            except ValueError as exc:
-                raise OSError("bad chunk size") from exc
-            while len(buffer) < size + 2:
-                chunk = await upstream.read(65536)
-                if not chunk:
-                    return status
-                buffer += chunk
-            client.write(buffer[: size + 2])
-            await client.drain()
-            buffer = buffer[size + 2 :]
-            if size == 0:
-                if buffer:
-                    client.write(buffer)
-                    await client.drain()
-                return status
-    if rest:
-        client.write(rest)
-        await client.drain()
-    while True:
-        chunk = await upstream.read(65536)
-        if not chunk:
-            return status
-        client.write(chunk)
-        await client.drain()
+                response_debug.end(truncated=truncated)
+            except Exception:
+                LOGGER.exception("proxy debug response end failed")
 
 
 def _status_code(head: bytes) -> int:

@@ -35,7 +35,7 @@ def _load(profile: str | None):
     return load_config(path, profile=name)
 
 
-def _build(config) -> LlmProxy:
+def _build(config, debug_socket: str = "") -> LlmProxy:
     return LlmProxy(
         config.proxy_host,
         config.proxy_port,
@@ -43,12 +43,13 @@ def _build(config) -> LlmProxy:
         config.enabled_models,
         upstream_proxy=config.upstream_proxy,
         profile=config.profile,
+        debug_socket=debug_socket,
     )
 
 
-async def _serve(profile: str | None) -> None:
+async def _serve(profile: str | None, debug_socket: str = "") -> None:
     config = _load(profile)
-    proxy = _build(config)
+    proxy = _build(config, debug_socket)
     await proxy.start()
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -116,6 +117,11 @@ async def _reload_loop(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Aki standalone LLM proxy")
     parser.add_argument("--profile", default=None)
+    parser.add_argument(
+        "--debug-socket",
+        default=os.environ.get("AKI_PROXY_DEBUG_SOCKET", ""),
+        help="enable the live debug Unix socket (1 for /tmp/akid/proxy-debug-<profile>.sock)",
+    )
     parser.add_argument("--log-level", default=os.environ.get("AKI_LOG_LEVEL", "INFO"))
     args = parser.parse_args(argv)
     logging.basicConfig(
@@ -125,8 +131,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if not _crypto_available():
         LOGGER.warning("Python package 'cryptography' is missing; grok-oauth may be unavailable")
+    if os.environ.get("AKI_RAW_API_CALL_CAPTURE_DIR"):
+        LOGGER.warning(
+            "AKI_RAW_API_CALL_CAPTURE_DIR is no longer supported; use AKI_PROXY_DEBUG_SOCKET"
+        )
     try:
-        asyncio.run(_serve(args.profile))
+        asyncio.run(_serve(args.profile, args.debug_socket))
     except KeyboardInterrupt:
         return 130
     except (ConfigError, OSError, RuntimeError) as exc:
