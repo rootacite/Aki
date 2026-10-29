@@ -12,6 +12,7 @@ from engine.execution_policy import (
     LOCK_REQUIRED_ERROR,
     requires_execution_lock,
 )
+from engine.nighttalk import nighttalk_tool_decision
 from engine.tool_ownership import (
     authorize_exclusive_tool,
     ownership_denied_message,
@@ -211,6 +212,15 @@ class BackendTurnMixin:
                 "turn ends; do not retry.",
             )
             return
+
+        if turn.nighttalk:
+            decision = nighttalk_tool_decision(tool_name)
+            if decision:
+                await self._emit_tool_call_once(
+                    turn, tool_call_id, tool_name, tool_input
+                )
+                await self._safe_deny(request_id, decision)
+                return
 
         allowed, _owner = authorize_exclusive_tool(self.config.profile, tool_name)
         if not allowed:

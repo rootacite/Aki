@@ -238,6 +238,7 @@ class MqttCommandsMixin:
         lock_authorized: bool = False,
         lock_authorization: str = "channel-unknown",
         client_message_id: str | None = None,
+        nighttalk: bool = False,
     ) -> None:
         if len(self.queue) >= self.config.queue_max:
             self._schedule_channel_notice("akid: queue is full; channel message dropped")
@@ -267,6 +268,7 @@ class MqttCommandsMixin:
             channel_sender=sender,
             channel_text=text,
             channel_attachments=tuple(attachments),
+            nighttalk=nighttalk,
         )
         if (
             self.active is None

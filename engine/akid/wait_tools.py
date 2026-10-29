@@ -106,6 +106,7 @@ class WaitToolsMixin:
             origin_is_agent=False,
             lock_authorized=False,
             lock_authorization="wait-guard",
+            nighttalk=turn.nighttalk,
             channel_participants=turn.channel_participants,
             channel_sender=turn.channel_sender,
             wait_guard_targets=tuple(targets),

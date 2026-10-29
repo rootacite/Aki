@@ -121,6 +121,10 @@ class HealthMixin:
             return await self._model_set(request.params), None
         if method == "aki.admin.zero_initiation_budget":
             return self._zero_initiation_budget(request.params), None
+        if method == "aki.nighttalk.start":
+            return self._enqueue_nighttalk_turn(), None
+        if method == "aki.nighttalk.trigger":
+            return await self._nighttalk_trigger(), None
         raise RpcError(ErrorCode.METHOD_NOT_FOUND, f"unknown method: {method}")
 
 

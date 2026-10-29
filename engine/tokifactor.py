@@ -84,6 +84,7 @@ STRUCTURED_FIELDS = (
     "format",
     "wake",
     "wakeIds",
+    "nighttalk",
     "toolCallId",
     "toolName",
     "toolStatus",

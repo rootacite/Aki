@@ -421,10 +421,20 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。
 - Aki 状态：`~/.aki/schedules/aki.json`（最多 256 条，10 分钟 missed 宽限）、
   `~/.aki/ledger/aki.json`（文件 ≤16384 UTF-8 字节，单条正文 ≤1024 字节，FIFO 淘汰）、
-  `~/.aki/presence/aki.json`（工作/深夜/归来触发器状态）。
+  `~/.aki/presence/aki.json`（工作/深夜/归来触发器状态）、
+  `~/.aki/nighttalk/aki.json`（当晚夜话成功次数与下一次抽签时间）。
 - 主动触发器：logind 活动采样；连续工作 2 小时后首次唤醒、之后每小时；00:30–05:30
   每夜最多一次；空闲 45 分钟后归来唤醒，10 秒防抖且启动/重启后首次过渡抑制。
   主动提醒走频道 final 输出（`wake=user`）并镜像桌面气泡，不唤醒其他智能体。
+- 夜话：用户非活跃且处于 `[presence]` 深夜窗口（默认 00:30–05:30，含起点、不含终点）时，
+  只由 Aki profile 抽签。条件持续成立满 30 分钟才抽一次，命中概率 50%；中断后重新计时。
+  命中后从在线智能体里均匀随机选一个，注入临时 turn。每晚最多成功 3 次。重启后若抽签
+  时间已过且条件仍成立，只补抽一次。正文以“现在是安静的夜晚…”开头，`${{USERNAME}}`
+  换成该成员自己的 `[gateway] username`。turn 结束时回滚 conversation，已发布的正文留在
+  频道历史并带 `nighttalk=1`。这条 final 唤醒的后续 turn 同样标成夜话。夜话 turn 只能调用
+  只读工具，`acquire_execution_lock` 一律返回 `NIGHTTALK_LOCK_DENIED`，免锁工具和专属写入
+  返回 `NIGHTTALK_READONLY`，不弹审批，也不消耗主动启动次数。用户自己的消息不带这个限制。
+  `akictl nighttalk` 立刻随机激活一次：窗口内计入当晚 3 次，窗口外不计入；次数已满则命令失败。
 - 长期记忆规则见 MemFS 中的 `memory-policy.md`；普通测试对话不得写入长期记忆。
 
 ## 13. GUI 与信道身份

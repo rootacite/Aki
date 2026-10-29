@@ -328,6 +328,11 @@ class ServerMixin:
             return_idle_seconds=config.presence_return_idle_seconds,
             return_debounce_seconds=config.presence_return_debounce_seconds,
         )
+        self.nighttalk_state_path = state_root / "nighttalk" / f"{config.profile}.json"
+        self._nighttalk_state = None
+        self._nighttalk_lock = asyncio.Lock()
+        self._nighttalk_stop = asyncio.Event()
+        self._nighttalk_task: asyncio.Task[None] | None = None
         self._schedule_stop = asyncio.Event()
         self._schedule_task: asyncio.Task[None] | None = None
         self._proactive_pending: dict[str, dict[str, Any]] = {}

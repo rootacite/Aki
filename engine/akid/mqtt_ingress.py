@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from pathlib import Path
+from engine.nighttalk import metadata_is_nighttalk
 from engine.live_context import (
     CHANNEL_WAKE_ALL,
     CHANNEL_WAKE_MENTIONS,
@@ -453,6 +454,7 @@ class MqttIngressMixin:
         from_agent = action == "agent-final" or self._channel_sender_is_agent(
             sender, sender_id, event_metadata
         )
+        nighttalk = from_agent and metadata_is_nighttalk(event_metadata)
         if not from_agent and not replayed:
             self._agent_initiation_remaining = max(
                 0, int(self.config.agent_initiation_limit)
@@ -563,6 +565,7 @@ class MqttIngressMixin:
                         "participants": participants,
                         "attachments": attachments,
                         "client_message_id": client_message_id,
+                        "nighttalk": nighttalk,
                     }
                 )
             await self._refresh_channel_transcript()
@@ -580,6 +583,7 @@ class MqttIngressMixin:
                 "participants": participants,
                 "attachments": attachments,
                 "client_message_id": client_message_id,
+                "nighttalk": False,
             }
             active.busy_messages.append(item)
             if active.wait_user_call_active:
@@ -620,4 +624,5 @@ class MqttIngressMixin:
             lock_authorized=lock_authorized,
             lock_authorization=lock_authorization,
             client_message_id=client_message_id,
+            nighttalk=nighttalk,
         )

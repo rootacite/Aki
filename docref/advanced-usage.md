@@ -290,6 +290,8 @@ Aki 独占以下 external tools；Fuyu 的工具列表中不会出现它们，�
 设备启动或 akid 重启后的第一次 idle→active 过渡会被抑制。相关配置在
 `~/.aki/aki.conf` 的 `[schedule]` 和 `[presence]` 段。
 
+夜话使用同一套非活跃判定和深夜窗口。用户持续非活跃满 30 分钟后，Aki 以 50% 的概率从当前在线智能体中随机唤醒一个，让它回顾今天或和其他成员聊聊；不想说时输出 `[NO_REPLY]`。每晚最多成功 3 次，计数在 `~/.aki/nighttalk/aki.json`。夜话 turn 和它唤醒的后续发言只能调用只读工具，不能获取执行锁。`akictl nighttalk` 立刻做一次同样的随机激活；深夜窗口内会计入当晚 3 次，窗口外不计入。
+
 aki-layer 右侧垂直中部会显示一张用户状态卡，数据直接来自同一 presence monitor：当前被判定为
 活跃还是非活跃、连续活跃了多长时间、连续多久没有键盘/鼠标输入，以及空闲是否已达到
 `return_idle_seconds`（默认 45 分钟）的离开阈值。akid 每轮采样后通过 `aki-layer.sock`

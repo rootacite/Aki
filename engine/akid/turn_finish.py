@@ -51,7 +51,7 @@ class TurnFinishMixin:
             if reason == "completed":
                 if turn.origin in ("proactive", "solo_notice"):
                     await self._publish_proactive_text(turn, assistant_text)
-                elif turn.origin not in ("mqtt", WAIT_GUARD_ORIGIN):
+                elif turn.origin not in ("mqtt", WAIT_GUARD_ORIGIN, "nighttalk"):
                     self._notify_layer(self._layer_own_character(), assistant_text)
         data: dict[str, Any] = {
             "reason": reason,
@@ -138,6 +138,7 @@ class TurnFinishMixin:
                 client_message_id=(
                     str(item.get("client_message_id") or "").strip() or None
                 ),
+                nighttalk=bool(item.get("nighttalk")),
             )
             queued += 1
         if queued:

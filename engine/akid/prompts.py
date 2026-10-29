@@ -47,6 +47,7 @@ class PromptsMixin:
             user_name=self.config.username,
             wait_labels=wait_labels,
             solo=solo,
+            nighttalk=turn.nighttalk,
         )
         return block
 

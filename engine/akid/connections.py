@@ -170,6 +170,7 @@ class ChannelConnection:
         images: list[dict[str, Any]] | None = None,
         client_message_id: str = "",
         ignored: bool = False,
+        nighttalk: bool = False,
     ) -> None:
         metadata = {
             "schema": "akid.v1",
@@ -184,6 +185,8 @@ class ChannelConnection:
             metadata["wake"] = wake or CHANNEL_WAKE_ALL
             if wake_ids:
                 metadata["wakeIds"] = wake_ids
+            if nighttalk:
+                metadata["nighttalk"] = "1"
         if ignored:
             metadata["ignored"] = "true"
         self._enqueue_text(
@@ -276,6 +279,7 @@ class ChannelConnection:
             wake_ids=wake_ids,
             images=images,
             client_message_id=state.client_message_id,
+            nighttalk=state.nighttalk,
         )
         state.last_text = text
 
@@ -379,7 +383,12 @@ class ChannelConnection:
         if event_type == "turn_started":
             state.client_message_id = str(data.get("client_message_id") or "")
             state.origin_is_agent = bool(data.get("origin_is_agent"))
-            if state.origin_is_agent and not state.initiation_charged:
+            state.nighttalk = bool(data.get("nighttalk"))
+            if (
+                state.origin_is_agent
+                and not state.nighttalk
+                and not state.initiation_charged
+            ):
                 state.initiation_charged = self.server._claim_agent_initiation(turn_id)
                 if not state.initiation_charged:
                     state.suppressed = True

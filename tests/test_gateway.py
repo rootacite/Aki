@@ -4506,6 +4506,133 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: len(fake_channel.final_texts()) >= 2)
         self.assertEqual(server._agent_initiation_remaining, 2)
 
+    async def test_nighttalk_reply_does_not_spend_initiation_budget(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        server._agent_initiation_remaining = 0
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu",
+            "夜话里想说一句",
+            {
+                "schema": "akid.v1",
+                "kind": "turn",
+                "phase": "final",
+                "wake": "all",
+                "nighttalk": "1",
+            },
+        )
+        await wait_until(
+            lambda: any(
+                event.get("phase") == "final" and event.get("nighttalk") == "1"
+                for event in fake_channel.events
+            )
+        )
+        self.assertEqual(server._agent_initiation_remaining, 0)
+
+    async def test_user_message_does_not_inherit_nighttalk(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        holder = Turn(
+            turn_id="hold",
+            conn=NullConnection(),
+            message="hold",
+            include_reasoning=False,
+            client_message_id=None,
+        )
+        server.queue.append(holder)
+        await server._on_channel_text(
+            "alice",
+            "alice-1",
+            "我还醒着",
+            {"schema": "akid.v1", "kind": "message", "nighttalk": "1"},
+        )
+        queued = [turn for turn in server.queue if turn is not holder]
+        self.assertEqual(len(queued), 1)
+        self.assertFalse(queued[0].nighttalk)
+        self.assertEqual(queued[0].origin, "mqtt")
+        server.queue.clear()
+
+    async def test_nighttalk_turn_publishes_the_username_prompt(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel, username="哥哥")
+        result = server._enqueue_nighttalk_turn()
+        self.assertTrue(result["ok"])
+        self.assertIn("现在是安静的夜晚，哥哥非活跃", result["message"])
+        self.assertNotIn("${{USERNAME}}", result["message"])
+        await wait_until(
+            lambda: any(event.get("nighttalk") == "1" for event in fake_channel.events)
+        )
+        rendered = json.dumps(server.bridge_overlays, ensure_ascii=False)
+        self.assertIn("<night-talk", rendered)
+        server._solo_session = object()
+        try:
+            skipped = server._enqueue_nighttalk_turn()
+        finally:
+            server._solo_session = None
+        self.assertEqual(skipped.get("skipped"), "solo")
+
+    async def test_nighttalk_blocks_lock_and_non_readonly_tools(self) -> None:
+        server = await self.start_server(channel=FakeChannel())
+        turn = Turn(
+            turn_id="turn-night",
+            conn=NullConnection(),
+            message="night",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="nighttalk",
+            nighttalk=True,
+            lock_authorized=True,
+        )
+        server.active = turn
+        external: list[tuple[str, str, bool]] = []
+
+        async def capture_external(tool_call_id: str, text: str, is_error: bool) -> None:
+            external.append((tool_call_id, text, is_error))
+
+        denied: list[tuple[str, str]] = []
+
+        async def capture_deny(request_id: str, message: str) -> None:
+            denied.append((request_id, message))
+
+        server._send_external_result = capture_external
+        server._safe_deny = capture_deny
+        await server._handle_external_tool(
+            {
+                "request_id": "req-lock",
+                "request": {
+                    "tool_call_id": "call-lock",
+                    "tool_name": "acquire_execution_lock",
+                    "input": {},
+                },
+            }
+        )
+        await server._handle_external_tool(
+            {
+                "request_id": "req-image",
+                "request": {
+                    "tool_call_id": "call-image",
+                    "tool_name": "generate_image",
+                    "input": {"prompt": "moon"},
+                },
+            }
+        )
+        await server._handle_tool_request(
+            {
+                "request_id": "req-bash",
+                "request": {
+                    "tool_call_id": "call-bash",
+                    "tool_name": "Bash",
+                    "input": {"command": "true"},
+                },
+            }
+        )
+        self.assertEqual(external[0][0], "call-lock")
+        self.assertIn("NIGHTTALK_LOCK_DENIED", external[0][1])
+        self.assertTrue(external[0][2])
+        self.assertIn("NIGHTTALK_READONLY", external[1][1])
+        self.assertIn("NIGHTTALK_READONLY", denied[0][1])
+        self.assertFalse(server.execution_lock.held_by(profile="aki", turn_id=turn.turn_id))
+
     async def test_last_initiation_does_not_truncate_the_current_turn(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)

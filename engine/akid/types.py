@@ -26,6 +26,7 @@ class ChannelTurnState:
     wake: str = ""
     wake_ids: str = ""
     client_message_id: str = ""
+    nighttalk: bool = False
 
 
 
@@ -92,6 +93,7 @@ class Turn:
     trigger_kind: str = ""
     trigger_facts: dict[str, Any] = field(default_factory=dict)
     proactive_id: str = ""
+    nighttalk: bool = False
 
 
 

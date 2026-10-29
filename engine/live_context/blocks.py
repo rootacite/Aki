@@ -208,6 +208,7 @@ def render_turn_control(
     user_name: str = "Master",
     wait_labels: tuple[str, ...] | list[str] = (),
     solo: bool = False,
+    nighttalk: bool = False,
 ) -> str:
     ordered, _agents, guidance, remaining, limit, budget_guidance, default_responder = (
         _channel_turn_details(
@@ -220,12 +221,30 @@ def render_turn_control(
             user_name=user_name,
         )
     )
+    if nighttalk:
+        guidance = (
+            "这是夜话。只能调用只读工具，任何情况下都不能获取执行锁，"
+            "免锁工具和专属写入也不能调用。不想说就输出 [NO_REPLY]。"
+        )
+        budget_guidance = (
+            "这是夜话，不消耗主动启动次数。可以和在线成员聊天，或直接输出 [NO_REPLY]。"
+        )
     lines = [
         f'<{TURN_CONTROL_TAG} version="1" '
         f'from_agent={_attr("true" if from_agent else "false")} '
         f'solo={_attr("true" if solo else "false")}>',
     ]
-    if solo:
+    if nighttalk:
+        lines.extend(
+            [
+                f"<guidance>{guidance}</guidance>",
+                f"<initiation-budget remaining={_attr(str(remaining))} "
+                f"limit={_attr(str(limit))} resets={_attr('user-message')} "
+                f"decrements={_attr('agent-to-agent-reply')}/>",
+                f"<initiation-guidance>{budget_guidance}</initiation-guidance>",
+            ]
+        )
+    elif solo:
         lines.append(
             f"<guidance>这是独处模式。只有{_text(user_name, single_line=True)}能看到你的回复；"
             "不要 @ 其他成员，也不要调用 wait_other。直接自然回应。"
@@ -249,7 +268,7 @@ def render_turn_control(
             f"仅由 responder 负责引导{_text(user_name, single_line=True)}点名，其他成员"
             "不得执行非只读操作。</execution-ownership>"
         )
-    if from_agent:
+    if from_agent or nighttalk:
         lines.append(
             "<wait-user allowed=\"false\" reason=\"agent-triggered\">"
             "本轮由智能体触发，禁止调用 `wait_user`。</wait-user>"

@@ -26,6 +26,7 @@ from engine.execution_policy import (
     is_lock_control_tool,
     requires_execution_lock,
 )
+from engine.nighttalk import nighttalk_tool_decision
 from engine.life_ledger import LedgerError
 from engine.schedule_store import ScheduleError
 from engine.tool_ownership import (
@@ -78,6 +79,11 @@ class ExclusiveMixin:
             )
             return
         await self._emit_tool_call_once(turn, tool_call_id, tool_name, tool_input)
+        if turn.nighttalk:
+            decision = nighttalk_tool_decision(tool_name)
+            if decision:
+                await self._send_external_result(tool_call_id, decision, True)
+                return
         allowed, _owner = authorize_exclusive_tool(self.config.profile, tool_name)
         if not allowed:
             await self._send_external_result(

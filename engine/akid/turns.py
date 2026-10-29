@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 from engine.letta_process import BackendUnavailable
 from engine.live_context import render_channel_roster
+from engine.nighttalk import render_nighttalk_overlay
 from engine.tokifactor import (
     MAX_IMAGE_BYTES,
     detect_image_mime,
@@ -93,6 +94,7 @@ class TurnsMixin:
                     "origin": turn.origin,
                     "origin_sender_id": turn.origin_sender_id,
                     "origin_is_agent": turn.origin_is_agent,
+                    "nighttalk": turn.nighttalk,
                 },
             )
             if not bool(getattr(self.backend, "ready", False)):
@@ -175,7 +177,7 @@ class TurnsMixin:
         mid_parts: list[str] = []
         exclude_seq = (
             turn.channel_message_seq
-            if turn.origin in ("mqtt", "proactive")
+            if turn.origin in ("mqtt", "proactive", "nighttalk")
             else None
         )
         (
@@ -193,7 +195,7 @@ class TurnsMixin:
             if transcript:
                 mid_parts.append(transcript)
             await self._snapshot_turn_conversation(turn)
-        elif turn.origin in ("mqtt", "proactive"):
+        elif turn.origin in ("mqtt", "proactive", "nighttalk"):
             block = await self._refresh_turn_control(turn)
             if block:
                 mid_parts.append(block)
@@ -201,13 +203,15 @@ class TurnsMixin:
                 mid_parts.append(group_block)
             if solo_block:
                 mid_parts.append(solo_block)
-            if turn.origin_is_agent:
+            if turn.origin_is_agent or turn.origin == "nighttalk":
                 await self._snapshot_turn_conversation(turn)
         elif turn.origin == WAIT_GUARD_ORIGIN:
             if group_block:
                 mid_parts.append(group_block)
             if solo_block:
                 mid_parts.append(solo_block)
+        if turn.nighttalk:
+            stable_parts.append(render_nighttalk_overlay())
         return stable_parts, mid_parts
 
 

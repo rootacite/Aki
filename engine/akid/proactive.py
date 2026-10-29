@@ -5,8 +5,28 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import random
+import time
 import uuid
+from dataclasses import replace
+from datetime import datetime
+from pathlib import Path
+from engine.aki_config import discover_profiles, load_config
 from engine.live_context import CHANNEL_WAKE_USER
+from engine.member_profile import MEMBER_KIND_AGENT, normalize_member_kind
+from engine.nighttalk import (
+    NIGHT_TALK_MAX_FIRES,
+    NightTalkState,
+    advance_nighttalk,
+    fires_for_cycle,
+    load_nighttalk_state,
+    manual_nighttalk_block,
+    night_cycle_key,
+    note_nighttalk_delivery,
+    render_nighttalk_prompt,
+    save_nighttalk_state,
+)
+from engine.protocol import SERVER_VERSION, ErrorCode, RpcError
 from engine.schedule_store import (
     ScheduleError,
     now_utc,
@@ -33,6 +53,14 @@ class ProactiveMixin:
                 self._on_presence_triggers, self._publish_layer_presence
             )
             LOGGER.info("presence monitor started path=%s", self.presence_state)
+        if self._nighttalk_task is None:
+            self._nighttalk_stop.clear()
+            self._nighttalk_task = asyncio.create_task(
+                self._nighttalk_loop(), name="akid-nighttalk"
+            )
+            LOGGER.info(
+                "nighttalk scheduler started path=%s", self.nighttalk_state_path
+            )
 
 
     async def _stop_proactive_services(self) -> None:
@@ -45,6 +73,13 @@ class ProactiveMixin:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        self._nighttalk_stop.set()
+        night_task = self._nighttalk_task
+        self._nighttalk_task = None
+        if night_task is not None:
+            night_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await night_task
         with contextlib.suppress(Exception):
             await self.presence_monitor.stop()
 
@@ -330,7 +365,346 @@ class ProactiveMixin:
             "ledger": self.life_ledger.snapshot()
             if self.config.profile == "aki" and self.config.aki is not None
             else None,
+            "nighttalk": self._nighttalk_status(),
         }
+
+
+    def _nighttalk_coordinating(self) -> bool:
+        return self.config.profile == "aki" and self.config.aki is not None
+
+
+    def _ensure_nighttalk_state(self) -> NightTalkState:
+        state = self._nighttalk_state
+        if isinstance(state, NightTalkState):
+            return state
+        loaded = load_nighttalk_state(self.nighttalk_state_path)
+        self._nighttalk_state = loaded
+        return loaded
+
+
+    def _store_nighttalk_state(self, state: NightTalkState) -> None:
+        self._nighttalk_state = state
+        save_nighttalk_state(self.nighttalk_state_path, state)
+
+
+    def _nighttalk_cycle(self) -> str | None:
+        monitor = self.presence_monitor
+        return night_cycle_key(
+            datetime.now().astimezone(), monitor.night_start, monitor.night_end
+        )
+
+
+    def _nighttalk_eligibility(self) -> tuple[bool, str | None]:
+        cycle = self._nighttalk_cycle()
+        monitor = self.presence_monitor
+        active = monitor.state.get("last_active")
+        eligible = (
+            monitor.last_sample_valid is True
+            and active is False
+            and cycle is not None
+        )
+        return eligible, cycle
+
+
+    def _nighttalk_status(self) -> dict[str, Any]:
+        if not self._nighttalk_coordinating():
+            return {
+                "enabled": False,
+                "fires": 0,
+                "max_fires": NIGHT_TALK_MAX_FIRES,
+            }
+        state = self._ensure_nighttalk_state()
+        eligible, cycle = self._nighttalk_eligibility()
+        next_at = state.next_roll_at
+        return {
+            "enabled": True,
+            "eligible": eligible,
+            "cycle": cycle,
+            "fires": fires_for_cycle(state, cycle),
+            "stored_cycle": state.cycle,
+            "stored_fires": state.fires,
+            "max_fires": NIGHT_TALK_MAX_FIRES,
+            "next_roll_at": (
+                datetime.fromtimestamp(next_at).astimezone().isoformat(timespec="seconds")
+                if isinstance(next_at, (int, float))
+                else None
+            ),
+            "last_target": state.last_target,
+            "last_fire_at": state.last_fire_at,
+        }
+
+
+    async def _nighttalk_loop(self) -> None:
+        tick = max(5, int(self.config.presence_poll_seconds))
+        while not self._nighttalk_stop.is_set():
+            try:
+                await self._nighttalk_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                LOGGER.exception("nighttalk tick failed")
+            try:
+                await asyncio.wait_for(self._nighttalk_stop.wait(), timeout=tick)
+            except asyncio.TimeoutError:
+                pass
+
+
+    async def _nighttalk_tick(self) -> None:
+        async with self._nighttalk_lock:
+            before = self._ensure_nighttalk_state()
+            eligible, cycle = self._nighttalk_eligibility()
+            step = advance_nighttalk(
+                before,
+                now=time.time(),
+                eligible=eligible,
+                cycle=cycle,
+                roll=random.random(),
+            )
+            if step.action == "fire" and cycle:
+                fired_at = datetime.now().astimezone().isoformat(timespec="seconds")
+                pending = note_nighttalk_delivery(
+                    step.state, cycle=cycle, target="", fired_at=fired_at
+                )
+                self._store_nighttalk_state(pending)
+                delivered = await self._activate_nighttalk()
+                if delivered.get("ok"):
+                    self._store_nighttalk_state(
+                        replace(
+                            pending,
+                            last_target=str(delivered.get("target") or ""),
+                        )
+                    )
+                else:
+                    LOGGER.info(
+                        "nighttalk roll won but was not delivered: %s",
+                        delivered.get("error") or "unknown",
+                    )
+                    self._store_nighttalk_state(step.state)
+                return
+            if step.state != before:
+                self._store_nighttalk_state(step.state)
+
+
+    async def _nighttalk_trigger(self) -> dict[str, Any]:
+        if not self._nighttalk_coordinating():
+            raise RpcError(
+                ErrorCode.INVALID_REQUEST,
+                "nighttalk is coordinated by the aki profile",
+            )
+        async with self._nighttalk_lock:
+            cycle = self._nighttalk_cycle()
+            state = self._ensure_nighttalk_state()
+            reason = manual_nighttalk_block(state, cycle)
+            if reason:
+                raise RpcError(ErrorCode.INVALID_REQUEST, reason)
+            fired_at = datetime.now().astimezone().isoformat(timespec="seconds")
+            if cycle:
+                self._store_nighttalk_state(
+                    note_nighttalk_delivery(
+                        state, cycle=cycle, target="", fired_at=fired_at
+                    )
+                )
+            delivered = await self._activate_nighttalk()
+            if not delivered.get("ok"):
+                if cycle:
+                    self._store_nighttalk_state(state)
+                detail = str(
+                    delivered.get("error") or delivered.get("skipped") or "not delivered"
+                )
+                raise RpcError(
+                    ErrorCode.BACKEND_UNAVAILABLE,
+                    f"night talk was not delivered: {detail}",
+                )
+            target = str(delivered.get("target") or "")
+            if cycle:
+                current = replace(
+                    self._ensure_nighttalk_state(),
+                    last_target=target,
+                    last_fire_at=fired_at,
+                )
+            else:
+                current = note_nighttalk_delivery(
+                    state, cycle=None, target=target, fired_at=fired_at
+                )
+            self._store_nighttalk_state(current)
+            return {
+                **delivered,
+                "counted": cycle is not None,
+                "fires": current.fires,
+                "cycle": cycle,
+            }
+
+
+    def _enqueue_nighttalk_turn(self) -> dict[str, Any]:
+        if self._solo_session is not None:
+            return {
+                "ok": False,
+                "skipped": "solo",
+                "profile": self.config.profile,
+            }
+        if len(self.queue) >= self.config.queue_max:
+            return {
+                "ok": False,
+                "error": "queue is full",
+                "profile": self.config.profile,
+            }
+        message = render_nighttalk_prompt(self.config.username or "Master")
+        turn = Turn(
+            turn_id=f"turn-{uuid.uuid4().hex}",
+            conn=self.channel_conn,
+            message=message,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="nighttalk",
+            lock_authorized=False,
+            lock_authorization="nighttalk",
+            nighttalk=True,
+        )
+        LOGGER.info("nighttalk turn enqueued id=%s profile=%s", turn.turn_id, self.config.profile)
+        if (
+            self.active is None
+            and not self.queue
+            and not self._compacting
+            and not self._external_tools_pending
+            and bool(getattr(self.backend, "ready", False))
+        ):
+            self.active = turn
+            turn.state = "running"
+            self._spawn_turn(turn)
+        else:
+            turn.state = "queued"
+            self.queue.append(turn)
+            self._schedule_status_refresh()
+        return {
+            "ok": True,
+            "profile": self.config.profile,
+            "turn_id": turn.turn_id,
+            "target": self.config.channel_name,
+            "message": message,
+            "queued": turn.state == "queued",
+        }
+
+
+    def _nighttalk_candidates(self) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = [
+            {
+                "profile": self.config.profile,
+                "name": self.config.channel_name,
+                "local": True,
+                "socket": None,
+            }
+        ]
+        sockets = self._nighttalk_profile_sockets()
+        seen = {self.config.profile}
+        for member in self._channel_member_views():
+            if member.is_self:
+                continue
+            if normalize_member_kind(member.kind) != MEMBER_KIND_AGENT:
+                continue
+            found: tuple[str, Path] | None = None
+            for label in (member.name, *member.aliases):
+                found = sockets.get(label.casefold())
+                if found is not None:
+                    break
+            if found is None:
+                continue
+            profile, socket_path = found
+            if profile in seen:
+                continue
+            seen.add(profile)
+            candidates.append(
+                {
+                    "profile": profile,
+                    "name": member.name,
+                    "local": False,
+                    "socket": socket_path,
+                }
+            )
+        return candidates
+
+
+    def _nighttalk_profile_sockets(self) -> dict[str, tuple[str, Path]]:
+        index: dict[str, tuple[str, Path]] = {}
+        for profile, config_path in discover_profiles().items():
+            try:
+                conf = load_config(config_path, profile=profile)
+            except (OSError, ValueError):
+                continue
+            socket_path = self._profile_socket(profile, conf.socket)
+            for label in (profile, conf.channel.name, *conf.channel.aliases):
+                key = label.casefold()
+                if key and key not in index:
+                    index[key] = (profile, socket_path)
+        return index
+
+
+    async def _activate_nighttalk(self) -> dict[str, Any]:
+        candidates = self._nighttalk_candidates()
+        random.SystemRandom().shuffle(candidates)
+        errors: list[str] = []
+        for candidate in candidates:
+            if candidate["local"]:
+                result = self._enqueue_nighttalk_turn()
+            else:
+                result = await self._call_nighttalk_start(
+                    str(candidate["profile"]), candidate["socket"]
+                )
+            if result.get("ok"):
+                result["target"] = str(candidate["name"])
+                LOGGER.info(
+                    "nighttalk activated target=%s profile=%s turn=%s",
+                    candidate["name"],
+                    candidate["profile"],
+                    result.get("turn_id"),
+                )
+                return result
+            if result.get("skipped") == "solo":
+                LOGGER.info(
+                    "nighttalk skipped solo target=%s", candidate["name"]
+                )
+                continue
+            errors.append(
+                f"{candidate['name']}: {result.get('error') or 'failed'}"
+            )
+        return {
+            "ok": False,
+            "error": "; ".join(errors) or "every online agent is in solo",
+        }
+
+
+    async def _call_nighttalk_start(
+        self, profile: str, socket_path: Path | None
+    ) -> dict[str, Any]:
+        if socket_path is None or not Path(socket_path).is_socket():
+            return {
+                "ok": False,
+                "error": f"{profile} is not running",
+                "profile": profile,
+            }
+
+        def call_target() -> dict[str, Any]:
+            from engine.client import GatewayClient
+
+            with GatewayClient(
+                Path(socket_path),
+                client_name="akid-aki",
+                client_version=SERVER_VERSION,
+            ) as client:
+                client.handshake()
+                result = client.call("aki.nighttalk.start", {}, timeout=10.0)
+                return result if isinstance(result, dict) else {}
+
+        try:
+            result = await asyncio.to_thread(call_target)
+        except Exception as exc:
+            LOGGER.warning("nighttalk rpc failed profile=%s error=%s", profile, exc)
+            return {
+                "ok": False,
+                "error": f"cannot reach {profile}: {exc}",
+                "profile": profile,
+            }
+        result.setdefault("profile", profile)
+        return result
 
 
     async def _maybe_start_next(self) -> None:

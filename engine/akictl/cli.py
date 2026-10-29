@@ -65,6 +65,7 @@ COMMANDS = {
     "reasoning",
     "model",
     "solo",
+    "nighttalk",
     "help",
 }
 
@@ -77,7 +78,7 @@ ALL_COMMANDS = COMMANDS | SERVICE_COMMANDS
 
 HELP_TEXT = (
     "usage: akictl [--profile NAME] [profile] <command> [options]\n"
-    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|identity|reset|username|set-username|recompile|compact|solo|help] [options]\n"
+    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|identity|reset|username|set-username|recompile|compact|solo|nighttalk|help] [options]\n"
     "\n"
     "  akictl <profile> up|down|restart|status|logs   manage one profile service\n"
     "  akictl profiles            list ~/.aki profiles and service state\n"
@@ -115,6 +116,7 @@ HELP_TEXT = (
     "  akictl solo <member>       enter private solo mode with one member\n"
     "  akictl solo status         show the active solo session\n"
     "  akictl solo off            end solo mode\n"
+    "  akictl nighttalk           immediately activate one random night talk\n"
     "  akictl up | down | restart manage the default profile service\n"
     "  akictl logs                show profile service logs\n"
     "\nUse 'akictl <command> --help' for command-specific options."
@@ -431,6 +433,12 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser.add_argument("--timeout", type=float, default=10.0)
     parser.add_argument("--json", action="store_true")
     parsers["solo"] = parser
+    parser = argparse.ArgumentParser(
+        prog="akictl nighttalk",
+        description="Immediately activate one random online agent for night talk",
+    )
+    _add_common(parser)
+    parsers["nighttalk"] = parser
     parser = argparse.ArgumentParser(prog="akictl help")
     parser.add_argument("help_command", nargs="?")
     parsers["help"] = parser
@@ -547,6 +555,14 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return _history(args, profile)
     if command == "solo":
         return _solo(args)
+    if command == "nighttalk":
+        if explicit_profile and profile != "aki":
+            pkg().print(
+                "nighttalk is coordinated by the aki profile; run akictl nighttalk",
+                file=sys.stderr,
+            )
+            return 2
+        return pkg()._management(args, "aki.nighttalk.trigger", profile="aki")
     if command == "memory":
         return _memory(args, profile)
     if command == "mqtt":
