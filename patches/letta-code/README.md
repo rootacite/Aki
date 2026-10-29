@@ -13,6 +13,15 @@ python3 scripts/build-letta.py --update-lock
 python3 scripts/build-letta.py --build --install --check
 ```
 
+Provider abort propagation baseline:
+
+```bash
+python3 scripts/abort_propagation_probe.py --mode both
+```
+
+`baseline` reverse-applies `0006-aki-provider-abort.patch` and must fail
+(the wrapper abort does not reach the provider signal). `patched` must pass.
+
 Patch rules:
 
 - Keep patches small and anchored to code that is stable in the pinned tag.

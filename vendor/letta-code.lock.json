@@ -22,7 +22,8 @@
     "0002-aki-compaction-policy.patch": "57265c9995e7f5fb4b9686d6db860272a9c3e1688ac49342db6a4eddbbc705c5",
     "0003-aki-turn-overlay-files.patch": "0cbeda8bee27f64eb8999cc3bfc67662c0af7d6bb9a6e7c8acd07f345e94a5e7",
     "0004-aki-compact-retain-latest.patch": "5ad9cff158d308d0dd2fc50ec38664599f102c4ae31888598662a9cf389f0ba2",
-    "0005-aki-expose-search-tools.patch": "91050c2d1277d5861d41c499e8f4aa319e0a71e610f8752e5b5277075a5ecbeb"
+    "0005-aki-expose-search-tools.patch": "91050c2d1277d5861d41c499e8f4aa319e0a71e610f8752e5b5277075a5ecbeb",
+    "0006-aki-provider-abort.patch": "20510eb18452d69a598e616d73b608faa909dbd4ea57a0aa7d77ccc21f789614"
   },
-  "runtime_sha256": "2082a649b56fb3cba9f1e1b50cb4743bd1dfdbc16b10f82af0448fc1e801442c"
+  "runtime_sha256": "c1177d1814b56953b2ff6f29bbcd4d812fee49d633f263603cfc647e6747f0ce"
 }
