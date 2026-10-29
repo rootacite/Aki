@@ -152,8 +152,6 @@ def route_channel_reply(
     """Resolve which agents a final channel reply should wake."""
     cleaned, excluded = strip_channel_non_wakes(text, members)
     cleaned, user_only = strip_user_notice_target(cleaned, user_name)
-    if user_only:
-        return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_USER)
     mentions = match_channel_mentions(cleaned, members)
     if mentions:
         return ChannelReplyRoute(
@@ -161,6 +159,8 @@ def route_channel_reply(
             wake=CHANNEL_WAKE_MENTIONS,
             target_ids=tuple(sorted(mentions - excluded)),
         )
+    if user_only:
+        return ChannelReplyRoute(text=cleaned, wake=CHANNEL_WAKE_USER)
     if excluded:
         eligible = {
             member.id

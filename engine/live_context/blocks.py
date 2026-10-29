@@ -374,12 +374,17 @@ def render_channel_wake_routing(user_name: str) -> str:
         [
             f'<{CHANNEL_WAKE_ROUTING_TAG} version="1">',
             "Every final reply MUST choose its Agent-Agent wake scope using these rules:",
-            "- If the reply contains `@MemberName `: wake ONLY the mentioned members.",
-            "- If there is no `@` but the reply contains `^MemberName`: do NOT wake the "
-            "excluded members; all other online members will still be woken.",
-            "- If there is neither `@` nor `^MemberName`: wake ALL other online members.",
-            f"Use `^MemberName` to exclude members from being woken. If this reply only "
-            f"needs to go to {name} and should not disturb anyone else, use `@{name}`; "
+            f"- If the reply contains `@MemberName `: wake ONLY the mentioned members, "
+            f"even if `@{name}` also appears.",
+            f"- If the reply contains no `@MemberName ` but contains `@{name}`: wake only "
+            f"{name}; do not wake other members.",
+            f"- If the reply contains no `@MemberName ` and no `@{name}` but contains "
+            "`^MemberName`: do NOT wake the excluded members; all other online members "
+            "will still be woken.",
+            f"- If there is neither `@MemberName `, `@{name}`, nor `^MemberName`: wake ALL "
+            "other online members.",
+            "Use `^MemberName` to exclude members from being woken. If the reply has no "
+            f"explicit member mention and only needs to go to {name}, use `@{name}`; "
             "the marker may appear anywhere in the reply and is removed before publishing.",
             "`^MemberName` markers are removed before publishing.",
             "Whichever scope you choose, the reply is still written to the channel message record.",

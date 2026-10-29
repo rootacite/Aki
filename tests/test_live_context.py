@@ -312,14 +312,21 @@ class ChannelContextTests(unittest.TestCase):
         block = render_channel_wake_routing("Master")
         self.assertTrue(block.startswith(f"<{CHANNEL_WAKE_ROUTING_TAG}"))
         self.assertIn(
-            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
+            "If the reply contains `@MemberName `: wake ONLY the mentioned members, "
+            "even if `@Master` also appears.",
             block,
         )
         self.assertIn(
-            "If there is no `@` but the reply contains `^MemberName`", block
+            "If the reply contains no `@MemberName ` but contains `@Master`", block
         )
         self.assertIn(
-            "If there is neither `@` nor `^MemberName`: wake ALL other online members.",
+            "If the reply contains no `@MemberName ` and no `@Master` but contains "
+            "`^MemberName`",
+            block,
+        )
+        self.assertIn(
+            "If there is neither `@MemberName `, `@Master`, nor `^MemberName`: wake ALL "
+            "other online members.",
             block,
         )
         self.assertIn("Use `^MemberName` to exclude members from being woken.", block)
@@ -402,8 +409,8 @@ class ChannelContextTests(unittest.TestCase):
             "@Master\n@Fuyu 这条也只对你说。", members, user_name="Master"
         )
         self.assertEqual(targeted_user.text, "@Fuyu 这条也只对你说。")
-        self.assertEqual(targeted_user.wake, CHANNEL_WAKE_USER)
-        self.assertEqual(targeted_user.target_ids, ())
+        self.assertEqual(targeted_user.wake, CHANNEL_WAKE_MENTIONS)
+        self.assertEqual(targeted_user.target_ids, ("fuyu",))
 
         targeted = route_channel_reply(
             "@Fuyu 这个方案有问题。", members, user_name="Master"
@@ -449,6 +456,17 @@ class ChannelContextTests(unittest.TestCase):
         self.assertEqual(override.text, "@Fuyu 这条给你。")
         self.assertEqual(override.wake, CHANNEL_WAKE_MENTIONS)
         self.assertEqual(override.target_ids, ())
+
+        master_does_not_override_explicit_mention = route_channel_reply(
+            "@Master @Fuyu 这条给你。^Fuyu", members, user_name="Master"
+        )
+        self.assertEqual(
+            master_does_not_override_explicit_mention.text, "@Fuyu 这条给你。"
+        )
+        self.assertEqual(
+            master_does_not_override_explicit_mention.wake, CHANNEL_WAKE_MENTIONS
+        )
+        self.assertEqual(master_does_not_override_explicit_mention.target_ids, ())
 
         suppressed = route_channel_reply(
             "@Master 只提醒你。^Aki", members, user_name="Master"
