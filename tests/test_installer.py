@@ -122,6 +122,7 @@ class InstallerTests(unittest.TestCase):
             "UMask=0077",
             'Environment="XDG_RUNTIME_DIR=%t"',
             'Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"',
+            'Environment="LETTA_STREAM_STALL_RECONCILE_MS=600000"',
         ):
             self.assertIn(fragment, unit)
         self.assertIn('Environment="AKI_LETTA_BIN=/usr/bin/letta"', unit)

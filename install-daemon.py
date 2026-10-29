@@ -239,6 +239,7 @@ Environment="AKI_LETTA_BIN={letta_bin or repo / 'bin' / 'letta-aki'}"
 Environment="AKI_LETTA_RUNTIME={Path.home() / '.local' / 'lib' / 'aki' / 'letta-code' / 'current'}"
 Environment="XDG_RUNTIME_DIR=%t"
 Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"
+Environment="LETTA_STREAM_STALL_RECONCILE_MS=600000"
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=15
