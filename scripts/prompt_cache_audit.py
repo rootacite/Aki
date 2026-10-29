@@ -274,7 +274,7 @@ def _wait_ready(profile: str, timeout: float = 90.0) -> None:
     raise RuntimeError(f"profile {profile} did not become ready")
 
 
-def _collect_test_message_ids(profiles: Sequence[str]) -> set[str]:
+def _collect_test_message_ids(profiles: Sequence[str], run_id: str = "") -> set[str]:
     ids: set[str] = set()
     config = _profile_config(profiles[0])
     root = _channel_history_root(config)
@@ -282,7 +282,7 @@ def _collect_test_message_ids(profiles: Sequence[str]) -> set[str]:
         return ids
     for path in root.rglob("*.jsonl"):
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
-            if TEST_PREFIX not in line:
+            if TEST_PREFIX not in line and (not run_id or f"ACK-{run_id}" not in line):
                 continue
             try:
                 row = json.loads(line)
@@ -291,6 +291,31 @@ def _collect_test_message_ids(profiles: Sequence[str]) -> set[str]:
             if isinstance(row, dict) and row.get("message_id"):
                 ids.add(str(row["message_id"]))
     return ids
+
+
+def _cleanup_test_rows(profiles: Sequence[str], run_id: str) -> int:
+    tokens = (TEST_PREFIX, f"ACK-{run_id}")
+    removed = 0
+    for profile in profiles:
+        config = _profile_config(profile)
+        root = _channel_history_root(config)
+        for path in root.rglob("*.jsonl") if root.is_dir() else ():
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            kept = [line for line in lines if not any(token in line for token in tokens)]
+            if len(kept) != len(lines):
+                path.write_text("".join(kept), encoding="utf-8")
+                removed += len(lines) - len(kept)
+        conversation = _conversation_dir(config) / "messages.jsonl"
+        if conversation.is_file():
+            lines = conversation.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+            index = next(
+                (i for i, line in enumerate(lines) if any(token in line for token in tokens)),
+                None,
+            )
+            if index is not None:
+                conversation.write_text("".join(lines[:index]), encoding="utf-8")
+                removed += len(lines) - index
+    return removed
 
 
 def _mark_seen(profiles: Sequence[str], message_ids: set[str]) -> None:
@@ -355,8 +380,9 @@ def _message_text(profile: str, run_id: str, index: int) -> tuple[str, str]:
     config = _profile_config(profile)
     name = config.channel.name or profile.capitalize()
     marker = f"{TEST_PREFIX}-{run_id}-{profile}-{index}"
+    ack = f"ACK-{run_id}-{profile}-{index}"
     return marker, (
-        f"@{name} [{marker}] 只回复 ACK-{index}。不要调用任何工具，不要修改记忆，"
+        f"@{name} [{marker}] 只回复 {ack}。不要调用任何工具，不要修改记忆，"
         "不要 @ 或 ^ 其他成员。"
     )
 
@@ -510,7 +536,8 @@ def _report_profile(
     }
 
 
-def _check_rollback(profiles: Sequence[str], manifest: Mapping[str, Any]) -> None:
+def _check_rollback(profiles: Sequence[str], manifest: Mapping[str, Any], run_id: str) -> None:
+    tokens = (TEST_PREFIX, f"ACK-{run_id}")
     for profile in profiles:
         item = (manifest.get("profiles") or {}).get(profile) or {}
         conversation = Path(str(item.get("conversation_dir") or ""))
@@ -518,24 +545,31 @@ def _check_rollback(profiles: Sequence[str], manifest: Mapping[str, Any]) -> Non
             conversation / "messages.jsonl",
             _channel_history_root(_profile_config(profile)),
         ):
-            if path.is_file() and TEST_PREFIX in path.read_text(encoding="utf-8", errors="replace"):
+            if path.is_file() and any(
+                token in path.read_text(encoding="utf-8", errors="replace") for token in tokens
+            ):
                 raise RuntimeError(f"test marker remained after rollback: {path}")
             if path.is_dir():
                 for child in path.rglob("*.jsonl"):
-                    if TEST_PREFIX in child.read_text(encoding="utf-8", errors="replace"):
+                    if any(
+                        token in child.read_text(encoding="utf-8", errors="replace")
+                        for token in tokens
+                    ):
                         raise RuntimeError(f"test marker remained after rollback: {child}")
 
 
-def _stabilize_rollback(profiles: Sequence[str], manifest: Mapping[str, Any]) -> None:
+def _stabilize_rollback(profiles: Sequence[str], manifest: Mapping[str, Any], run_id: str) -> None:
     for _attempt in range(2):
         time.sleep(3.0)
-        replayed = _collect_test_message_ids(profiles)
-        if not replayed:
+        removed = _cleanup_test_rows(profiles, run_id)
+        replayed = _collect_test_message_ids(profiles, run_id)
+        if not removed and not replayed:
             return
         for profile in profiles:
             with contextlib.suppress(Exception):
                 _systemctl("stop", f"akid@{profile}.service")
         _restore(manifest, profiles)
+        _cleanup_test_rows(profiles, run_id)
         _mark_seen(profiles, replayed)
         for profile in profiles:
             with contextlib.suppress(Exception):
@@ -614,12 +648,13 @@ async def main(argv: list[str] | None = None) -> int:
             json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
     finally:
-        test_message_ids = _collect_test_message_ids(profiles)
+        test_message_ids = _collect_test_message_ids(profiles, args.run_id)
         if manifest is not None:
             for profile in profiles:
                 with contextlib.suppress(Exception):
                     _systemctl("stop", f"akid@{profile}.service")
             _restore(manifest, profiles)
+            _cleanup_test_rows(profiles, args.run_id)
             _mark_seen(profiles, test_message_ids)
         if debug_paths:
             _disable_debug(debug_paths, profiles)
@@ -627,8 +662,8 @@ async def main(argv: list[str] | None = None) -> int:
             with contextlib.suppress(Exception):
                 _systemctl("start", f"akid@{profile}.service")
         if manifest is not None:
-            _stabilize_rollback(profiles, manifest)
-            _check_rollback(profiles, manifest)
+            _stabilize_rollback(profiles, manifest, args.run_id)
+            _check_rollback(profiles, manifest, args.run_id)
     print(json.dumps(report, ensure_ascii=False, indent=2))
     return 0
 
