@@ -826,6 +826,24 @@ class FakeLetta:
                         },
                     }
                 )
+            elif subtype == "aki_recompile_conversation":
+                emit(
+                    {
+                        "type": "control_response",
+                        "response": {
+                            "subtype": "success",
+                            "request_id": request_id,
+                            "response": {
+                                "recompiled": True,
+                                "conversation_id": request.get(
+                                    "conversation_id", "default"
+                                ),
+                                "agent_id": request.get("agent_id", ""),
+                                "content_length": 1,
+                            },
+                        },
+                    }
+                )
             elif subtype == "aki_conversation_snapshot":
                 emit(
                     {

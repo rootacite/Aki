@@ -102,7 +102,7 @@ HELP_TEXT = (
     "  akictl username            show how Aki addresses the user\n"
     "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
     "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
-    "  akictl compact [mode]      compact context and trigger memory reflection\n"
+    "  akictl compact [mode]      keep newest 40% by count, summarize the rest\n"
     "  akictl solo <member>       enter private solo mode with one member\n"
     "  akictl solo status         show the active solo session\n"
     "  akictl solo off            end solo mode\n"
@@ -1628,8 +1628,8 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(
         prog="akictl compact",
         description=(
-            "Compact the conversation context and trigger compaction-event "
-            "memory reflection"
+            "Keep the newest 40% of messages by count, summarize the rest, "
+            "and trigger memory reflection"
         ),
     )
     _add_common(parser)

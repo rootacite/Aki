@@ -198,11 +198,23 @@ systemctl --user edit akid@.service   # Environment="AKI_COMPACTION_RATIO=0.5"
 也可以随时手动触发同一套流程：
 
 ```bash
-akictl compact                    # 默认 compaction 模式
+akictl compact                    # 默认：保留最新 40% 消息，摘要其余部分
 akictl compact sliding_window     # 指定模式
 akictl fuyu compact all           # 对 fuyu profile 执行
 akictl compact --timeout 1800     # 等待压缩与记忆整理的最长秒数
 ```
+
+默认 `sliding_window` 按**消息条数**保留最新约 40%：
+
+```text
+retainCount = ceil(messages.length * 0.4)
+cutoffIndex = messages.length - retainCount
+```
+
+切点如果落在 `toolResult` 上，会向前对齐，避免保留没有对应 tool call 的孤立工具结果。
+切点之前的消息生成摘要，切点及之后的消息原样保留；压缩完成后继续触发 `aki_reflect`
+把本轮压缩事件交给 MemFS 记忆整理。`all` 模式仍然摘要全部消息，不保留原始消息窗口。
+该保留窗口逻辑由 `patches/letta-code/0004-aki-compact-retain-latest.patch` 实现。
 
 该命令会先确认当前没有活动或排队中的 turn，然后通过长驻 Letta 进程的 `aki_compact`
 控制请求执行 compaction，再通过 `aki_reflect` 发起 manual reflection；不再启动临时
@@ -223,25 +235,27 @@ systemctl --user restart akid@aki.service
 systemctl --user restart akid-proxy@aki.service
 ```
 
-脚本会保留现有 core memory；live context 不再落盘，而由每个 turn 的 overlay 注入。脚本会先备份到
-`~/.letta/backups/system-prompt-install-<timestamp>/`。动态的 ownership/identity/
-transcript/live 块由 akid 在之后的 turn 重建。修改 `prompts/aki-system.md` 后重新运行即可；
-`{CORE_MEMORY}` 占位符必须保留。
+脚本只安装静态 base 到 Letta 的 `agent.system`，不再读写
+`conversation/system-prompt.json`。core memory 由 Letta/MemFS 编译；所有 Aki 运行时块
+（ownership、policy、wake routing、identity、solo/shared memory、transcript、roster、
+live context）都由 akid 在请求前作为 turn overlay 注入。脚本会先备份到
+`~/.letta/backups/system-prompt-install-<timestamp>/`。修改 `prompts/aki-system.md` 后
+重新运行即可；`{CORE_MEMORY}` 占位符必须保留。
 
-编译后模型看到的固定顺序是 `base → core memory → tool ownership → channel policy →
-wake routing → identity → channel turn → transcript → live context`：
+编译后模型看到的固定顺序是 `base → core memory → runtime overlay`。runtime overlay
+内部顺序为 `tool ownership → channel policy → wake routing → identity → solo mode →
+solo memories → shared memory → channel turn → transcript → roster → live context`：
 
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
    `prompts/haru-system.md`），包含身份、记忆机制、工具规则、执行锁规则和模式边界。
 2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
 3. `<tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
-   `@Owner` 转述规则，每个 turn 刷新。
+   `@Owner` 转述规则，每个 turn 作为 overlay 注入。
 4. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
    execution guidance、专属域规则和输出规则。
-5. `<channel-wake-routing>`：英文持久块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
-   使用 `@<username>`”和 `^` 排除提示；启动时写入持久 system prompt，并随 profile
-   username 刷新。
-6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 刷新。
+5. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
+   使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
+6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 作为 overlay 注入。
 7. `<channel-turn>`：当前频道 turn 的新消息 sender/seq/正文、guidance、
    initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
    bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
@@ -347,7 +361,7 @@ akictl history --solo             # 读独处历史
 - 公共记忆为空时，Aki 首次启动会从自己的 canonical 群聊历史回填一次；之后由各 profile
   实时追加新消息。
 - 文件最多保留最近 4096 条记录。
-- 持久 system prompt 只注入一个 `<shared-memory path=... records=...>` 索引，不重复消息正文；
+- runtime overlay 只注入一个 `<shared-memory path=... records=...>` 索引，不重复消息正文；
   需要细节时由成员自行读取 `messages.jsonl`。
 - `akictl health` 的 `channel.public_memory` 会显示路径、记录数和更新时间。
 
@@ -579,7 +593,7 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 每个 `<member>` 都含 `kind` 与简介；简介始终标记为不可信远程数据。profile username 不在智能体成员
 列表中，普通回复直接说话即可；回复中任意位置的 `@<username>`（例如 `@Master`）表示这条回复
 只对该 username 说、无需打扰其他成员，会强制只唤醒该 username。本地 turn 不包含频道 transcript 或 turn
-块；`<channel-identity>` 与 `<channel-wake-routing>` 仍持久刷新，`<live-context>` 在
+块；`<channel-identity>` 与 `<channel-wake-routing>` 作为 turn overlay 刷新，`<live-context>` 在
 bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt

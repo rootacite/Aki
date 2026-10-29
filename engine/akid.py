@@ -109,7 +109,6 @@ from engine.execution_policy import (
     LOCK_REQUIRED_ERROR,
     WAIT_OTHER_TOOL,
     WAIT_USER_TOOL,
-    clear_execution_lock_policy,
     is_lock_control_tool,
     requires_execution_lock,
 )
@@ -123,21 +122,7 @@ from engine.live_context import (
     ChannelImageAttachment,
     ChannelTranscriptEntry,
     LiveContextOptions,
-    apply_channel_identity,
-    apply_channel_policy,
-    apply_channel_wake_routing,
-    apply_shared_memory,
-    apply_solo_memories,
-    apply_solo_mode,
     clamp_budget_tokens,
-    clear_channel_identity,
-    clear_channel_turn,
-    clear_channel_transcript,
-    clear_live_context,
-    clear_shared_memory,
-    clear_solo_memories,
-    clear_solo_mode,
-    clear_solo_transcript,
     collect_live_context,
     desktop_environment,
     match_channel_mentions,
@@ -2034,15 +2019,10 @@ class GatewayServer:
             limit=MAX_LINE_BYTES + 2,
         )
         os.chmod(path, 0o600)
-        self._clear_live_context_block()
-        self._clear_channel_transcript_block()
-        self._clear_channel_identity_block()
-        await self._refresh_channel_policy()
-        await self._refresh_channel_wake_routing()
-        await self._refresh_channel_identity()
+        # Runtime prompt blocks are turn overlays. Never mutate the Letta
+        # agent record or its compiled prompt during startup.
         self._backfill_public_memory()
         await self._refresh_channel_transcript()
-        await self._refresh_tool_ownership()
         if self.config.aki is not None:
             try:
                 self._prepare_letta_provider()
@@ -2160,11 +2140,6 @@ class GatewayServer:
         with contextlib.suppress(Exception):
             await self.backend.stop()
         self.execution_lock.close()
-        self._clear_live_context_block()
-        self._clear_channel_transcript_block()
-        self._clear_channel_identity_block()
-        self._clear_tool_ownership_block()
-        self._clear_execution_lock_policy()
         with contextlib.suppress(FileNotFoundError):
             self.config.socket_path.unlink()
         LOGGER.info("akid stopped")
@@ -2936,51 +2911,26 @@ class GatewayServer:
                 return path
         return None
 
-    def _write_agent_record(
-        self, path: Path, record: Mapping[str, Any], system: str
-    ) -> None:
-        payload = dict(record)
-        payload["system"] = system
-        try:
-            previous_mtime_ns = path.stat().st_mtime_ns
-        except OSError:
-            previous_mtime_ns = 0
-        temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        try:
-            temporary.write_text(
-                json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, path)
-            now_ns = time.time_ns()
-            os.utime(
-                path,
-                ns=(now_ns, max(now_ns, previous_mtime_ns + 1_000_000)),
-            )
-        finally:
-            with contextlib.suppress(OSError):
-                temporary.unlink()
+    def _tool_ownership_block(self) -> str:
+        online = set(discover_profiles())
+        online.add(self.config.profile)
+        return render_tool_ownership_prompt(
+            self.config.profile,
+            online_profiles=online,
+        )
 
-    def _clear_live_context_block(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict):
-                return
-            system = record.get("system")
-            if not isinstance(system, str) or not system:
-                return
-            cleared = clear_live_context(system)
-            if cleared == system:
-                return
-            self._write_agent_record(path, record, cleared)
-            self._live_context_status["updated"] = False
-            self._live_context_status["agent_path"] = str(path)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear live context block: %s", exc)
+    def _channel_policy_block(self) -> str:
+        return render_channel_policy(
+            user_name=self.config.username or "Master",
+            emoji_entries=self._emoji_entries(),
+            wait_user_available=self.channel is not None,
+        )
+
+    def _channel_wake_routing_block(self) -> str:
+        return render_channel_wake_routing(self.config.username or "Master")
+
+    def _channel_identity_block(self) -> str:
+        return render_channel_identity(self._channel_self_member())
 
     def _record_channel_message(
         self,
@@ -3288,52 +3238,6 @@ class GatewayServer:
         self._channel_transcript_status.pop("last_history_error", None)
         self._cleanup_channel_media()
 
-    def _clear_channel_transcript_block(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict):
-                return
-            system = record.get("system")
-            if not isinstance(system, str) or not system:
-                return
-            cleared = clear_channel_transcript(system)
-            if cleared == system:
-                return
-            self._write_agent_record(path, record, cleared)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear channel transcript block: %s", exc)
-
-    def _clear_persisted_turn_blocks(self) -> None:
-        """Remove legacy per-turn blocks once the bridge owns turn context."""
-        path = self._agent_record_path()
-        if path is None:
-            return
-
-        def clear(system: str) -> str:
-            return clear_live_context(
-                clear_solo_memories(
-                    clear_solo_transcript(
-                        clear_solo_mode(
-                            clear_channel_turn(clear_channel_transcript(system))
-                        )
-                    )
-                )
-            )
-
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(record, dict):
-                system = record.get("system")
-                if isinstance(system, str) and system:
-                    updated = clear(system)
-                    if updated != system:
-                        self._write_agent_record(path, record, updated)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear persisted turn blocks: %s", exc)
-
     def _public_memory_prompt_block(self) -> str:
         records = self.public_memory.snapshot()
         if not records:
@@ -3379,132 +3283,9 @@ class GatewayServer:
                 added,
             )
         return added
-        prompt_path = self._conversation_dir() / "system-prompt.json"
-        if not prompt_path.is_file():
-            return
-        try:
-            prompt = json.loads(prompt_path.read_text(encoding="utf-8"))
-            if not isinstance(prompt, dict):
-                return
-            content = prompt.get("content")
-            if not isinstance(content, str) or not content:
-                return
-            updated = clear(content)
-            if updated != content:
-                prompt["content"] = updated
-                atomic_write(
-                    prompt_path,
-                    json.dumps(prompt, ensure_ascii=False, indent=2) + "\n",
-                )
-        except (OSError, ValueError) as exc:
-            LOGGER.warning(
-                "failed to clear persisted turn blocks from conversation prompt: %s",
-                exc,
-            )
-
-    def _clear_channel_identity_block(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict):
-                return
-            system = record.get("system")
-            if not isinstance(system, str) or not system:
-                return
-            cleared = clear_channel_identity(system)
-            if cleared == system:
-                return
-            self._write_agent_record(path, record, cleared)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear channel identity block: %s", exc)
-
-    async def _refresh_channel_identity(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        block = render_channel_identity(self._channel_self_member())
-        async with self._channel_transcript_lock:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                updated = apply_channel_identity(system, block)
-                if updated != system:
-                    self._write_agent_record(path, record, updated)
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to refresh channel identity: %s", exc)
-
-    def _update_system_prompt_text(
-        self,
-        update: Callable[[str], str],
-        *,
-        label: str,
-    ) -> None:
-        path = self._agent_record_path()
-        targets: list[tuple[Path, dict[str, Any], str]] = []
-        if path is not None:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                targets.append((path, record, system))
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to update %s in agent record: %s", label, exc)
-
-        prompt_path = self._conversation_dir() / "system-prompt.json"
-        if prompt_path.is_file():
-            try:
-                record = json.loads(prompt_path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("conversation system prompt is not an object")
-                content = record.get("content")
-                if not isinstance(content, str) or not content.strip():
-                    raise ValueError("conversation system prompt has no content")
-                targets.append((prompt_path, record, content))
-            except (OSError, ValueError) as exc:
-                LOGGER.warning(
-                    "failed to update %s in conversation prompt: %s", label, exc
-                )
-
-        for target, record, current in targets:
-            updated = update(current)
-            if updated == current:
-                continue
-            try:
-                if target == path:
-                    self._write_agent_record(target, record, updated)
-                else:
-                    record["content"] = updated
-                    atomic_write(
-                        target,
-                        json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-                    )
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to write %s into %s: %s", label, target, exc)
-
     def _emoji_entries(self) -> list[EmojiEntry]:
         root = self.config.emoji_dir or (self.config.cwd / "assets" / "emoji")
         return load_emoji_entries(root, self.config.profile)
-
-    async def _refresh_channel_policy(self) -> None:
-        block = render_channel_policy(
-            user_name=self.config.username or "Master",
-            emoji_entries=self._emoji_entries(),
-            wait_user_available=self.channel is not None,
-        )
-        async with self._wake_routing_lock:
-            self._update_system_prompt_text(
-                lambda system: apply_channel_policy(system, block),
-                label="channel policy",
-            )
 
     async def _refresh_channel_turn(self, turn: Turn | None) -> str:
         if turn is None or turn.origin != "mqtt":
@@ -3530,94 +3311,13 @@ class GatewayServer:
         )
         return block
 
-    async def _refresh_channel_wake_routing(self) -> None:
-        """Keep the wake-routing rules in the real system prompt."""
-        block = render_channel_wake_routing(self.config.username or "Master")
-        async with self._wake_routing_lock:
-            path = self._agent_record_path()
-            if path is not None:
-                try:
-                    record = json.loads(path.read_text(encoding="utf-8"))
-                    if not isinstance(record, dict):
-                        raise ValueError("agent record is not a JSON object")
-                    system = record.get("system")
-                    if not isinstance(system, str) or not system:
-                        raise ValueError("agent system prompt is not a string")
-                    updated = apply_channel_wake_routing(system, block)
-                    if updated != system:
-                        self._write_agent_record(path, record, updated)
-                except (OSError, ValueError) as exc:
-                    LOGGER.warning("failed to refresh channel wake routing: %s", exc)
-
-            prompt_path = self._conversation_dir() / "system-prompt.json"
-            if prompt_path.is_file():
-                try:
-                    record = json.loads(prompt_path.read_text(encoding="utf-8"))
-                    if not isinstance(record, dict):
-                        raise ValueError("conversation system prompt is not an object")
-                    content = record.get("content")
-                    if not isinstance(content, str) or not content.strip():
-                        raise ValueError("conversation system prompt has no content")
-                    updated_content = apply_channel_wake_routing(content, block)
-                    if updated_content != content:
-                        record["content"] = updated_content
-                        atomic_write(
-                            prompt_path,
-                            json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-                        )
-                except (OSError, ValueError) as exc:
-                    LOGGER.warning(
-                        "failed to write channel wake routing into system prompt: %s",
-                        exc,
-                    )
-
-    async def _refresh_tool_ownership(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        online = set(discover_profiles())
-        online.add(self.config.profile)
-        block = render_tool_ownership_prompt(
-            self.config.profile,
-            online_profiles=online,
-        )
-        async with self._tool_ownership_lock:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                updated = apply_tool_ownership(system, block)
-                if updated != system:
-                    self._write_agent_record(path, record, updated)
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to refresh tool ownership: %s", exc)
-
-    def _clear_tool_ownership_block(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict):
-                return
-            system = record.get("system")
-            if not isinstance(system, str) or not system:
-                return
-            cleared = clear_tool_ownership(system)
-            if cleared != system:
-                self._write_agent_record(path, record, cleared)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear tool ownership: %s", exc)
-
-    async def _refresh_channel_transcript(
+    async def _render_transcript_blocks(
         self,
         *,
         new_seq: int | None = None,
         limit: int | None = None,
-    ) -> str:
+    ) -> tuple[str, str, str, str, str]:
+        """Render transcript/solo/shared blocks without touching persisted prompts."""
         path = self._agent_record_path()
 
         def with_attachment_state(
@@ -3725,7 +3425,6 @@ class GatewayServer:
                 budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
             )
         shared_memory_block = self._public_memory_prompt_block()
-        overlay_block = self._transcript_overlay_block(group_block, solo_block)
         self._channel_transcript_status.update(
             {
                 "budget_tokens": self.config.channel_transcript_budget_tokens,
@@ -3751,69 +3450,25 @@ class GatewayServer:
                 "agent_path": str(path) if path is not None else "",
             }
         )
-        if path is None:
-            return overlay_block
+        return (
+            group_block,
+            solo_block,
+            solo_mode_block,
+            solo_memories_block,
+            shared_memory_block,
+        )
 
-        def update_system(system: str) -> str:
-            # The bridge owns per-turn transcripts as an overlay. The
-            # persistent system prompt only carries rules and memory.
-            updated = clear_solo_transcript(system)
-            updated = clear_channel_transcript(updated)
-            updated = (
-                apply_solo_mode(updated, solo_mode_block)
-                if solo_mode_block
-                else clear_solo_mode(updated)
-            )
-            updated = (
-                apply_solo_memories(updated, solo_memories_block)
-                if solo_memories_block
-                else clear_solo_memories(updated)
-            )
-            updated = (
-                apply_shared_memory(updated, shared_memory_block)
-                if shared_memory_block
-                else clear_shared_memory(updated)
-            )
-            return updated
-
-        async with self._channel_transcript_lock:
-            try:
-                record = json.loads(path.read_text(encoding="utf-8"))
-                if not isinstance(record, dict):
-                    raise ValueError("agent record is not a JSON object")
-                system = record.get("system")
-                if not isinstance(system, str) or not system:
-                    raise ValueError("agent system prompt is not a string")
-                updated = update_system(system)
-                if updated != system:
-                    self._write_agent_record(path, record, updated)
-                prompt_path = self._conversation_dir() / "system-prompt.json"
-                if prompt_path.is_file():
-                    try:
-                        prompt_record = json.loads(
-                            prompt_path.read_text(encoding="utf-8")
-                        )
-                        if not isinstance(prompt_record, dict):
-                            raise ValueError("conversation prompt is not an object")
-                        content = prompt_record.get("content")
-                        if not isinstance(content, str) or not content:
-                            raise ValueError("conversation prompt has no content")
-                        updated_content = update_system(content)
-                        if updated_content != content:
-                            prompt_record["content"] = updated_content
-                            atomic_write(
-                                prompt_path,
-                                json.dumps(prompt_record, ensure_ascii=False, indent=2)
-                                + "\n",
-                            )
-                    except (OSError, ValueError) as exc:
-                        LOGGER.warning(
-                            "failed to refresh conversation channel transcript: %s",
-                            exc,
-                        )
-            except (OSError, ValueError) as exc:
-                LOGGER.warning("failed to refresh channel transcript: %s", exc)
-        return overlay_block
+    async def _refresh_channel_transcript(
+        self,
+        *,
+        new_seq: int | None = None,
+        limit: int | None = None,
+    ) -> str:
+        """Compatibility helper returning only the per-turn transcript overlay."""
+        group_block, solo_block, _solo_mode, _solo_memories, _shared = (
+            await self._render_transcript_blocks(new_seq=new_seq, limit=limit)
+        )
+        return self._transcript_overlay_block(group_block, solo_block)
 
     def _transcript_overlay_block(
         self,
@@ -3829,23 +3484,6 @@ class GatewayServer:
         elif group_block:
             parts.append(group_block)
         return "\n\n".join(parts)
-
-    def _clear_execution_lock_policy(self) -> None:
-        path = self._agent_record_path()
-        if path is None:
-            return
-        try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(record, dict):
-                return
-            system = record.get("system")
-            if not isinstance(system, str) or not system:
-                return
-            cleared = clear_execution_lock_policy(system)
-            if cleared != system:
-                self._write_agent_record(path, record, cleared)
-        except (OSError, ValueError) as exc:
-            LOGGER.warning("failed to clear execution lock policy: %s", exc)
 
     async def _capture_live_screenshot(self) -> dict[str, Any] | None:
         output_dir = self.config.screenshot_output_dir or default_screenshot_dir()
@@ -4085,7 +3723,8 @@ class GatewayServer:
                 )
                 await self._finish_turn(turn, "backend_unavailable")
                 return
-            self._clear_execution_lock_policy()
+            # Legacy execution-lock blocks are removed by the one-time
+            # migration. Runtime turns only add their own overlay.
             if not self._aki_bridge_available():
                 await self._emit(
                     turn,
@@ -4101,7 +3740,6 @@ class GatewayServer:
                 await self._finish_turn(turn, "bridge_unavailable")
                 return
             overlay_parts = await self._build_turn_overlay(turn)
-            await self._refresh_tool_ownership()
             live_block = await self._refresh_live_context()
             if live_block:
                 overlay_parts.append(live_block)
@@ -4140,24 +3778,45 @@ class GatewayServer:
                 await self._finish_turn(turn, "error")
 
     async def _build_turn_overlay(self, turn: Turn) -> list[str]:
-        """Build the per-turn bridge overlay without mutating the transcript."""
-        overlay_parts: list[str] = []
+        """Build the complete runtime system overlay for this turn."""
+        overlay_parts: list[str] = [
+            self._tool_ownership_block(),
+            self._channel_policy_block(),
+            self._channel_wake_routing_block(),
+            self._channel_identity_block(),
+        ]
+        new_seq = (
+            turn.channel_message_seq
+            if turn.origin in ("mqtt", "proactive")
+            else None
+        )
+        (
+            group_block,
+            solo_block,
+            solo_mode_block,
+            solo_memories_block,
+            shared_memory_block,
+        ) = await self._render_transcript_blocks(new_seq=new_seq)
+        if solo_mode_block:
+            overlay_parts.append(solo_mode_block)
+        if solo_memories_block:
+            overlay_parts.append(solo_memories_block)
+        if shared_memory_block:
+            overlay_parts.append(shared_memory_block)
+
         if turn.origin == "solo_notice":
-            await self._refresh_channel_identity()
-            block = await self._refresh_channel_transcript()
-            if block:
-                overlay_parts.append(block)
+            transcript = self._transcript_overlay_block(group_block, solo_block)
+            if transcript:
+                overlay_parts.append(transcript)
             await self._snapshot_turn_conversation(turn)
         elif turn.origin in ("mqtt", "proactive"):
-            await self._refresh_channel_identity()
             block = await self._refresh_channel_turn(turn)
             if block:
                 overlay_parts.append(block)
-            block = await self._refresh_channel_transcript(
-                new_seq=turn.channel_message_seq
-            )
-            if block:
-                overlay_parts.append(block)
+            if group_block:
+                overlay_parts.append(group_block)
+            if solo_block:
+                overlay_parts.append(solo_block)
             overlay_parts.append(
                 render_channel_roster(
                     self_member=self._channel_self_member(),
@@ -4167,10 +3826,10 @@ class GatewayServer:
             if turn.origin_is_agent:
                 await self._snapshot_turn_conversation(turn)
         elif turn.origin == WAIT_GUARD_ORIGIN:
-            await self._refresh_channel_identity()
-            block = await self._refresh_channel_transcript()
-            if block:
-                overlay_parts.append(block)
+            if group_block:
+                overlay_parts.append(group_block)
+            if solo_block:
+                overlay_parts.append(solo_block)
             overlay_parts.append(
                 render_channel_roster(
                     self_member=self._channel_self_member(),
@@ -7854,7 +7513,7 @@ class GatewayServer:
                 "missing aki_bridge capability"
             )
             return
-        self._clear_persisted_turn_blocks()
+        # Never rewrite persisted prompt blocks from the runtime.
         self._reset_backend_queue_state()
         self._external_tools_registered = False
         self._external_tools_error = None
@@ -10227,7 +9886,6 @@ class GatewayServer:
         if self.channel is not None:
             self.channel.sender_name = renamed.name
             self.channel.sender_id = renamed.id
-        await self._refresh_channel_identity()
         if self.channel is not None and self.channel.connected:
             with contextlib.suppress(Exception):
                 await self._publish_channel_status()
@@ -10385,71 +10043,8 @@ class GatewayServer:
                     },
                 ) from exc
             result.update(recompiled)
-            await self._refresh_channel_policy()
-            await self._refresh_channel_wake_routing()
             result["applies"] = "now"
             return result
-
-    # ---------------------------------------------------------- prompt rebuild
-    def _prompt_block(self, path: Path, tag: str) -> str | None:
-        if not path.is_file():
-            return None
-        try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
-            return None
-        if not text.startswith("---\n"):
-            return None
-        front, separator, body = text[3:].partition("\n---\n")
-        if not separator:
-            front, separator, body = text[3:].partition("\n---")
-            if not separator:
-                return None
-            body = body.lstrip("\n")
-        description = ""
-        for line in front.splitlines():
-            if line.startswith("description:"):
-                description = line[len("description:") :].strip()
-                break
-        if not description:
-            return None
-        return f"<{tag}>\n<description>{description}</description>\n{body.strip()}\n</{tag}>"
-
-    def _deferred_memory_block(self) -> str:
-        lines: list[str] = []
-        try:
-            children = sorted(self.memory_dir.iterdir())
-        except OSError:
-            children = []
-        for child in children:
-            if child.name.startswith(".") or not child.is_dir():
-                continue
-            if (child / "MEMORY.md").is_file():
-                lines.append(
-                    f'<directory path="{child.name}/" index="{child.name}/MEMORY.md" />'
-                )
-        if not lines:
-            return ""
-        return "<deferred-memory>\n" + "\n".join(lines) + "\n</deferred-memory>"
-
-    async def _memfs_revision(self) -> str | None:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "git",
-                "-C",
-                str(self.memory_dir),
-                "rev-parse",
-                "HEAD",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            stdout, _ = await proc.communicate()
-        except OSError:
-            return None
-        if proc.returncode != 0:
-            return None
-        revision = stdout.decode("utf-8", "replace").strip()
-        return revision or None
 
     async def _recompile_conversation(self) -> dict[str, Any]:
         async with self._recompile_lock:
@@ -10473,200 +10068,38 @@ class GatewayServer:
             raise RpcError(
                 ErrorCode.RECOMPILE_FAILED, "cannot recompile while a turn is active"
             )
-        conversation_dir = self._conversation_dir()
-        prompt_path = conversation_dir / "system-prompt.json"
-        if not prompt_path.is_file():
-            raise RpcError(
-                ErrorCode.RECOMPILE_FAILED,
-                "compiled system prompt not found",
-                {"path": str(prompt_path)},
-            )
-
-        backup_root = self.config.backup_dir or (Path.home() / ".letta" / "backups")
-        backup_root.mkdir(parents=True, exist_ok=True)
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        backup_path = backup_root / f"system-prompt-recompile-{stamp}.json"
-        suffix = 1
-        while backup_path.exists():
-            backup_path = backup_root / f"system-prompt-recompile-{stamp}-{suffix}.json"
-            suffix += 1
-
-        await self.backend.stop()
         try:
-            try:
-                record = json.loads(prompt_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError) as exc:
-                raise RpcError(
-                    ErrorCode.RECOMPILE_FAILED,
-                    "cannot read compiled system prompt",
-                ) from exc
-            if not isinstance(record, dict):
-                raise RpcError(
-                    ErrorCode.RECOMPILE_FAILED,
-                    "compiled system prompt is not an object",
-                )
-            content = record.get("content")
-            if not isinstance(content, str) or not content.strip():
-                raise RpcError(
-                    ErrorCode.RECOMPILE_FAILED,
-                    "compiled system prompt has no content",
-                )
-            shutil.copy2(prompt_path, backup_path)
-
-            blocks: dict[str, str | None] = {
-                "human": self._prompt_block(self.memory_dir / "human.md", "human"),
-                "memory-policy": self._prompt_block(
-                    self.memory_dir / "memory-policy.md", "memory-policy"
-                ),
-                "persona": self._prompt_block(self.memory_dir / "persona.md", "persona"),
-            }
-            memory_index_path = self.memory_dir / "MEMORY.md"
-            if memory_index_path.is_file():
-                try:
-                    memory_index = memory_index_path.read_text(encoding="utf-8").strip()
-                except OSError:
-                    memory_index = ""
-                if memory_index:
-                    deferred = self._deferred_memory_block()
-                    blocks["memory"] = (
-                        "<memory>\n" + memory_index + "\n" + deferred + "\n</memory>"
-                        if deferred
-                        else "<memory>\n" + memory_index + "\n</memory>"
-                    )
-
-            for tag, new_block in blocks.items():
-                if new_block is None:
-                    continue
-                content, count = re.subn(
-                    rf"<{tag}>.*?</{tag}>",
-                    lambda _match, value=new_block: value,
-                    content,
-                    count=1,
-                    flags=re.S,
-                )
-                if count != 1:
-                    raise RpcError(
-                        ErrorCode.RECOMPILE_FAILED,
-                        f"compiled system prompt is missing the <{tag}> block",
-                    )
-
-            content = apply_channel_policy(
-                content,
-                render_channel_policy(
-                    user_name=self.config.username or "Master",
-                    emoji_entries=self._emoji_entries(),
-                ),
+            result = await self.backend.recompile_conversation(
+                conversation_id=self.config.conversation_id,
+                agent_id=self.config.agent_id,
+                timeout=60.0,
             )
-            content = clear_channel_turn(content)
-            content = apply_channel_wake_routing(
-                content,
-                render_channel_wake_routing(self.config.username or "Master"),
-            )
-            if self._solo_session is not None:
-                scene = self._solo_scene or load_solo_scene(
-                    self.config.profile,
-                    username=self.config.username,
-                    explicit=(
-                        self.config.aki.solo_prompt_file
-                        if self.config.aki is not None
-                        else ""
-                    ),
-                )
-                self._solo_scene = scene
-                content = apply_solo_mode(
-                    content,
-                    render_solo_mode(
-                        member_name=self.config.channel_name,
-                        user_name=self.config.username,
-                        session_id=self._solo_session.session_id,
-                        scene=scene,
-                    ),
-                )
-            else:
-                content = clear_solo_mode(content)
-            content = clear_solo_transcript(content)
-            memory_config = self._solo_memory_llm_config()
-            if memory_config is not None:
-                solo_memories_block = await self.solo_memory.render_for_prompt(
-                    current_session_id=(
-                        self._solo_session.session_id
-                        if self._solo_session is not None
-                        else ""
-                    ),
-                    **memory_config,
-                )
-            else:
-                solo_memories_block = render_solo_memories(
-                    [
-                        session
-                        for session in self.solo_memory.sessions
-                        if self._solo_session is None
-                        or session.session_id != self._solo_session.session_id
-                    ],
-                    budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
-                )
-            content = (
-                apply_solo_memories(content, solo_memories_block)
-                if solo_memories_block
-                else clear_solo_memories(content)
-            )
-            shared_memory_block = self._public_memory_prompt_block()
-            content = (
-                apply_shared_memory(content, shared_memory_block)
-                if shared_memory_block
-                else clear_shared_memory(content)
-            )
-
-            old_core = str(record.get("coreMemory") or "")
-            core_parts: list[str] = []
-            for tag in ("human", "memory-policy", "persona"):
-                new_block = blocks.get(tag)
-                if new_block is not None:
-                    core_parts.append(new_block)
-                    continue
-                old_block = re.search(
-                    rf"<{tag}>.*?</{tag}>", old_core, re.S
-                )
-                if old_block:
-                    core_parts.append(old_block.group(0))
-            revision = await self._memfs_revision()
-            record["content"] = content
-            record["coreMemory"] = "\n\n".join(core_parts) + "\n"
-            record["compiledAt"] = now_iso()
-            if revision:
-                record["memfsRevision"] = revision
-            temp_path = prompt_path.with_name(prompt_path.name + ".tmp")
-            temp_path.write_text(
-                json.dumps(record, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.chmod(temp_path, 0o600)
-            os.replace(temp_path, prompt_path)
-        finally:
-            self.backend.start()
-            ready = await self._wait_backend_ready(20.0)
-        if not ready:
+        except Exception as exc:
             raise RpcError(
                 ErrorCode.RECOMPILE_FAILED,
-                "prompt rebuilt but backend did not become ready",
-                {
-                    "backup_path": str(backup_path),
-                    "backend_ready": False,
-                    "backend_error": getattr(self.backend, "last_error", None),
-                },
-            )
+                "Letta conversation recompile failed",
+                {"detail": str(exc)},
+            ) from exc
+        compiled_at = (
+            str(result.get("compiled_at") or "")
+            if isinstance(result, Mapping)
+            else ""
+        )
+        revision = (
+            str(result.get("memfs_revision") or "")
+            if isinstance(result, Mapping)
+            else ""
+        )
         LOGGER.info(
-            "conversation prompt recompiled revision=%s backup=%s",
+            "conversation prompt recompiled by Letta revision=%s",
             revision,
-            backup_path,
         )
         return {
             "recompiled": True,
             "conversation_id": self.config.conversation_id,
-            "memfs_revision": revision,
-            "compiled_at": record["compiledAt"],
-            "backup_path": str(backup_path),
-            "backend_ready": True,
+            "memfs_revision": revision or None,
+            "compiled_at": compiled_at or None,
+            "backend_ready": bool(getattr(self.backend, "ready", False)),
         }
 
     async def _compact_conversation(

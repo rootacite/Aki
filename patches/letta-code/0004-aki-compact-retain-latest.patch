@@ -1,0 +1,173 @@
+--- a/src/backend/local/compaction.ts
++++ b/src/backend/local/compaction.ts
+@@ -41,7 +41,8 @@
+   2_000,
+ ] as const;
+ export const LOCAL_DEFAULT_COMPACTION_MODE = "sliding_window";
+-export const LOCAL_DEFAULT_SLIDING_WINDOW_PERCENTAGE = 0.3;
++// Fraction of the newest messages retained by sliding-window compaction.
++export const LOCAL_DEFAULT_SLIDING_WINDOW_PERCENTAGE = 0.4;
+ 
+ export type LocalCompactionMode = "all" | "sliding_window";
+ 
+@@ -611,17 +612,6 @@
+   return value;
+ }
+ 
+-function isValidSlidingWindowCutoff(
+-  messages: LocalMessage[],
+-  index: number,
+-  maximumCutoffIndex: number,
+-): boolean {
+-  const message = messages[index];
+-  return (
+-    message?.role === "assistant" && index > 0 && index < maximumCutoffIndex
+-  );
+-}
+-
+ export function planLocalSlidingWindowCompaction(
+   messages: LocalMessage[],
+   options: { slidingWindowPercentage?: number; contextWindow?: number } = {},
+@@ -632,7 +622,7 @@
+     );
+   }
+ 
+-  const percentage = normalizedSlidingWindowPercentage(
++  const retainPercentage = normalizedSlidingWindowPercentage(
+     options.slidingWindowPercentage,
+   );
+   const lastMessage = messages.at(-1);
+@@ -640,46 +630,29 @@
+     lastMessage && hasPendingLocalToolCall(lastMessage)
+       ? messages.length - 2
+       : messages.length - 1;
+-  const goalTokens =
+-    typeof options.contextWindow === "number" &&
+-    Number.isFinite(options.contextWindow)
+-      ? (1 - percentage) * options.contextWindow
+-      : undefined;
+-  let approxTokenCount = options.contextWindow ?? Number.POSITIVE_INFINITY;
+-  let cutoffIndex: number | undefined;
+-
+-  let evictionPercentage = percentage;
+-  while (
+-    (goalTokens === undefined
+-      ? cutoffIndex === undefined
+-      : approxTokenCount >= goalTokens) &&
+-    evictionPercentage < 1.0
+-  ) {
+-    evictionPercentage += 0.1;
+-    const messageCutoffIndex = Math.min(
+-      Math.round(evictionPercentage * messages.length),
+-      messages.length - 1,
+-    );
+-    cutoffIndex = [...Array(messageCutoffIndex + 1).keys()]
+-      .reverse()
+-      .find((index) =>
+-        isValidSlidingWindowCutoff(messages, index, maximumCutoffIndex),
+-      );
+-    if (cutoffIndex === undefined) continue;
+-
+-    const messagesToKeep = messages.slice(cutoffIndex);
+-    approxTokenCount = estimateLocalMessageTokens(messagesToKeep);
++  const retainCount = Math.max(
++    1,
++    Math.ceil(messages.length * retainPercentage),
++  );
++  let cutoffIndex = Math.max(0, messages.length - retainCount);
++  if (cutoffIndex > maximumCutoffIndex) {
++    cutoffIndex = maximumCutoffIndex;
++  }
++  // A kept tail must not begin with a tool result: its matching tool call
++  // would live in the summarized head.
++  while (cutoffIndex > 0 && messages[cutoffIndex]?.role === "toolResult") {
++    cutoffIndex -= 1;
+   }
+ 
+-  if (cutoffIndex === undefined || evictionPercentage >= 1.0) {
++  if (cutoffIndex <= 0) {
+     throw new LocalSlidingWindowCompactionPlanningError(
+-      "No assistant message found for sliding window compaction.",
++      "No valid message boundary found for sliding window compaction.",
+     );
+   }
+ 
+   if (cutoffIndex >= maximumCutoffIndex) {
+     throw new LocalSlidingWindowCompactionPlanningError(
+-      `Assistant message index ${cutoffIndex} is at the end of the message buffer, skipping compaction.`,
++      `Message index ${cutoffIndex} is at the end of the message buffer, skipping compaction.`,
+     );
+   }
+ 
+--- a/src/backend/local-compaction-parity.test.ts
++++ b/src/backend/local-compaction-parity.test.ts
+@@ -4,6 +4,7 @@
+   LOCAL_SUMMARY_TOOL_RETURN_TRUNCATION_CHARS,
+   type LocalCompactionStats,
+   packageLocalSummaryMessage,
++  planLocalSlidingWindowCompaction,
+ } from "@/backend/local/compaction";
+ import {
+   emptyLocalUsage,
+@@ -194,3 +195,61 @@
+     expect(typeof packed.time).toBe("string");
+   });
+ });
++
++describe("sliding-window retention", () => {
++  test("keeps the newest 40% of messages by count", () => {
++    const messages: LocalMessage[] = [
++      user("u1", [{ type: "text", text: "1" }]),
++      assistant("a1", [{ type: "text", text: "2" }]),
++      user("u2", [{ type: "text", text: "3" }]),
++      assistant("a2", [{ type: "text", text: "4" }]),
++      user("u3", [{ type: "text", text: "5" }]),
++      assistant("a3", [{ type: "text", text: "6" }]),
++      user("u4", [{ type: "text", text: "7" }]),
++      assistant("a4", [{ type: "text", text: "8" }]),
++      user("u5", [{ type: "text", text: "9" }]),
++      assistant("a5", [{ type: "text", text: "10" }]),
++    ];
++
++    const plan = planLocalSlidingWindowCompaction(messages);
++
++    expect(plan.cutoffIndex).toBe(6);
++    expect(plan.messagesToSummarize).toHaveLength(6);
++    expect(plan.messagesToKeep).toHaveLength(4);
++    expect(plan.messagesToKeep.map((message) => message.id)).toEqual([
++      "u4",
++      "a4",
++      "u5",
++      "a5",
++    ]);
++  });
++
++  test("backs up when the retention boundary lands on a tool result", () => {
++    const messages: LocalMessage[] = [
++      user("u1", [{ type: "text", text: "1" }]),
++      assistant("a1", [{ type: "text", text: "2" }]),
++      user("u2", [{ type: "text", text: "3" }]),
++      assistant("a2", [{ type: "text", text: "4" }]),
++      user("u3", [{ type: "text", text: "5" }]),
++      assistant("a3", [
++        {
++          type: "toolCall",
++          id: "call-1",
++          name: "Read",
++          arguments: { path: "README.md" },
++        },
++      ]),
++      toolResult("t1", [{ type: "text", text: "README" }]),
++      assistant("a4", [{ type: "text", text: "8" }]),
++      user("u5", [{ type: "text", text: "9" }]),
++      assistant("a5", [{ type: "text", text: "10" }]),
++    ];
++
++    const plan = planLocalSlidingWindowCompaction(messages);
++
++    expect(plan.cutoffIndex).toBe(5);
++    expect(plan.messagesToKeep[0]?.id).toBe("a3");
++    expect(plan.messagesToKeep[1]?.id).toBe("t1");
++    expect(plan.messagesToKeep).toHaveLength(5);
++  });
++});

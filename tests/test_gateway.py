@@ -20,6 +20,7 @@ from engine.akid import (
     ChannelTurnState,
     GatewayConfig,
     GatewayServer,
+    NullConnection,
     Turn,
     WAIT_GUARD_ORIGIN,
     WAIT_USER_TOOL,
@@ -1065,10 +1066,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["changed"])
         self.assertTrue(result["recompiled"])
         self.assertEqual(result["username"], "Master")
-        prompt = json.loads((conversation_dir / "system-prompt.json").read_text())
-        self.assertIn("Master", prompt["content"])
-        self.assertNotIn("OldName", prompt["content"])
-        self.assertNotEqual(prompt["compiledAt"], "2026-01-01T00:00:00Z")
         after = await client.call("aki.username.get", {})
         self.assertEqual(after["username"], "Master")
         self.assertIn("Master", (memfs / "persona.md").read_text(encoding="utf-8"))
@@ -1329,7 +1326,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await server.stop()
 
-    async def test_channel_prompt_is_minimal_and_policy_lives_in_system_prompt(self) -> None:
+    async def test_channel_prompt_is_minimal_and_policy_lives_in_overlay(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
         server = await self.start_server()
         sent_at = 1_792_942_663_759
@@ -1345,15 +1342,25 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<channel-policy", prompt)
         self.assertNotIn("<channel-turn", prompt)
         system = self._agent_system(agent_path)
-        self.assertIn("<channel-policy", system)
+        self.assertNotIn("<channel-policy", system)
+        turn = Turn(
+            turn_id="turn-policy",
+            conn=NullConnection(),
+            message="probe",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+        )
+        overlay = "\n\n".join(await server._build_turn_overlay(turn))
+        self.assertIn("<channel-policy", overlay)
         self.assertIn(
             "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
-            system,
+            overlay,
         )
         self.assertNotIn("wake-reminder:", prompt)
         self.assertNotIn("reply-target", prompt)
-        self.assertIn("Use `^MemberName` to exclude members from being woken.", system)
-        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", system)
+        self.assertIn("Use `^MemberName` to exclude members from being woken.", overlay)
+        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", overlay)
 
     async def test_channel_turn_is_bridge_overlay_only(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
@@ -1384,11 +1391,64 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("resets=\"user-message\"", block)
         system = self._agent_system(agent_path)
         self.assertNotIn("<channel-turn", system)
-        self.assertIn("Use `^MemberName` to exclude members from being woken.", system)
+        self.assertIn(
+            "Use `^MemberName` to exclude members from being woken.",
+            server._channel_wake_routing_block(),
+        )
         prompt = server._channel_prompt("Acite", "sender-1", "hello")
         self.assertNotIn("<channel-turn", prompt)
 
-    async def test_wake_routing_is_written_to_real_system_prompt(self) -> None:
+    async def test_turn_overlay_contains_runtime_blocks_without_persisting(self) -> None:
+        agent_path = self._write_test_agent("BASE PROMPT\n")
+        conversation = (
+            self.root
+            / "backend"
+            / "conversations"
+            / _b64url("default:test-agent")
+        )
+        conversation.mkdir(parents=True)
+        prompt_path = conversation / "system-prompt.json"
+        prompt_path.write_text(
+            json.dumps({"content": "BASE SYSTEM PROMPT\n"}) + "\n",
+            encoding="utf-8",
+        )
+        before_agent = agent_path.read_bytes()
+        before_prompt = prompt_path.read_bytes()
+        server = await self.start_server(channel=FakeChannel())
+        server._record_channel_message(
+            sender="Acite",
+            sender_id="sender-1",
+            text="history",
+            from_agent=False,
+        )
+        turn = Turn(
+            turn_id="turn-runtime-overlay",
+            conn=server.channel_conn,
+            message="",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            origin_sender_id="sender-1",
+            channel_message_seq=7,
+            channel_sender="Acite",
+            channel_text="hello",
+        )
+        text = "\n\n".join(await server._build_turn_overlay(turn))
+        openings = (
+            "<tool-ownership version=",
+            "<channel-policy version=",
+            "<channel-wake-routing version=",
+            "<channel-identity version=",
+            "<channel-turn version=",
+            "<channel-transcript ",
+            "<channel-context>",
+        )
+        for opening in openings:
+            self.assertEqual(text.count(opening), 1, opening)
+        self.assertEqual(agent_path.read_bytes(), before_agent)
+        self.assertEqual(prompt_path.read_bytes(), before_prompt)
+
+    async def test_wake_routing_is_overlay_only(self) -> None:
         agent_path = self._write_test_agent("BASE PROMPT\n")
         conversation = (
             self.root
@@ -1405,26 +1465,20 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         server = await self.start_server()
 
         agent_system = self._agent_system(agent_path)
-        self.assertIn("<channel-wake-routing", agent_system)
+        self.assertNotIn("<channel-wake-routing", agent_system)
+        wake_block = server._channel_wake_routing_block()
+        self.assertIn("<channel-wake-routing", wake_block)
         self.assertIn(
             "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
-            agent_system,
+            wake_block,
         )
         self.assertIn(
-            "If there is no `@` but the reply contains `^MemberName`", agent_system
+            "If there is no `@` but the reply contains `^MemberName`", wake_block
         )
-        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", agent_system)
+        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", wake_block)
 
         compiled = json.loads(prompt_path.read_text(encoding="utf-8"))["content"]
-        self.assertIn("<channel-wake-routing", compiled)
-        self.assertIn(
-            "If the reply contains `@MemberName `: wake ONLY the mentioned members.",
-            compiled,
-        )
-        self.assertIn(
-            "If there is no `@` but the reply contains `^MemberName`", compiled
-        )
-        self.assertIn("use `@Master`; the marker may appear anywhere in the reply", compiled)
+        self.assertEqual(compiled, "BASE SYSTEM PROMPT\n")
 
         channel_prompt = server._channel_prompt("Acite", "sender-1", "你好")
         self.assertNotIn("<wake-routing>", channel_prompt)
@@ -3105,7 +3159,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("reply-target", prompt)
         self.assertNotIn("<channel-turn", prompt)
 
-    async def test_legacy_dynamic_execution_lock_block_is_removed(self) -> None:
+    async def test_legacy_dynamic_execution_lock_block_waits_for_migration(self) -> None:
         agent_path = self._write_test_agent(
             "BASE PROMPT\n\n<execution-lock authorized=\"true\">old</execution-lock>\n"
         )
@@ -3113,7 +3167,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await channel_send(server, "hello")
         system = self._agent_system(agent_path)
         self.assertIn("BASE PROMPT", system)
-        self.assertNotIn("<execution-lock", system)
+        self.assertIn("<execution-lock", system)
 
     async def test_channel_execution_lock_authorization_matrix(self) -> None:
         agent_path = self._write_test_agent()
@@ -5395,7 +5449,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(first_overlay.count("<live-context"), 1)
                 self.assertEqual(first_overlay.count("</live-context>"), 1)
                 self.assertNotIn("<live-context", first_system)
-                self.assertEqual(stat.S_IMODE(agent_path.stat().st_mode), 0o600)
                 self.assertIn("Fake Window &lt;test&gt;", first_overlay)
                 self.assertIn("firefox", first_overlay)
                 self.assertIn("python", first_overlay)
@@ -5484,7 +5537,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             for sock in sockets:
                 sock.close()
 
-    async def test_live_context_budget_and_disable_clears_stale_block(self) -> None:
+    async def test_live_context_budget_and_disable_are_overlay_only(self) -> None:
         runtime, sockets = self._wayland_runtime()
         history = self.root / "zsh_history-budget"
         history.write_text(
@@ -5528,7 +5581,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     + len("</live-context>")
                 ]
                 self.assertLessEqual(estimate_tokens(block), 2048)
-                self.assertNotIn("<live-context", self._agent_system(agent_path))
+                self.assertIn("<live-context", self._agent_system(agent_path))
 
                 disabled_path = self._write_test_agent(
                     "BASE\n\n<live-context refreshed_at=\"old\">stale</live-context>\n"
@@ -5539,12 +5592,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     channel=FakeChannel(), live_context_enabled=False
                 )
                 cleared = self._agent_system(disabled_path)
-                self.assertNotIn("<live-context", cleared)
+                self.assertIn("<live-context", cleared)
                 await channel_send(server, "hello")
                 self.assertNotIn("<live-context", overlay_text(server))
-                self.assertNotIn(
-                    "<live-context", self._agent_system(disabled_path)
-                )
+                self.assertIn("<live-context", self._agent_system(disabled_path))
         finally:
             for sock in sockets:
                 sock.close()

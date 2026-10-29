@@ -323,23 +323,23 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         records = server.schedule_store.list(status="all")
         self.assertEqual(records[0].status, "missed")
 
-    async def test_agent_record_receives_ownership_block(self) -> None:
+    async def test_tool_ownership_is_rendered_without_mutating_agent_record(self) -> None:
         server = make_server(self.root)
         agents = self.root / "backend" / "agents"
         agents.mkdir(parents=True)
         path = agents / "agent.json"
+        original = "BASE\n"
         path.write_text(
-            json.dumps({"id": "agent-aki", "system": "BASE\n"}),
+            json.dumps({"id": "agent-aki", "system": original}),
             encoding="utf-8",
         )
-        await server._refresh_tool_ownership()
-        system = json.loads(path.read_text(encoding="utf-8"))["system"]
-        self.assertIn("<tool-ownership", system)
-        self.assertIn('profile="aki"', system)
-        self.assertIn("aki_zero_reply_budget", system)
-        server._clear_tool_ownership_block()
-        cleared = json.loads(path.read_text(encoding="utf-8"))["system"]
-        self.assertNotIn("<tool-ownership", cleared)
+        block = server._tool_ownership_block()
+        self.assertIn("<tool-ownership", block)
+        self.assertIn('profile="aki"', block)
+        self.assertIn("aki_zero_reply_budget", block)
+        self.assertEqual(
+            json.loads(path.read_text(encoding="utf-8"))["system"], original
+        )
 
     async def test_operation_journal_tracks_lifecycle(self) -> None:
         server = make_server(self.root)

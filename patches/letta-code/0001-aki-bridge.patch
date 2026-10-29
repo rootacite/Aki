@@ -951,7 +951,7 @@ index e662c56..e84c5d6 100644
  
        if (subtype === "initialize") {
          // Return session info
-@@ -3936,6 +3972,283 @@ async function runBidirectionalMode(
+@@ -3936,6 +3972,321 @@ async function runBidirectionalMode(
            uuid: randomUUID(),
          };
          writeWireMessage(interruptResponse);
@@ -1007,6 +1007,44 @@ index e662c56..e84c5d6 100644
 +              subtype: "success",
 +              request_id: requestId ?? "",
 +              response: result,
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
++      } else if (subtype === "aki_recompile_conversation") {
++        const request = message.request as unknown as Record<string, unknown>;
++        try {
++          if (!(backend instanceof LocalBackend)) {
++            throw new Error("aki bridge requires the local backend");
++          }
++          const conversation = String(request.conversation_id ?? conversationId);
++          const agentId = String(request.agent_id ?? agent.id);
++          const content = await backend.recompileConversation(conversation, {
++            agent_id: agentId,
++          });
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: {
++                recompiled: true,
++                conversation_id: conversation,
++                agent_id: agentId,
++                content_length: content.length,
++              },
 +            },
 +            session_id: sessionId,
 +            uuid: randomUUID(),

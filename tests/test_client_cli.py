@@ -101,7 +101,7 @@ class ClientCliTests(unittest.TestCase):
         compact_help = self.run_akictl("help", "compact")
         self.assertEqual(compact_help.returncode, 0, compact_help.stderr)
         self.assertIn("usage: akictl compact", compact_help.stdout)
-        self.assertIn("compaction-event", compact_help.stdout)
+        self.assertIn("Keep the newest 40% of messages by count", compact_help.stdout)
 
         unknown = self.run_akictl("help", "missing")
         self.assertEqual(unknown.returncode, 2)
@@ -239,9 +239,6 @@ class ClientCliTests(unittest.TestCase):
         self.assertEqual(data["username"], "Master")
         self.assertTrue(data["changed"])
         self.assertTrue(data["recompiled"])
-        prompt = json.loads((conversation_dir / "system-prompt.json").read_text())
-        self.assertIn("Master", prompt["content"])
-        self.assertNotIn("OldName", prompt["content"])
 
         after = self.run_akictl("username", "--socket", str(self.socket))
         self.assertEqual(after.returncode, 0, after.stderr)

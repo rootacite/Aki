@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 
 from engine import akictl
-from engine.akid import GatewayConfig, GatewayServer
+from engine.akid import GatewayConfig, GatewayServer, NullConnection, Turn
 from engine.live_context import (
     ChannelMember,
     ChannelTranscriptEntry,
@@ -187,6 +187,17 @@ class SoloModeTests(unittest.TestCase):
 
 
 class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def overlay_text(self, server: GatewayServer) -> str:
+        turn = Turn(
+            turn_id="turn-overlay-test",
+            conn=NullConnection(),
+            message="probe",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+        )
+        return "\n\n".join(await server._build_turn_overlay(turn))
+
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.root = Path(self.tempdir.name)
@@ -224,11 +235,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             json.dumps(
                 {
                     "id": "agent-aki",
-                    "system": (
-                        "BASE\n\n"
-                        "<channel-policy>policy</channel-policy>\n"
-                        "<channel-transcript>group old</channel-transcript>\n"
-                    ),
+                    "system": "BASE\n",
                 }
             ),
             encoding="utf-8",
@@ -244,11 +251,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.conversation_prompt_path.write_text(
             json.dumps(
                 {
-                    "content": (
-                        "BASE\n\n"
-                        "<channel-policy>policy</channel-policy>\n"
-                        "<channel-transcript>group old</channel-transcript>\n"
-                    )
+                    "content": "BASE\n"
                 }
             ),
             encoding="utf-8",
@@ -309,17 +312,12 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             str(self.server.channel_history_path).endswith("aki.solo.jsonl")
         )
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
-        self.assertIn("<solo-mode", system)
-        self.assertIn("当下你正在与Master独处", system)
-        self.assertNotIn("group old", system)
+        self.assertNotIn("<solo-mode", system)
         self.assertNotIn("<channel-transcript", system)
         self.assertTrue(any(item.get("kind") == "solo_ready" for item in self.channel.controls))
-        conversation_prompt = json.loads(
-            self.conversation_prompt_path.read_text(encoding="utf-8")
-        )["content"]
-        self.assertIn("<solo-mode", conversation_prompt)
-        self.assertNotIn("<solo-transcript", conversation_prompt)
-        overlay = await self.server._refresh_channel_transcript()
+        overlay = await self.overlay_text(self.server)
+        self.assertIn("<solo-mode", overlay)
+        self.assertIn("当下你正在与Master独处", overlay)
         self.assertIn("group old", overlay)
         self.assertIn('frozen="true"', overlay)
         self.assertIn("<solo-transcript", overlay)
@@ -474,10 +472,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             text="独处里的私密回复",
             from_agent=True,
         )
-        await self.server._refresh_channel_transcript()
-        active_prompt = json.loads(
-            self.conversation_prompt_path.read_text(encoding="utf-8")
-        )["content"]
+        active_prompt = await self.overlay_text(self.server)
         # The in-progress session belongs to <solo-transcript>, not the
         # historical <solo-memories> block.
         self.assertNotIn("<solo-memories", active_prompt)
@@ -512,10 +507,12 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(len(memories["sessions"]), 1)
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
-        self.assertIn("<solo-memories", system)
+        self.assertNotIn("<solo-memories", system)
         self.assertNotIn("<solo-mode", system)
-        self.assertIn("这是独处里说的秘密", system)
-        self.assertIn("独处里的私密回复", system)
+        overlay = await self.overlay_text(self.server)
+        self.assertIn("<solo-memories", overlay)
+        self.assertIn("这是独处里说的秘密", overlay)
+        self.assertIn("独处里的私密回复", overlay)
         group_path = self.server.group_channel_history_path
         if group_path.is_file():
             group_text = group_path.read_text(encoding="utf-8")
@@ -555,14 +552,14 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
                 ],
             )
         )
-        overlay = await self.server._refresh_channel_transcript()
-        self.assertNotIn("<solo-mode", overlay)
-        self.assertNotIn("<solo-memories", overlay)
+        overlay = await self.overlay_text(self.server)
+        self.assertIn("<solo-mode", overlay)
+        self.assertIn("<solo-memories", overlay)
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
-        self.assertIn("<solo-mode", system)
-        self.assertIn("<solo-memories", system)
-        self.assertIn("旧独处秘密", system)
-        self.assertNotIn("solo-active", system.split("<solo-memories", 1)[1])
+        self.assertNotIn("<solo-mode", system)
+        self.assertNotIn("<solo-memories", system)
+        self.assertIn("旧独处秘密", overlay)
+        self.assertNotIn("solo-active", overlay.split("<solo-memories", 1)[1])
 
 
 if __name__ == "__main__":

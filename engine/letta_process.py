@@ -440,6 +440,25 @@ class LettaProcess:
             "aki_reload_conversation", request, timeout=timeout
         )
 
+    async def recompile_conversation(
+        self,
+        *,
+        conversation_id: str | None = None,
+        agent_id: str | None = None,
+        timeout: float = 60.0,
+    ) -> dict[str, Any]:
+        request = {
+            key: value
+            for key, value in (
+                ("conversation_id", conversation_id),
+                ("agent_id", agent_id),
+            )
+            if value is not None
+        }
+        return await self.control_request(
+            "aki_recompile_conversation", request, timeout=timeout
+        )
+
     async def snapshot_conversation(
         self,
         *,

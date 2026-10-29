@@ -112,17 +112,18 @@ deny。同一个 mod 也限制 `Read`/`Grep`/`Glob` 等读取工具：只允许�
 MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的 `[writable] dirs` 保持为空，
 bubblewrap 仍作为底层写入边界。
 
-`<channel-wake-routing>` 是英文持久 system prompt 块，明确 Agent-Agent 唤醒规则：
+`<channel-wake-routing>` 是英文 turn overlay 块，明确 Agent-Agent 唤醒规则：
 有 `@成员` 时只唤醒被点名的成员；回复任意位置出现 `@<username>` 时强制只唤醒该 username、不唤醒任何其他成员，
 仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
-都没有时唤醒全部其他在线成员。它在启动时写入并随 profile username 刷新；`^` 排除规则和
-“只回复用户时使用 `@<username>`”的提示也属于这个持久块，不再在每轮 user 消息或
+都没有时唤醒全部其他在线成员。它每个 turn 按 profile username 渲染；`^` 排除规则和
+“只回复用户时使用 `@<username>`”的提示也属于这个 overlay 块，不再在每轮 user 消息或
 `<channel-turn>` 中重复。
 
-`<channel-policy>` 保存静态频道规则并写入持久 system prompt；`<channel-turn>` 保存当前 turn 的 guidance、
+`<channel-policy>` 保存静态频道规则并作为 turn overlay 注入；`<channel-turn>` 保存当前 turn 的 guidance、
 initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。
-bridge 模式下 `<channel-turn>` 只作为 turn overlay 拼进实际 API 请求的 system prompt，
-不写回 agent record 或 `system-prompt.json`。akid 只接受带 `aki_bridge` 的定制 Letta；
+bridge 模式下 `<channel-policy>` 和 `<channel-turn>` 都只作为 turn overlay 拼进实际 API
+请求的 system prompt，不写回 agent record 或 `system-prompt.json`。akid 只接受带
+`aki_bridge` 的定制 Letta；
 否则启动直接报错退出。bridge 模式下
 `<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，不写入持久 user message，
 turn 结束后自然消失。运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`

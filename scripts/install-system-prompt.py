@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
-"""Install Aki's owned base system prompt into the local Letta agent."""
+"""Install Aki's static base system prompt into the local Letta agent."""
 
 from __future__ import annotations
 
 import argparse
-import base64
 import configparser
-import hashlib
 import json
 import os
-import re
 import shutil
 import sys
 import tempfile
@@ -22,16 +19,6 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PROMPT = ROOT / "prompts" / "aki-system.md"
 DEFAULT_AGENT_ID = "agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc"
 CORE_PLACEHOLDER = "{CORE_MEMORY}"
-LIVE_CONTEXT_RE = re.compile(
-    r"\n*<(?:live-context|aki-live-context)\b.*?"
-    r"</(?:live-context|aki-live-context)>\n*",
-    re.S,
-)
-MEMORY_BLOCK_RE = re.compile(r"<memory>.*?</memory>", re.S)
-
-
-def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def default_backend_dir() -> Path:
@@ -63,10 +50,6 @@ def default_agent_id() -> str:
         if configured:
             return configured
     return DEFAULT_AGENT_ID
-
-
-def b64url(text: str) -> str:
-    return base64.urlsafe_b64encode(text.encode("utf-8")).decode("ascii").rstrip("=")
 
 
 def find_agent_file(backend_dir: Path, agent_id: str) -> Path:
@@ -108,7 +91,10 @@ def atomic_json(path: Path, payload: dict[str, Any], *, bump_mtime: bool = False
         os.chmod(temp_path, 0o600)
         os.replace(temp_path, path)
         if bump_mtime:
-            now_ns = max(datetime.now(timezone.utc).timestamp() * 1_000_000_000, previous_mtime_ns + 1_000_000)
+            now_ns = max(
+                datetime.now(timezone.utc).timestamp() * 1_000_000_000,
+                previous_mtime_ns + 1_000_000,
+            )
             os.utime(path, ns=(int(now_ns), int(now_ns)))
     except Exception:
         try:
@@ -127,42 +113,10 @@ def load_prompt(path: Path) -> str:
         raise RuntimeError("prompt is empty")
     if prompt.count(CORE_PLACEHOLDER) != 1:
         raise RuntimeError(f"prompt must contain {CORE_PLACEHOLDER} exactly once")
-    if LIVE_CONTEXT_RE.search(prompt):
-        raise RuntimeError("prompt must not contain a <live-context> block")
     return prompt
 
 
-def compose_system(prompt: str, live_context: str) -> str:
-    if live_context:
-        return prompt.rstrip() + "\n\n" + live_context + "\n"
-    return prompt.rstrip() + "\n"
-
-
-def compose_content(prompt: str, core_memory: str, live_context: str) -> str:
-    content = prompt.replace(CORE_PLACEHOLDER, core_memory.rstrip()).rstrip()
-    if live_context:
-        return content + "\n\n" + live_context + "\n"
-    return content + "\n"
-
-
-def restore_memory_block(content: str, memory_block: str) -> str:
-    if not memory_block or "<memory>" in content:
-        return content
-    if "</persona>" in content:
-        return content.replace("</persona>", f"</persona>\n\n{memory_block}", 1)
-    live_match = LIVE_CONTEXT_RE.search(content)
-    if live_match:
-        return (
-            content[: live_match.start()].rstrip()
-            + "\n\n"
-            + memory_block
-            + "\n\n"
-            + content[live_match.start() :]
-        )
-    return content.rstrip() + "\n\n" + memory_block + "\n"
-
-
-def backup_records(agent_path: Path, prompt_path: Path, backup_dir: Path) -> Path:
+def backup_agent(agent_path: Path, backup_dir: Path) -> Path:
     backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(backup_dir, 0o700)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -173,8 +127,6 @@ def backup_records(agent_path: Path, prompt_path: Path, backup_dir: Path) -> Pat
         suffix += 1
     target.mkdir(mode=0o700)
     shutil.copy2(agent_path, target / "agent.json")
-    if prompt_path.is_file():
-        shutil.copy2(prompt_path, target / "system-prompt.json")
     return target
 
 
@@ -213,47 +165,21 @@ def install(
 ) -> dict[str, Any]:
     prompt = load_prompt(prompt_path)
     agent_path = find_agent_file(backend_dir, agent_id)
-    conversation_path = backend_dir / "conversations" / b64url(f"{conversation_id}:{agent_id}") / "system-prompt.json"
     agent = read_json(agent_path)
     old_system = agent.get("system")
-    if not isinstance(old_system, str) or not old_system.strip():
+    if not isinstance(old_system, str):
         raise RuntimeError("agent has no system prompt")
-    live_match = LIVE_CONTEXT_RE.search(old_system)
-    live_context = live_match.group(0).strip() if live_match else ""
-    new_system = compose_system(prompt, live_context)
-    old_base = LIVE_CONTEXT_RE.sub("\n", old_system).strip()
-
-    conversation: dict[str, Any] | None = None
-    old_content = ""
-    old_memory_block = ""
-    if conversation_path.is_file():
-        conversation = read_json(conversation_path)
-        old_content = str(conversation.get("content") or "")
-        memory_match = MEMORY_BLOCK_RE.search(old_content)
-        old_memory_block = memory_match.group(0) if memory_match else ""
-        core_memory = str(conversation.get("coreMemory") or "")
-        if not core_memory.strip():
-            raise RuntimeError("compiled prompt has no coreMemory to preserve")
-        new_content = compose_content(prompt, core_memory, live_context)
-        new_content = restore_memory_block(new_content, old_memory_block)
-    else:
-        new_content = ""
-
-    agent_changed = new_system != old_system
-    conversation_changed = conversation is not None and new_content != old_content
-    changed = agent_changed or conversation_changed
+    new_system = prompt.rstrip() + "\n"
+    changed = new_system != old_system
     result: dict[str, Any] = {
         "dry_run": dry_run,
         "agent_id": agent_id,
         "conversation_id": conversation_id,
         "agent_path": str(agent_path),
-        "conversation_prompt_path": str(conversation_path),
         "prompt_path": str(prompt_path),
-        "old_base_chars": len(old_base),
+        "old_base_chars": len(old_system),
         "new_base_chars": len(prompt),
-        "live_context_chars": len(live_context),
-        "agent_changed": agent_changed,
-        "conversation_changed": conversation_changed,
+        "agent_changed": changed,
         "changed": changed,
     }
     if not changed:
@@ -261,14 +187,9 @@ def install(
     if dry_run:
         return result
 
-    backup_path = backup_records(agent_path, conversation_path, backup_dir)
+    backup_path = backup_agent(agent_path, backup_dir)
     agent["system"] = new_system
     atomic_json(agent_path, agent, bump_mtime=True)
-    if conversation is not None:
-        conversation["content"] = new_content
-        conversation["rawSystemHash"] = hashlib.sha256(new_system.encode("utf-8")).hexdigest()
-        conversation["compiledAt"] = now_iso()
-        atomic_json(conversation_path, conversation)
     result["backup_path"] = str(backup_path)
     result["settings_updated"] = update_settings(settings_path, agent_id)
     return result
@@ -279,15 +200,12 @@ def status(prompt_path: Path, backend_dir: Path, agent_id: str) -> dict[str, Any
     agent_path = find_agent_file(backend_dir, agent_id)
     agent = read_json(agent_path)
     system = str(agent.get("system") or "")
-    base = LIVE_CONTEXT_RE.sub("\n", system).strip()
-    live_match = LIVE_CONTEXT_RE.search(system)
     return {
         "agent_id": agent_id,
         "agent_path": str(agent_path),
-        "in_sync": base == prompt,
-        "base_chars": len(base),
+        "in_sync": system.strip() == prompt,
+        "base_chars": len(system),
         "prompt_chars": len(prompt),
-        "live_context_chars": len(live_match.group(0).strip()) if live_match else 0,
     }
 
 

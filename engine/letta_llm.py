@@ -95,7 +95,7 @@ def _compat(route: ModelRoute) -> dict[str, object] | None:
             "thinkingFormat": "openrouter",
             "supportsStrictMode": True,
         }
-    if route.upstream_name == "local-llama" and route.api == "openai-completions":
+    if route.upstream_name in ("local-llama", "local-gemma") and route.api == "openai-completions":
         return {
             "supportsStore": False,
             "supportsDeveloperRole": False,

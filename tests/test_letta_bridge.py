@@ -62,6 +62,9 @@ class LettaBridgeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(
             (await self.process.reload_conversation())["reloaded"]
         )
+        self.assertTrue(
+            (await self.process.recompile_conversation())["recompiled"]
+        )
         snapshot = await self.process.snapshot_conversation()
         self.assertEqual(snapshot["snapshot_id"], "fake-snapshot")
         self.assertTrue(
@@ -92,6 +95,7 @@ class LettaBridgeTests(unittest.IsolatedAsyncioTestCase):
             "aki_update_turn",
             "aki_end_turn",
             "aki_reload_conversation",
+            "aki_recompile_conversation",
             "aki_conversation_snapshot",
             "aki_conversation_restore",
             "aki_compact",

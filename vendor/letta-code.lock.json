@@ -18,9 +18,10 @@
   },
   "patches": {
     "0000-build-use-local-tsc.patch": "b4199c1391f1331938f8142862310287dcfab81aaf69f8d2fa464fce45e24df4",
-    "0001-aki-bridge.patch": "c353041f45660d2e94de143bdb5873ffe7aeb67e020cdd3383ec7aa0edfba092",
+    "0001-aki-bridge.patch": "ec9c1125ed70fd80de50f748d66b66be7c6f455fed85ce5721a038863de12a0c",
     "0002-aki-compaction-policy.patch": "57265c9995e7f5fb4b9686d6db860272a9c3e1688ac49342db6a4eddbbc705c5",
-    "0003-aki-turn-overlay-files.patch": "0cbeda8bee27f64eb8999cc3bfc67662c0af7d6bb9a6e7c8acd07f345e94a5e7"
+    "0003-aki-turn-overlay-files.patch": "0cbeda8bee27f64eb8999cc3bfc67662c0af7d6bb9a6e7c8acd07f345e94a5e7",
+    "0004-aki-compact-retain-latest.patch": "5ad9cff158d308d0dd2fc50ec38664599f102c4ae31888598662a9cf389f0ba2"
   },
-  "runtime_sha256": "672da2714b59a4f64137f9f5645584955a943a34e3e9d86d6f5c515c533063a1"
+  "runtime_sha256": "10b72faed5ceac8fe2bf26bd4169e0c51a14ddfb43c1d1abd47e966b5b4dc43d"
 }

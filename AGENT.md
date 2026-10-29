@@ -375,12 +375,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   实际 API 请求末尾，不写回持久 system prompt。截图只放路径与元数据，默认 64K token 上限。
 - Prompt 分层原则：**规则性、记忆性信息进 system prompt；时效性信息进当前 user-role /
   turn overlay。**
-  - 持久 system prompt：`base → core memory → <tool-ownership> → <channel-policy> →
-    <channel-wake-routing> → <channel-identity> → <solo-mode> → <solo-memories>`。
-  - per-turn user-role / overlay：`<channel-turn> → <channel-transcript> →
-    <solo-transcript> → <channel-context roster> → <live-context>`。
-  - per-turn 块只拼进实际 API 请求，不写回 agent record 或 `system-prompt.json`。
-    独处规则和历史独处记忆不再按 turn 注入。没有 `aki_bridge` 的后端不允许启动。
+  - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
+  - runtime overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
+    <channel-identity> → <solo-mode> → <solo-memories> → <shared-memory> →
+    <channel-turn> → <channel-transcript> → <solo-transcript> →
+    <channel-context roster> → <live-context>`。
+  - akid 运行时不写 `agent.system` 或 `system-prompt.json.content`；所有 Aki 运行时块
+    都只通过 `turn_context.system_append` 进入请求。没有 `aki_bridge` 的后端不允许启动。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
   schema 过滤、Letta ownership mod、akid 运行时校验和 `<tool-ownership>` 提示词共同
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。
