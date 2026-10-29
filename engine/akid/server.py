@@ -17,7 +17,6 @@ from engine.avatar import (
     load_avatar,
 )
 from engine.channel import TokifactorChannel
-from engine.channel_history import channel_history_key
 from engine.execution_lock import (
     ExecutionLock,
     default_execution_lock_path,
@@ -28,10 +27,6 @@ from engine.solo_memory import (
     SOLO_MEMORY_BUDGET_TOKENS,
     SoloMemoryManager,
     default_solo_memory_path,
-)
-from engine.public_memory import (
-    PublicMemoryStore,
-    default_public_memory_path,
 )
 from engine.solo_mode import (
     default_solo_state_path,
@@ -175,18 +170,6 @@ class ServerMixin:
         )
         self.channel_media_dir = config.channel_media_dir or (
             self.channel_history_dir / "media"
-        )
-        self.public_memory = PublicMemoryStore(
-            default_public_memory_path(
-                config.backend_dir,
-                channel_history_key(
-                    host=config.mqtt_host,
-                    port=config.mqtt_port,
-                    topic=config.mqtt_topic,
-                    magic=config.mqtt_magic,
-                ),
-            ),
-            logger=logging.getLogger("akid.public-memory"),
         )
         self.solo_state_path = config.solo_state or default_solo_state_path(
             config.profile

@@ -215,12 +215,10 @@ class HealthMixin:
                 "topic": self.config.mqtt_topic,
                 "wait_for": list(self.config.channel_wait_for),
                 "transcript": dict(self._channel_transcript_status),
-                "public_memory": self.public_memory.status(),
             }
         health = self.channel.health()
         health["wait_for"] = list(self.config.channel_wait_for)
         health["transcript"] = dict(self._channel_transcript_status)
-        health["public_memory"] = self.public_memory.status()
         return health
 
 
@@ -619,7 +617,6 @@ class HealthMixin:
         return render_channel_policy(
             user_name=self.config.username or "Master",
             emoji_entries=self._emoji_entries(),
-            wait_user_available=self.channel is not None,
         )
 
 

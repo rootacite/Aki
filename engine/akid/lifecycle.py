@@ -97,7 +97,6 @@ class LifecycleMixin:
         os.chmod(path, 0o600)
         # Runtime prompt blocks are turn overlays. Never mutate the Letta
         # agent record or its compiled prompt during startup.
-        self._backfill_public_memory()
         await self._refresh_channel_transcript()
         if self.config.aki is not None:
             try:

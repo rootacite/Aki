@@ -260,10 +260,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：当前是 `aki/gemma-4-26b-a4b-it`（local-gemma @ `127.0.0.1:10000`，上下文
-  192,000；采样 `temperature=1.0`、`top_p=0.95`、`top_k=64`，reasoning 预算固定为
-  `reasoning_budget_tokens=2048`）；其他已启用模型可在 `aki/deepseek-flash`、
-  `aki/gemini-3.8-flash` 和 `aki/grok-4.6` 之间切换。
+- 模型：当前是 `aki/gemini-3.8-flash`（cli-proxy-api，上下文 1,000,000，`max_tokens=65536`）；
+  其他已启用模型可在 `aki/deepseek-flash`、`aki/gemma-4-26b-a4b-it` 和 `aki/grok-4.6`
+  之间切换。Gemma 本地模型的采样参数仍保留在 `[model.gemma-4-26b-a4b-it]`。
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
 - 基础 system prompt：`prompts/aki-system.md`，由
   `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
@@ -297,7 +296,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   和 `scripts/migrate-channel-prompts.py` 仅用于迁移历史记录，默认 dry-run。
 - 唤醒规则集中在英文持久 `<channel-wake-routing>`：`@成员` 只唤醒被点名者，`^成员` 排除
   指定成员，无标记则唤醒全部其他在线成员；“只回复用户时使用 `@<username>`”和 `^` 排除
-  提示也写在这里，不再在每轮 user message 或 `<channel-turn>` 中重复。Aki 的
+  提示也写在这里，不再在每轮 user message 或 `<turn-control>` 中重复。Aki 的
   `<channel-wait-for>` 为空，且代码层禁止 Aki 注册/渲染 `wait_other`。
 - `wait_for` 的 final 兜底护栏：turn 正常结束时，如果配置的前序成员仍在 working 或有排队
   turn，akid 丢弃本次 final（不进 MQTT、群聊和频道历史），只发送 `ignored=true` 的 ended
@@ -380,12 +379,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - Prompt 分层原则：**规则性、记忆性信息进 system prompt；时效性信息进当前 user-role /
   turn overlay。**
   - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
-  - runtime overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
-    <channel-identity> → <solo-mode> → <solo-memories> → <shared-memory> →
-    <channel-turn> → <channel-transcript> → <solo-transcript> →
-    <channel-context roster> → <live-context>`。
+  - stable system overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
+    <channel-identity> → <channel-context roster> → <format-guard>`。
+  - mid-system tail：`<turn-control> → <channel-transcript> → <solo-mode> →
+    <solo-memories> → <solo-transcript> → <live-context>`。
   - akid 运行时不写 `agent.system` 或 `system-prompt.json.content`；所有 Aki 运行时块
-    都只通过 `turn_context.system_append` 进入请求。没有 `aki_bridge` 的后端不允许启动。
+    都只通过 `turn_context.system_append` / `turn_context.mid_system_append` 进入请求。
+    没有 `aki_bridge` 的后端不允许启动。
 - 专属工具：Aki 独占日程 CRUD、跨成员回复预算清零、生活账本；Fuyu 不注册这些工具。工具
   schema 过滤、Letta ownership mod、akid 运行时校验和 `<tool-ownership>` 提示词共同
   拦截错误调用。非 owner 收到带 owner 名称与 `@Owner` 转述提示的错误。

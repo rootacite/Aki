@@ -18,6 +18,17 @@ from .constants import (
     WAIT_GUARD_ORIGIN,
 )
 
+
+def render_format_guard(user_name: str) -> str:
+    return (
+        '<format-guard version="1">\n'
+        "默认用自然、口语化的对话体回复。不要使用 Markdown 标题、粗体标签、表格或工作报告模板；"
+        f"不要用“第一步/第二步”式的汇报结构。即使 {user_name or 'Master'} 明确要求“要点”或“分步骤”，"
+        "也用简短自然段或朴素编号表达，保持聊天语气，不要写成汇报文档。"
+        "分析、技术解释和总结同样适用。\n"
+        "</format-guard>"
+    )
+
 class TurnsMixin:
 
     # ------------------------------------------------------------------ turns
@@ -107,18 +118,16 @@ class TurnsMixin:
                 )
                 await self._finish_turn(turn, "bridge_unavailable")
                 return
-            overlay_parts = await self._build_turn_overlay(turn)
+            stable_parts, mid_parts = await self._build_turn_overlay(turn)
             live_block = await self._refresh_live_context()
             if live_block:
-                overlay_parts.append(live_block)
-            format_guard = self._format_guard_block()
-            if format_guard:
-                overlay_parts.append(format_guard)
-            overlay = (
-                {"turn_context": {"system_append": "\n\n".join(overlay_parts)}}
-                if overlay_parts
-                else {}
-            )
+                mid_parts.append(live_block)
+            turn_context: dict[str, str] = {}
+            if stable_parts:
+                turn_context["system_append"] = "\n\n".join(stable_parts)
+            if mid_parts:
+                turn_context["mid_system_append"] = "\n\n".join(mid_parts)
+            overlay = {"turn_context": turn_context} if turn_context else {}
             try:
                 await self.backend.begin_aki_turn(turn.turn_id, overlay)
                 turn.bridge_turn_started = True
@@ -149,15 +158,21 @@ class TurnsMixin:
                 await self._finish_turn(turn, "error")
 
 
-    async def _build_turn_overlay(self, turn: Turn) -> list[str]:
+    async def _build_turn_overlay(self, turn: Turn) -> tuple[list[str], list[str]]:
         """Build the complete runtime system overlay for this turn."""
-        overlay_parts: list[str] = [
+        stable_parts: list[str] = [
             self._tool_ownership_block(),
             self._channel_policy_block(),
             self._channel_wake_routing_block(),
             self._channel_identity_block(),
+            render_channel_roster(
+                self_member=self._channel_self_member(),
+                members=self._channel_member_views(),
+            ),
+            self._format_guard_block(),
         ]
-        new_seq = (
+        mid_parts: list[str] = []
+        exclude_seq = (
             turn.channel_message_seq
             if turn.origin in ("mqtt", "proactive")
             else None
@@ -167,61 +182,36 @@ class TurnsMixin:
             solo_block,
             solo_mode_block,
             solo_memories_block,
-            shared_memory_block,
-        ) = await self._render_transcript_blocks(new_seq=new_seq)
+        ) = await self._render_transcript_blocks(exclude_seq=exclude_seq)
         if solo_mode_block:
-            overlay_parts.append(solo_mode_block)
+            mid_parts.append(solo_mode_block)
         if solo_memories_block:
-            overlay_parts.append(solo_memories_block)
-        if shared_memory_block:
-            overlay_parts.append(shared_memory_block)
-
+            mid_parts.append(solo_memories_block)
         if turn.origin == "solo_notice":
             transcript = self._transcript_overlay_block(group_block, solo_block)
             if transcript:
-                overlay_parts.append(transcript)
+                mid_parts.append(transcript)
             await self._snapshot_turn_conversation(turn)
         elif turn.origin in ("mqtt", "proactive"):
-            block = await self._refresh_channel_turn(turn)
+            block = await self._refresh_turn_control(turn)
             if block:
-                overlay_parts.append(block)
+                mid_parts.append(block)
             if group_block:
-                overlay_parts.append(group_block)
+                mid_parts.append(group_block)
             if solo_block:
-                overlay_parts.append(solo_block)
-            overlay_parts.append(
-                render_channel_roster(
-                    self_member=self._channel_self_member(),
-                    members=self._channel_member_views(),
-                )
-            )
+                mid_parts.append(solo_block)
             if turn.origin_is_agent:
                 await self._snapshot_turn_conversation(turn)
         elif turn.origin == WAIT_GUARD_ORIGIN:
             if group_block:
-                overlay_parts.append(group_block)
+                mid_parts.append(group_block)
             if solo_block:
-                overlay_parts.append(solo_block)
-            overlay_parts.append(
-                render_channel_roster(
-                    self_member=self._channel_self_member(),
-                    members=self._channel_member_views(),
-                )
-            )
-        return overlay_parts
+                mid_parts.append(solo_block)
+        return stable_parts, mid_parts
 
 
     def _format_guard_block(self) -> str:
-        if getattr(self.config, "profile", "") != "aki":
-            return ""
-        return (
-            '<format-guard version="1">\n'
-            "默认用自然、口语化的对话体回复。不要使用 Markdown 标题、粗体标签、表格或工作报告模板；"
-            "不要用“第一步/第二步”式的汇报结构。即使 Master 明确要求“要点”或“分步骤”，"
-            "也用简短自然段或朴素编号表达，保持聊天语气，不要写成汇报文档。"
-            "分析、技术解释和总结同样适用。\n"
-            "</format-guard>"
-        )
+        return render_format_guard(self.config.username)
 
 
     async def _update_busy_turn_overlay(self, turn: Turn) -> None:
@@ -229,16 +219,18 @@ class TurnsMixin:
         if not turn.bridge_turn_started or not self._aki_bridge_available():
             return
         try:
-            parts = await self._build_turn_overlay(turn)
+            stable_parts, mid_parts = await self._build_turn_overlay(turn)
             live_block = await self._refresh_live_context()
             if live_block:
-                parts.append(live_block)
-            format_guard = self._format_guard_block()
-            if format_guard:
-                parts.append(format_guard)
+                mid_parts.append(live_block)
+            turn_context: dict[str, str] = {}
+            if stable_parts:
+                turn_context["system_append"] = "\n\n".join(stable_parts)
+            if mid_parts:
+                turn_context["mid_system_append"] = "\n\n".join(mid_parts)
             await self.backend.update_aki_turn(
                 turn.turn_id,
-                {"turn_context": {"system_append": "\n\n".join(parts)}},
+                {"turn_context": turn_context},
             )
         except Exception as exc:
             LOGGER.warning(

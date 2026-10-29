@@ -122,12 +122,15 @@ class FakeLetta:
         is_channel = content.startswith("[akid MQTT channel message]")
         turn_content = content
         if is_channel:
-            marker = "\nmessage:\n"
-            if marker in content:
-                body = content.split(marker, 1)[1]
-                for suffix in ("\nattachment-names:", "\nmultimodal-note:"):
-                    body = body.split(suffix, 1)[0]
-                turn_content = body.strip()
+            if "\n\n" in content:
+                turn_content = content.split("\n\n", 1)[1].strip()
+            else:
+                marker = "\nmessage:\n"
+                if marker in content:
+                    body = content.split(marker, 1)[1]
+                    for suffix in ("\nattachment-names:", "\nmultimodal-note:"):
+                        body = body.split(suffix, 1)[0]
+                    turn_content = body.strip()
         content = turn_content
         if "INTERNAL_RESULT_RACE" in content:
             emit(

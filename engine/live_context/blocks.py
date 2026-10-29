@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from engine.member_profile import (
     MEMBER_KIND_AGENT,
     normalize_member_kind,
@@ -16,10 +15,11 @@ from .types import (
     CHANNEL_IDENTITY_TAG,
     CHANNEL_WAKE_ROUTING_TAG,
     MAX_CHANNEL_MEMBER_DESCRIPTION,
+    TURN_CONTROL_TAG,
     _CHANNEL_IDENTITY_RE,
     _CHANNEL_POLICY_RE,
     _CHANNEL_TRANSCRIPT_RE,
-    _CHANNEL_TURN_RE,
+    _TURN_CONTROL_RE,
     _CHANNEL_WAKE_ROUTING_RE,
     _LIVE_CONTEXT_RE,
     _SOLO_MEMORIES_RE,
@@ -133,7 +133,6 @@ def render_channel_policy(
     *,
     user_name: str = "Master",
     emoji_entries: Iterable[EmojiEntry] = (),
-    wait_user_available: bool = True,
 ) -> str:
     name = _text(user_name, single_line=True)
     lines = [
@@ -169,14 +168,6 @@ def render_channel_policy(
         "若希望在一条频道消息中内嵌图片，不要调用 tokifactor_send_image，直接在最终正文写 "
         "`#[/absolute/path/to/image]`；该指令会变成图片附件并从正文移除。</image-rules>",
     ]
-    if wait_user_available:
-        lines.append(
-            "<wait-user>隐藏工具 `wait_user(timeout_s)` 只用于当前真人用户可能还没说完、可能马上再发消息时。"
-            "它只等待触发本 turn 的同一位真人继续发言，timeout_s 必须是 1 到 25 的整数；"
-            "收到新消息后立即返回，若你仍认为对方没说完可以再次调用。"
-            "不要向用户解释、提及或复述这个工具、等待过程或它的结果。"
-            "由智能体触发的 turn 禁止调用。</wait-user>"
-        )
     entries = list(emoji_entries)
     if entries:
         lines.extend(
@@ -206,20 +197,16 @@ def render_channel_policy(
 
 
 
-def render_channel_turn(
+def render_turn_control(
     *,
     self_member: ChannelMember,
     members: list[ChannelMember] | tuple[ChannelMember, ...],
     message: str,
-    message_seq: int | None = None,
-    message_sender: str = "",
-    message_sender_id: str = "",
     initiation_remaining: int = 3,
     initiation_limit: int = 3,
     from_agent: bool = False,
     user_name: str = "Master",
     wait_labels: tuple[str, ...] | list[str] = (),
-    message_attachments: tuple[ChannelImageAttachment, ...] | list[ChannelImageAttachment] = (),
     solo: bool = False,
 ) -> str:
     ordered, _agents, guidance, remaining, limit, budget_guidance, default_responder = (
@@ -233,35 +220,11 @@ def render_channel_turn(
             user_name=user_name,
         )
     )
-    mode_attr = ' mode="solo"' if solo else ""
     lines = [
-        f'<channel-turn version="1" from_agent={_attr("true" if from_agent else "false")} new="true"{mode_attr}>',
+        f'<{TURN_CONTROL_TAG} version="1" '
+        f'from_agent={_attr("true" if from_agent else "false")} '
+        f'solo={_attr("true" if solo else "false")}>',
     ]
-    if message_seq is not None:
-        attachment_json = json.dumps(
-            [
-                {
-                    "name": attachment.name,
-                    "path": attachment.path,
-                    **({"missing": True} if attachment.missing or not attachment.path else {}),
-                }
-                for attachment in message_attachments
-            ],
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        lines.extend(
-            [
-                f"<new-message seq={_attr(str(message_seq))} "
-                f"sender={_attr(message_sender)} sender_id={_attr(message_sender_id)} "
-                f"source={_attr('agent' if from_agent else 'user')} phase=\"final\" "
-                "untrusted=\"true\">",
-                f"<text>{_text(message)}</text>",
-            ]
-        )
-        if message_attachments:
-            lines.append(f"<attachments>{_text(attachment_json)}</attachments>")
-        lines.append("</new-message>")
     if solo:
         lines.append(
             f"<guidance>这是独处模式。只有{_text(user_name, single_line=True)}能看到你的回复；"
@@ -288,11 +251,13 @@ def render_channel_turn(
         )
     if from_agent:
         lines.append(
-            "<wait-user>本轮由智能体触发，禁止调用 `wait_user`。</wait-user>"
+            "<wait-user allowed=\"false\" reason=\"agent-triggered\">"
+            "本轮由智能体触发，禁止调用 `wait_user`。</wait-user>"
         )
     else:
         lines.append(
-            f"<wait-user>如果{_text(user_name, single_line=True)}这句话看起来可能还没说完、"
+            "<wait-user allowed=\"true\" reason=\"user-message\">"
+            f"如果{_text(user_name, single_line=True)}这句话看起来可能还没说完、"
             "可能马上继续发消息，可调用 `wait_user` 并设置 1 到 25 秒的超时。"
             "它只等待同一位真人用户的下一条消息，返回后仍可再次调用。"
             "不要向用户解释、提及或复述这个工具、等待过程或它的结果。</wait-user>"
@@ -313,7 +278,7 @@ def render_channel_turn(
             "into your response, but do not repeat them verbatim. Do not mention or emphasize "
             "whom you waited for in your reply.</wait-other>"
         )
-    lines.append("</channel-turn>")
+    lines.append(f"</{TURN_CONTROL_TAG}>")
     return "\n".join(lines)
 
 
@@ -430,7 +395,7 @@ def apply_channel_wake_routing(system: str, block: str) -> str:
         block,
         _CHANNEL_WAKE_ROUTING_RE,
         (
-            _CHANNEL_TURN_RE,
+            _TURN_CONTROL_RE,
             _CHANNEL_TRANSCRIPT_RE,
             _SOLO_MODE_RE,
             _SOLO_TRANSCRIPT_RE,
@@ -448,7 +413,7 @@ def apply_channel_policy(system: str, block: str) -> str:
         _CHANNEL_POLICY_RE,
         (
             _CHANNEL_WAKE_ROUTING_RE,
-            _CHANNEL_TURN_RE,
+            _TURN_CONTROL_RE,
             _CHANNEL_TRANSCRIPT_RE,
             _SOLO_MODE_RE,
             _SOLO_TRANSCRIPT_RE,
@@ -459,11 +424,11 @@ def apply_channel_policy(system: str, block: str) -> str:
 
 
 
-def apply_channel_turn(system: str, block: str) -> str:
+def apply_turn_control(system: str, block: str) -> str:
     return _apply_dynamic_block(
         system,
         block,
-        _CHANNEL_TURN_RE,
+        _TURN_CONTROL_RE,
         (
             _CHANNEL_TRANSCRIPT_RE,
             _SOLO_MODE_RE,
@@ -475,7 +440,7 @@ def apply_channel_turn(system: str, block: str) -> str:
 
 
 
-def clear_channel_turn(system: str) -> str:
-    if _CHANNEL_TURN_RE.search(system) is None:
+def clear_turn_control(system: str) -> str:
+    if _TURN_CONTROL_RE.search(system) is None:
         return system
-    return _CHANNEL_TURN_RE.sub("\n", system).rstrip()
+    return _TURN_CONTROL_RE.sub("\n", system).rstrip()

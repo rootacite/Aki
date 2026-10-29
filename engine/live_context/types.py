@@ -33,6 +33,8 @@ CHANNEL_WAKE_ROUTING_TAG = "channel-wake-routing"
 
 CHANNEL_POLICY_TAG = "channel-policy"
 
+TURN_CONTROL_TAG = "turn-control"
+
 CHANNEL_TURN_TAG = "channel-turn"
 
 SOLO_MODE_TAG = "solo-mode"
@@ -40,8 +42,6 @@ SOLO_MODE_TAG = "solo-mode"
 SOLO_TRANSCRIPT_TAG = "solo-transcript"
 
 SOLO_MEMORIES_TAG = "solo-memories"
-
-SHARED_MEMORY_TAG = "shared-memory"
 
 DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 32 * 1024
 
@@ -81,6 +81,11 @@ _CHANNEL_POLICY_RE = _framework_block_re(
 
 _CHANNEL_TURN_RE = _framework_block_re(CHANNEL_TURN_TAG, "aki-channel-turn")
 
+_TURN_CONTROL_RE = re.compile(
+    r"\n*<(?:turn-control|channel-turn)\b.*?</(?:turn-control|channel-turn)>\n*",
+    re.S,
+)
+
 _SOLO_MODE_RE = re.compile(r"\n*<solo-mode\b.*?</solo-mode>\n*", re.S)
 
 _SOLO_TRANSCRIPT_RE = re.compile(
@@ -89,10 +94,6 @@ _SOLO_TRANSCRIPT_RE = re.compile(
 
 _SOLO_MEMORIES_RE = re.compile(
     r"\n*<solo-memories\b.*?</solo-memories>\n*", re.S
-)
-
-_SHARED_MEMORY_RE = re.compile(
-    r"\n*<shared-memory\b.*?</shared-memory>\n*", re.S
 )
 
 _ZSH_EXTENDED_RE = re.compile(

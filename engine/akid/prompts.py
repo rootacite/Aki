@@ -11,9 +11,9 @@ from pathlib import Path
 from engine.live_context import (
     LiveContextOptions,
     collect_live_context,
-    render_channel_turn,
     render_channel_transcript,
     render_live_context,
+    render_turn_control,
     render_solo_memories,
     render_solo_mode,
     render_solo_transcript,
@@ -30,26 +30,22 @@ from .paths import (
 
 class PromptsMixin:
 
-    async def _refresh_channel_turn(self, turn: Turn | None) -> str:
+    async def _refresh_turn_control(self, turn: Turn | None) -> str:
         if turn is None or turn.origin != "mqtt":
             return ""
         solo = self._solo_session is not None
         wait_labels = (
             () if solo else self._wait_labels_for_participants(turn.channel_participants)
         )
-        block = render_channel_turn(
+        block = render_turn_control(
             self_member=self._channel_self_member(),
             members=self._channel_member_views(),
             message=turn.channel_text,
-            message_seq=turn.channel_message_seq,
-            message_sender=turn.channel_sender,
-            message_sender_id=turn.origin_sender_id,
             initiation_remaining=self._agent_initiation_remaining,
             initiation_limit=self.config.agent_initiation_limit,
             from_agent=turn.origin_is_agent,
             user_name=self.config.username,
             wait_labels=wait_labels,
-            message_attachments=turn.channel_attachments,
             solo=solo,
         )
         return block
@@ -58,10 +54,10 @@ class PromptsMixin:
     async def _render_transcript_blocks(
         self,
         *,
-        new_seq: int | None = None,
+        exclude_seq: int | None = None,
         limit: int | None = None,
-    ) -> tuple[str, str, str, str, str]:
-        """Render transcript/solo/shared blocks without touching persisted prompts."""
+    ) -> tuple[str, str, str, str]:
+        """Render transcript and solo blocks without touching persisted prompts."""
         path = self._agent_record_path()
 
         def with_attachment_state(
@@ -85,6 +81,13 @@ class PromptsMixin:
                 for entry in entries
             ]
 
+        def without_current(
+            entries: list[ChannelTranscriptEntry],
+        ) -> list[ChannelTranscriptEntry]:
+            if exclude_seq is None:
+                return entries
+            return [entry for entry in entries if entry.seq != exclude_seq]
+
         solo_mode_block = ""
         if self._solo_session is not None:
             group_entries = with_attachment_state(
@@ -92,9 +95,9 @@ class PromptsMixin:
                 if limit is None
                 else self._frozen_group_history[: max(0, limit)]
             )
+            group_entries = without_current(group_entries)
             group_block = render_channel_transcript(
                 group_entries,
-                new_seq=new_seq,
                 budget_tokens=self.config.channel_transcript_budget_tokens,
                 frozen=True,
             )
@@ -103,6 +106,7 @@ class PromptsMixin:
                 if limit is None
                 else self._channel_history[: max(0, limit)]
             )
+            solo_entries = without_current(solo_entries)
             solo_block = render_solo_transcript(
                 solo_entries,
                 budget_tokens=self.config.aki.solo_transcript_budget_tokens
@@ -129,12 +133,13 @@ class PromptsMixin:
             solo_entries_count = len(solo_entries)
         else:
             group_block = render_channel_transcript(
-                with_attachment_state(
-                    list(self._channel_history)
-                    if limit is None
-                    else self._channel_history[: max(0, limit)]
+                without_current(
+                    with_attachment_state(
+                        list(self._channel_history)
+                        if limit is None
+                        else self._channel_history[: max(0, limit)]
+                    )
                 ),
-                new_seq=new_seq,
                 budget_tokens=self.config.channel_transcript_budget_tokens,
             )
             solo_block = ""
@@ -161,13 +166,12 @@ class PromptsMixin:
                 ],
                 budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
             )
-        shared_memory_block = self._public_memory_prompt_block()
         self._channel_transcript_status.update(
             {
                 "budget_tokens": self.config.channel_transcript_budget_tokens,
                 "entries": len(self._channel_history),
                 "last_seq": self._channel_history_seq,
-                "rendered_seq": new_seq,
+                "rendered_seq": exclude_seq,
                 "rendered_entries": rendered_entries,
                 "block_tokens": len(group_block.encode("utf-8"))
                 if group_block
@@ -192,19 +196,18 @@ class PromptsMixin:
             solo_block,
             solo_mode_block,
             solo_memories_block,
-            shared_memory_block,
         )
 
 
     async def _refresh_channel_transcript(
         self,
         *,
-        new_seq: int | None = None,
+        exclude_seq: int | None = None,
         limit: int | None = None,
     ) -> str:
         """Compatibility helper returning only the per-turn transcript overlay."""
-        group_block, solo_block, _solo_mode, _solo_memories, _shared = (
-            await self._render_transcript_blocks(new_seq=new_seq, limit=limit)
+        group_block, solo_block, _solo_mode, _solo_memories = (
+            await self._render_transcript_blocks(exclude_seq=exclude_seq, limit=limit)
         )
         return self._transcript_overlay_block(group_block, solo_block)
 

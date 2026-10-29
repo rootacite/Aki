@@ -4,11 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import uuid
-from xml.sax.saxutils import (
-    escape as xml_escape,
-    quoteattr as xml_quoteattr,
-)
 from engine.protocol import (
     FrameError,
     make_event,
@@ -131,40 +128,37 @@ class MqttCommandsMixin:
         identity = (
             f"{display_sender} ({member_id})" if member_id else display_sender
         )
-        # The roster is injected as a bridge overlay, never in the user role.
-        roster = ""
-        attachment_names = ", ".join(
-            attachment.name for attachment in sorted(attachments, key=lambda item: item.index)
-        )
-        if from_agent:
-            seq_attr = f" seq={xml_quoteattr(str(seq))}" if seq is not None else ""
-            body = (
-                "new-message: true\n"
-                f"<new-message{seq_attr} sender={xml_quoteattr(identity)} "
-                f"sender_id={xml_quoteattr(member_id)} source=\"agent\" phase=\"final\" "
-                "untrusted=\"true\">\n"
-                f"<text>{xml_escape(text)}</text>\n"
-                + (f"<attachment-names>{xml_escape(attachment_names)}</attachment-names>\n" if attachments else "")
-                + "</new-message>\n"
+        lines = [
+            "[akid MQTT channel message]",
+            f"message-time: {_format_channel_message_time(sent_at)}",
+        ]
+        if seq is not None:
+            lines.append(f"seq: {seq}")
+        lines.append(f"sender: {identity}")
+        if member_id:
+            lines.append(f"sender_id: {member_id}")
+        lines.append(f"source: {'agent' if from_agent else 'user'}")
+        lines.append("phase: final")
+        if attachments:
+            payload = [
+                {
+                    "name": attachment.name,
+                    "path": attachment.path,
+                    **(
+                        {"missing": True}
+                        if attachment.missing or not attachment.path
+                        else {}
+                    ),
+                }
+                for attachment in sorted(attachments, key=lambda item: item.index)
+            ]
+            lines.append(
+                "attachments: "
+                + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
             )
-        else:
-            body = f"message:\n{text}\n"
-            if attachments:
-                body += f"attachment-names: {attachment_names}\n"
-            if attachments:
-                body += (
-                    "multimodal-note: 当前消息的图片已经按附件顺序直接附加在 user 消息后；"
-                    "正文中的图片名称与这些图片一一对应。\n"
-                )
-        seq_line = f"seq: {seq}\n" if seq is not None else ""
-        return (
-            "[akid MQTT channel message]\n"
-            f"message-time: {_format_channel_message_time(sent_at)}\n"
-            f"sender: {identity}\n"
-            f"{seq_line}"
-            f"{roster}\n"
-            f"{body}"
-        )
+            lines.append("multimodal: true")
+        lines.extend(["", text])
+        return "\n".join(lines)
 
 
     def _find_turn_by_client_message_id(self, value: str) -> Turn | None:

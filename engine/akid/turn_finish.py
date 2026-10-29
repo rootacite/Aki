@@ -191,7 +191,7 @@ class TurnFinishMixin:
         text = cls._jsonl_row_text(row)
         return (
             "[akid MQTT channel message]" in text
-            and "\nmessage:\n" in text
+            and "\nsource: user\n" in text
         )
 
 

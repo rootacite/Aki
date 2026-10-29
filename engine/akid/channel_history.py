@@ -13,12 +13,10 @@ from engine.emoji_catalog import load_emoji_entries
 from engine.channel_history import (
     channel_history_key,
     channel_history_path,
-    read_channel_history,
 )
 from engine.live_context import (
     ChannelImageAttachment,
     ChannelTranscriptEntry,
-    render_shared_memory,
 )
 from engine.member_profile import (
     MEMBER_KIND_USER,
@@ -70,11 +68,6 @@ class ChannelHistoryMixin:
         if len(self._channel_history) > CHANNEL_TRANSCRIPT_MAX_RECORDS:
             del self._channel_history[:-CHANNEL_TRANSCRIPT_MAX_RECORDS]
         self._persist_channel_history()
-        if self._solo_session is None:
-            try:
-                self.public_memory.record(entry)
-            except Exception as exc:
-                LOGGER.warning("public memory record failed: %s", exc)
         self._channel_transcript_status.update(
             {
                 "entries": len(self._channel_history),
@@ -354,53 +347,6 @@ class ChannelHistoryMixin:
         self._channel_transcript_status.pop("last_history_error", None)
         self._cleanup_channel_media()
 
-
-    def _public_memory_prompt_block(self) -> str:
-        records = self.public_memory.snapshot()
-        if not records:
-            return ""
-        return render_shared_memory(
-            records,
-            path=str(self.public_memory.path),
-            updated_at=str(records[-1].get("recorded_at") or ""),
-        )
-
-
-    def _backfill_public_memory(self) -> int:
-        """Seed the shared store once from Aki's canonical group history."""
-        if self.config.profile != "aki":
-            return 0
-        if self.public_memory.status()["records"] > 0:
-            return 0
-        entries: list[ChannelTranscriptEntry] = []
-        for row in read_channel_history(self.group_channel_history_path):
-            if str(row.get("phase") or "final") != "final":
-                continue
-            text = str(row.get("text") or "").strip()
-            if not text or "[NO_REPLY]" in text:
-                continue
-            entries.append(
-                ChannelTranscriptEntry(
-                    seq=int(row.get("seq") or 0),
-                    sender=str(row.get("sender") or ""),
-                    sender_id=str(row.get("sender_id") or ""),
-                    text=text,
-                    from_agent=bool(row.get("from_agent")),
-                    timestamp=str(row.get("timestamp") or ""),
-                    sent_at=int(row.get("sent_at") or 0),
-                    message_id=str(row.get("message_id") or ""),
-                    phase="final",
-                )
-            )
-        if not entries:
-            return 0
-        added = self.public_memory.record_many(entries)
-        if added:
-            LOGGER.info(
-                "public memory backfilled from canonical group history records=%s",
-                added,
-            )
-        return added
 
     def _emoji_entries(self) -> list[EmojiEntry]:
         root = self.config.emoji_dir or (self.config.cwd / "assets" / "emoji")

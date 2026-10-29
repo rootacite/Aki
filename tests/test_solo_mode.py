@@ -16,7 +16,7 @@ from engine.live_context import (
     apply_solo_mode,
     apply_solo_transcript,
     render_channel_transcript,
-    render_channel_turn,
+    render_turn_control,
     render_solo_mode,
     render_solo_transcript,
     strip_channel_mentions,
@@ -126,7 +126,7 @@ class SoloModeTests(unittest.TestCase):
         )
         self.assertIn("不需要Master @ 指派", block)
         self.assertIn("直接获取整机执行锁", block)
-        turn = render_channel_turn(
+        turn = render_turn_control(
             self_member=members[0],
             members=members,
             message="继续",
@@ -192,7 +192,8 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             client_message_id=None,
             origin="mqtt",
         )
-        return "\n\n".join(await server._build_turn_overlay(turn))
+        stable, mid = await server._build_turn_overlay(turn)
+        return "\n\n".join([*stable, *mid])
 
     async def asyncSetUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()

@@ -36,13 +36,13 @@ _CORE_MEMORY_BLOCK_RE = re.compile(
     re.IGNORECASE,
 )
 _FRAMEWORK_BLOCK_RE = re.compile(
-    r"(?m)^[ \t]*</?(?:tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|"
-    r"solo-transcript|solo-memories|shared-memory|live-context)\b[^>]*>[ \t]*(?:\n|$)",
+    r"(?m)^[ \t]*</?(?:tool-ownership|channel-[A-Za-z0-9_-]+|turn-control|solo-mode|"
+    r"solo-transcript|solo-memories|live-context)\b[^>]*>[ \t]*(?:\n|$)",
     re.IGNORECASE,
 )
 _COMPLETE_FRAMEWORK_BLOCK_RE = re.compile(
-    r"(?ms)^[ \t]*<(tool-ownership|channel-[A-Za-z0-9_-]+|solo-mode|"
-    r"solo-transcript|solo-memories|shared-memory|live-context)\b[^>]*>.*?</\1>",
+    r"(?ms)^[ \t]*<(tool-ownership|channel-[A-Za-z0-9_-]+|turn-control|solo-mode|"
+    r"solo-transcript|solo-memories|live-context)\b[^>]*>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
 

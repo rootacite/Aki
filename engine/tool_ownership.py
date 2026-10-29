@@ -23,10 +23,10 @@ _TOOL_OWNERSHIP_RE = re.compile(
     re.S,
 )
 _LATER_BLOCK_RE = re.compile(
-    r"<(?:channel-policy|channel-wake-routing|channel-identity|channel-turn|"
+    r"<(?:channel-policy|channel-wake-routing|channel-identity|turn-control|channel-turn|"
     r"channel-transcript|solo-mode|solo-transcript|live-context|"
     r"aki-channel-policy|aki-channel-wake-routing|aki-channel-identity|"
-    r"aki-channel-turn|aki-channel-transcript|aki-live-context)\b"
+    r"aki-channel-turn|aki-turn-control|aki-channel-transcript|aki-live-context)\b"
 )
 
 

@@ -12,7 +12,7 @@ from engine.live_context import (
     CHANNEL_IDENTITY_TAG,
     CHANNEL_POLICY_TAG,
     CHANNEL_TRANSCRIPT_TAG,
-    CHANNEL_TURN_TAG,
+    TURN_CONTROL_TAG,
     CHANNEL_WAKE_ROUTING_TAG,
     CHANNEL_WAKE_ALL,
     CHANNEL_WAKE_MENTIONS,
@@ -27,14 +27,14 @@ from engine.live_context import (
     WindowInfo,
     apply_channel_identity,
     apply_channel_policy,
-    apply_channel_turn,
     apply_channel_wake_routing,
     apply_channel_transcript,
+    apply_turn_control,
     apply_live_context,
     build_kwin_probe_script,
     clear_channel_identity,
-    clear_channel_turn,
     clear_channel_transcript,
+    clear_turn_control,
     clear_live_context,
     desktop_environment,
     estimate_tokens,
@@ -46,7 +46,7 @@ from engine.live_context import (
     render_channel_identity,
     render_channel_policy,
     render_channel_roster,
-    render_channel_turn,
+    render_turn_control,
     render_new_message,
     render_channel_wake_routing,
     render_channel_transcript,
@@ -245,32 +245,28 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn(
             "只有Master的明确指名才算被指名；被非Master指名不算被指名", policy
         )
-        self.assertIn("wait_user(timeout_s)", policy)
-        self.assertIn("不要向用户解释", policy)
-        self.assertNotIn(
-            "wait_user(timeout_s)",
-            render_channel_policy(user_name="Master", wait_user_available=False),
-        )
+        self.assertNotIn("wait_user(timeout_s)", policy)
 
-        self_text = render_channel_turn(
+        self_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
         self.assertIn("Master在消息中点名了你，请直接回复。", self_text)
         self.assertNotIn("<reply-target>", self_text)
-        other_text = render_channel_turn(
+        other_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
         self.assertIn("点名了其他成员，未点名你", other_text)
-        plain_text = render_channel_turn(
+        plain_text = render_turn_control(
             self_member=self_member, members=self.members(), message="大家好"
         )
         self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain_text)
         self.assertNotIn("没有提到你", plain_text)
         self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
+        self.assertIn('allowed="true"', plain_text)
         self.assertIn("可调用 `wait_user`", plain_text)
 
-        agent_text = render_channel_turn(
+        agent_text = render_turn_control(
             self_member=self_member,
             members=self.members(),
             message="@秋 帮我改一下这个文件",
@@ -278,12 +274,13 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertIn("被非Master指名不算被指名", agent_text)
         self.assertIn("不要试图获取执行锁", agent_text)
+        self.assertIn('allowed="false"', agent_text)
         self.assertIn("禁止调用 `wait_user`", agent_text)
 
     def test_policy_and_turn_are_system_prompt_blocks(self) -> None:
         members = self.members()
         policy = render_channel_policy(user_name="Master")
-        turn = render_channel_turn(
+        turn = render_turn_control(
             self_member=members[0],
             members=members,
             message="大家好",
@@ -294,7 +291,7 @@ class ChannelContextTests(unittest.TestCase):
             "若判断本轮无需回复，直接输出 [NO_REPLY]",
             policy,
         )
-        self.assertTrue(turn.startswith(f"<{CHANNEL_TURN_TAG}"))
+        self.assertTrue(turn.startswith(f"<{TURN_CONTROL_TAG}"))
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
         self.assertIn("You MUST call `wait_other` once", turn)
         self.assertIn("It is not in compliance to speak before", turn)
@@ -302,12 +299,12 @@ class ChannelContextTests(unittest.TestCase):
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_policy(system, policy)
-        applied = apply_channel_turn(applied, turn)
+        applied = apply_turn_control(applied, turn)
         self.assertIn(policy, applied)
         self.assertIn(turn, applied)
         self.assertLess(applied.index(policy), applied.index(turn))
         self.assertLess(applied.index(turn), applied.index(f"<{CHANNEL_TRANSCRIPT_TAG}>"))
-        cleared = clear_channel_turn(applied)
+        cleared = clear_turn_control(applied)
         self.assertNotIn(turn, cleared)
         self.assertIn(policy, cleared)
 
@@ -341,38 +338,32 @@ class ChannelContextTests(unittest.TestCase):
         self.assertNotIn("@Master", renamed)
         self.assertIn("@哥哥", renamed)
 
-    def test_turn_identifies_new_message_and_repeats_wake_reminder(self) -> None:
+    def test_turn_control_does_not_copy_message_body(self) -> None:
         members = self.members()
-        turn = render_channel_turn(
+        turn = render_turn_control(
             self_member=members[0],
             members=members,
             message="Aki 的新消息",
-            message_seq=23,
-            message_sender="Aki",
-            message_sender_id="aki",
             from_agent=True,
         )
         self.assertNotIn("<wake-reminder>", turn)
         self.assertNotIn("<reply-target>", turn)
-        self.assertIn(
-            '<new-message seq="23" sender="Aki" sender_id="aki" source="agent"',
-            turn,
-        )
-        self.assertIn("<text>Aki 的新消息</text>", turn)
+        self.assertNotIn("<new-message", turn)
+        self.assertNotIn("Aki 的新消息", turn)
 
     def test_execution_responder_is_single_and_deterministic(self) -> None:
         members = self.members()
-        aki = render_channel_turn(
+        aki = render_turn_control(
             self_member=members[0], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="true">', aki)
         self.assertIn("负责确认执行者的唯一成员", aki)
-        fuyu = render_channel_turn(
+        fuyu = render_turn_control(
             self_member=members[1], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="false">', fuyu)
         self.assertIn("不要尝试执行", fuyu)
-        mentioned = render_channel_turn(
+        mentioned = render_turn_control(
             self_member=members[1], members=members, message="@Fuyu do this"
         )
         self.assertNotIn("<execution-ownership", mentioned)
@@ -388,7 +379,7 @@ class ChannelContextTests(unittest.TestCase):
 
     def test_single_member_gets_lock_guidance_without_ownership_block(self) -> None:
         member = ChannelMember(id="fuyu", name="Fuyu", aliases=("Fuyu",))
-        text = render_channel_turn(
+        text = render_turn_control(
             self_member=member, members=[member], message="do this"
         )
         self.assertNotIn("<execution-ownership", text)
@@ -488,7 +479,7 @@ class ChannelContextTests(unittest.TestCase):
 
     def test_agent_initiation_budget_is_exposed_and_zero_blocks_replies(self) -> None:
         members = self.members()
-        blocked = render_channel_turn(
+        blocked = render_turn_control(
             self_member=members[0],
             members=members,
             message="@Fuyu hello",
@@ -522,7 +513,7 @@ class ChannelContextTests(unittest.TestCase):
             ChannelMember(id="fuyu", name="Fuyu", kind="agent"),
         ]
         roster = render_channel_roster(self_member=members[0], members=members)
-        turn = render_channel_turn(
+        turn = render_turn_control(
             self_member=members[0], members=members, message="do this"
         )
         self.assertIn('kind="user"', roster)
@@ -574,7 +565,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         ]
 
     def test_renders_final_text_and_marks_new_message(self) -> None:
-        block = render_channel_transcript(self.entries(), new_seq=2)
+        block = render_channel_transcript(self.entries())
         self.assertTrue(block.startswith(f"<{CHANNEL_TRANSCRIPT_TAG}"))
         self.assertIn('budget_tokens="32768"', block)
         self.assertIn(
@@ -582,7 +573,7 @@ class ChannelTranscriptTests(unittest.TestCase):
             block,
         )
         self.assertIn(
-            'Fuyu (agent, progress, new, at 2026-10-21T13:01:00+08:00, seq=2): '
+            'Fuyu (agent, progress, at 2026-10-21T13:01:00+08:00, seq=2): '
             '"这个方案缺少回滚点。"',
             block,
         )
@@ -611,7 +602,7 @@ class ChannelTranscriptTests(unittest.TestCase):
                 ),
             ),
         )
-        block = render_channel_transcript([entry], new_seq=3)
+        block = render_channel_transcript([entry])
         self.assertIn(
             '"看看图片1" attachments=[{"name":"图片1","path":"/tmp/aki/channel-media/mixed-1/1.png"}]',
             block,
@@ -619,17 +610,13 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertNotIn("base64", block)
         self.assertNotIn("<attachments>", block)
 
-        turn = render_channel_turn(
+        turn = render_turn_control(
             self_member=ChannelMember(id="aki", name="Aki", is_self=True),
             members=(ChannelMember(id="aki", name="Aki", is_self=True),),
             message=entry.text,
-            message_seq=3,
-            message_sender="Master",
-            message_sender_id="user-1",
-            message_attachments=entry.attachments,
         )
-        self.assertIn('"name":"图片1"', turn)
-        self.assertIn('"path":"/tmp/aki/channel-media/mixed-1/1.png"', turn)
+        self.assertNotIn("图片1", turn)
+        self.assertNotIn("/tmp/aki/channel-media", turn)
 
     def test_budget_keeps_newest_and_drops_oldest(self) -> None:
         entries = [
@@ -642,9 +629,9 @@ class ChannelTranscriptTests(unittest.TestCase):
             )
             for index in range(20)
         ]
-        block = render_channel_transcript(entries, new_seq=19, budget_tokens=2048)
+        block = render_channel_transcript(entries, budget_tokens=2048)
         self.assertLessEqual(estimate_tokens(block), 2048)
-        self.assertIn(", new, at ", block)
+        self.assertNotIn(", new, at ", block)
         self.assertIn("dropped=", block)
         self.assertIn("message-19", block)
         self.assertNotIn("message-0-", block)
@@ -689,15 +676,15 @@ class ChannelTranscriptTests(unittest.TestCase):
                 sent_at=1_700_000_001_000,
             ),
         ]
-        block = render_channel_transcript(entries, new_seq=1)
+        block = render_channel_transcript(entries)
         self.assertLess(
             block.index("older sender time"), block.index("newer arrival")
         )
         self.assertIn("seq=1", block)
-        self.assertIn(", new, at ", block)
+        self.assertNotIn(", new, at ", block)
 
     def test_apply_is_idempotent_and_clear_removes_block(self) -> None:
-        block = render_channel_transcript(self.entries(), new_seq=2)
+        block = render_channel_transcript(self.entries())
         once = apply_channel_transcript("BASE PROMPT\n", block)
         twice = apply_channel_transcript(once, block)
         self.assertEqual(twice.count(f"<{CHANNEL_TRANSCRIPT_TAG}"), 1)
@@ -706,12 +693,12 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertIn("BASE PROMPT", cleared)
 
     def test_transcript_uses_sender_names_without_profiles(self) -> None:
-        block = render_channel_transcript(self.entries(), new_seq=2)
+        block = render_channel_transcript(self.entries())
         self.assertNotIn("<profiles>", block)
         self.assertNotIn("self bio", block)
         self.assertNotIn("fuyu bio", block)
         self.assertIn("Master (user,", block)
-        self.assertIn("Fuyu (agent, progress, new,", block)
+        self.assertIn("Fuyu (agent, progress,", block)
         self.assertIn("<messages>", block)
 
     def test_identity_transcript_and_live_context_keep_fixed_order(self) -> None:
@@ -719,7 +706,7 @@ class ChannelTranscriptTests(unittest.TestCase):
             id="aki", name="Aki", description="Aki bio", is_self=True
         )
         identity = render_channel_identity(member)
-        transcript = render_channel_transcript(self.entries(), new_seq=2)
+        transcript = render_channel_transcript(self.entries())
         live = '<live-context refreshed_at="now"><note>x</note></live-context>'
         identity_once = apply_channel_identity("BASE\\n", identity)
         identity_twice = apply_channel_identity(identity_once, identity)
@@ -730,7 +717,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         )
         self.assertLess(system.index(CHANNEL_IDENTITY_TAG), system.index(CHANNEL_TRANSCRIPT_TAG))
         self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("<live-context"))
-        refreshed_transcript = render_channel_transcript(self.entries(), new_seq=1)
+        refreshed_transcript = render_channel_transcript(self.entries())
         reordered = apply_channel_transcript(system, refreshed_transcript)
         self.assertLess(reordered.index(CHANNEL_IDENTITY_TAG), reordered.index(CHANNEL_TRANSCRIPT_TAG))
         self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("<live-context"))

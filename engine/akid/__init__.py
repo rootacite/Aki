@@ -294,12 +294,11 @@ from engine.live_context import (
     render_channel_identity,
     render_channel_policy,
     render_channel_roster,
-    render_channel_turn,
     render_channel_wake_routing,
+    render_turn_control,
     render_channel_transcript,
     render_live_context,
     render_new_message,
-    render_shared_memory,
     render_solo_memories,
     render_solo_mode,
     render_solo_transcript,
@@ -319,10 +318,6 @@ from engine.solo_memory import (
     default_solo_memory_path,
     fallback_summary,
     strip_runtime_prompt_blocks,
-)
-from engine.public_memory import (
-    PublicMemoryStore,
-    default_public_memory_path,
 )
 from engine.solo_mode import (
     SOLO_ACTIVE,

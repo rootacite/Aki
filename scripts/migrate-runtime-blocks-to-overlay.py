@@ -27,12 +27,12 @@ RUNTIME_TAGS = (
     "channel-policy",
     "channel-wake-routing",
     "channel-identity",
+    "turn-control",
     "channel-turn",
     "channel-transcript",
     "solo-mode",
     "solo-transcript",
     "solo-memories",
-    "shared-memory",
     "live-context",
 )
 

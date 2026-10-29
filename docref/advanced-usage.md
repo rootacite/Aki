@@ -238,14 +238,15 @@ systemctl --user restart akid-proxy@aki.service
 
 脚本只安装静态 base 到 Letta 的 `agent.system`，不再读写
 `conversation/system-prompt.json`。core memory 由 Letta/MemFS 编译；所有 Aki 运行时块
-（ownership、policy、wake routing、identity、solo/shared memory、transcript、roster、
+（ownership、policy、wake routing、identity、solo memory、transcript、roster、
 live context）都由 akid 在请求前作为 turn overlay 注入。脚本会先备份到
 `~/.letta/backups/system-prompt-install-<timestamp>/`。修改 `prompts/aki-system.md` 后
 重新运行即可；`{CORE_MEMORY}` 占位符必须保留。
 
-编译后模型看到的固定顺序是 `base → core memory → runtime overlay`。runtime overlay
-内部顺序为 `tool ownership → channel policy → wake routing → identity → solo mode →
-solo memories → shared memory → channel turn → transcript → roster → live context`：
+编译后模型看到的固定顺序是 `base → core memory → stable system overlay → messages →
+mid-system tail`。stable system overlay 内部顺序为 `tool ownership → channel policy →
+wake routing → identity → roster → format guard`；mid-system tail 为
+`turn control → transcript → solo mode → solo memories → solo transcript → live context`：
 
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
    `prompts/haru-system.md`），包含身份、记忆机制、工具规则、执行锁规则和模式边界。
@@ -257,13 +258,13 @@ solo memories → shared memory → channel turn → transcript → roster → l
 5. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
    使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
 6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 作为 overlay 注入。
-7. `<channel-turn>`：当前频道 turn 的新消息 sender/seq/正文、guidance、
-   initiation budget、execution responder 和 `wait_other` 目标；仅频道 turn 存在。
-   bridge 模式下只作为 turn overlay 注入实际 API 请求，不落盘。
-8. `<channel-transcript>`：仅频道来源的 turn 包含；bridge 模式下同样只走 turn overlay，
-   不写回持久 system prompt；消息为单行 JSON 转义格式，不再内嵌 `<profiles>` 或 `sender_id`。
-9. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
-   bridge 模式下作为 per-turn overlay，始终最后追加、不落盘。
+7. `<channel-context>`：当前在线成员 roster，作为稳定 system overlay 注入。
+8. `<format-guard>`：Aki、Fuyu、Haru 全部启用，使用各自 username，作为稳定 system overlay 注入。
+9. `<turn-control>`：当前频道 turn 的 guidance、initiation budget、execution responder、
+   `wait_user` / `wait_other`；不复制消息正文。位于 mid-system tail。
+10. `<channel-transcript>`：只包含历史消息，不包含当前消息和 `new` 标记；位于 mid-system tail。
+11. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
+    位于 mid-system tail，不落盘。
 
 ### Aki 专属工具与触发器
 
@@ -345,26 +346,6 @@ akictl --profile fuyu -p "你好"   # 显式 profile
 akictl history 50                 # 读本地频道历史
 akictl history --solo             # 读独处历史
 ```
-
-### 公共群聊记忆
-
-每个 profile 在自己的
-`~/.aki/channel-history/<channel-key>/<profile>.jsonl` 中保存频道历史；这些记录不会自动
-写入各成员的 MemFS。所有 profile 另有一份去重后的公共群聊记忆：
-
-```text
-~/.letta/lc-local-backend/memfs/shared/channel/<channel-key>/messages.jsonl
-~/.letta/lc-local-backend/memfs/shared/channel/<channel-key>/MEMORY.md
-```
-
-- 只记录 `phase=final`、非空且非独处的群聊消息；同一条消息按 `messageId`（缺失时按
-  发送者、时间和正文）去重，因此多个 profile 同时看到同一条消息不会重复写入。
-- 公共记忆为空时，Aki 首次启动会从自己的 canonical 群聊历史回填一次；之后由各 profile
-  实时追加新消息。
-- 文件最多保留最近 4096 条记录。
-- runtime overlay 只注入一个 `<shared-memory path=... records=...>` 索引，不重复消息正文；
-  需要细节时由成员自行读取 `messages.jsonl`。
-- `akictl health` 的 `channel.public_memory` 会显示路径、记录数和更新时间。
 
 REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
@@ -573,11 +554,12 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 其他智能体的 tool/approval/started 事件不会创建 turn；`progress` 中间回复只记入群聊
 记录，不触发 turn；只有 `phase=final` 的最终频道文本才会触发其他智能体的 turn。
 每条频道 user 消息包含 `[akid MQTT channel message]`、`message-time`、`sender`、
-可选 `seq` 和原始 `message`；唤醒规则只在持久 `<channel-wake-routing>` 中，在线成员列表
+`sender_id`、`source`、`phase`、可选 `seq` 和正文；唤醒规则只在持久
+`<channel-wake-routing>` 中，在线成员列表
 `<channel-context>` 只在 turn overlay 中。运行时不会生成 prompt journal。其他智能体触发的 turn
-还会在 user role 的 `<new-message>` 中带 sender、seq、source 和正文。点名/未点名 guidance、
-initiation budget、execution responder、新消息摘要和 `wait_other` 提示都在 system prompt
-的 `<channel-turn>` 中。
+还会在 user role 的统一前缀中带 sender、seq、source 和正文。点名/未点名 guidance、
+initiation budget、execution responder 和 `wait_other` 提示都在 mid-system tail
+的 `<turn-control>` 中。
 
 历史频道 prompt 的成员表迁移（仅用于旧数据）：
 
@@ -599,7 +581,7 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
-的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `<channel-turn>` 中重复。
+的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `<turn-control>` 中重复。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员。
 - 任意位置写 `@<username>`：如果你认为只需要回复该 username、无需打扰其他人，使用它；它会强制只唤醒该 username。该标记发布前会被移除。
@@ -924,6 +906,21 @@ drop-in 单独开启。
 `--no-live-context`、`--live-context-budget-tokens`、`--zsh-history`、`--ps-bin`、
 `--qdbus-bin`、`--live-context-timeout`。`aki.health` 和 `aki.status` 的
 `live_context` 字段只暴露采集状态和错误，不暴露块内容。
+
+### Prompt 前缀审计
+
+`scripts/prompt_cache_audit.py` 会按 profile 串行运行 3 个测试 turn，抓取 proxy debug 与
+bridge capture，计算 API Call 的实际前缀重合率，并在结束后恢复 conversation、
+channel-history 和 MemFS memory。测试前会把 Aki 切到 `aki/gemini-3.8-flash`，且不会恢复原模型。
+
+```bash
+python3 scripts/prompt_cache_audit.py --label after
+python3 scripts/prompt_cache_audit.py --label after --baseline /tmp/aki-prompt-audit/<run>/report.json
+```
+
+脚本要求三个 profile 都不在 solo 状态；目标 profile 会暂停其他 akid 并等待 roster 超时后
+再开始测量，避免 `channel-context` 因测试启停而变化。报告默认写到
+`/tmp/aki-prompt-audit/<run-id>-<label>/report.json`。
 
 ---
 

@@ -117,26 +117,26 @@ bubblewrap 仍作为底层写入边界。
 仅用于只对该 username 说话、无需打扰其他人时；无 `@` 而有 `^成员` 时不唤醒被排除的成员；两者
 都没有时唤醒全部其他在线成员。它每个 turn 按 profile username 渲染；`^` 排除规则和
 “只回复用户时使用 `@<username>`”的提示也属于这个 overlay 块，不再在每轮 user 消息或
-`<channel-turn>` 中重复。
+`<turn-control>` 中重复。
 
-`<channel-policy>` 保存静态频道规则并作为 turn overlay 注入；`<channel-turn>` 保存当前 turn 的 guidance、
-initiation budget、execution responder、新消息摘要、`wait_other` 目标和 `wait_user` 使用提示。
-bridge 模式下 `<channel-policy>` 和 `<channel-turn>` 都只作为 turn overlay 拼进实际 API
-请求的 system prompt，不写回 agent record 或 `system-prompt.json`。akid 只接受带
+`<channel-policy>` 保存静态频道规则并作为稳定 system overlay 注入；`<turn-control>` 保存当前
+turn 的 guidance、initiation budget、execution responder、`wait_other` 目标和 `wait_user`
+使用提示，放在 mid-system tail，不复制消息正文。bridge 模式下静态 overlay 通过
+`system_append`、易变 tail 通过 `mid_system_append` 拼进实际 API 请求，不写回 agent record
+或 `system-prompt.json`。akid 只接受带
 `aki_bridge` 的定制 Letta；
 否则启动直接报错退出。bridge 模式下
-`<channel-context>` 成员表只作为 turn overlay 注入实际 API 请求，不写入持久 user message，
-turn 结束后自然消失。运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`
+`<channel-context>` 成员表作为稳定 system overlay 注入实际 API 请求，不写入持久 user message。
+运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`
 和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
 
-最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 system prompt，
-默认最多 32K **token**（不是 32K 字节），按时间保留最近消息并以紧凑单行格式标记 `new`。bridge 模式下
+最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 mid-system tail，
+默认最多 32K **token**（不是 32K 字节），按时间保留历史消息，不包含当前消息和 `new` 标记。bridge 模式下
 该块只存在于 turn overlay，不写入持久 system prompt；群聊消息本身仍永久保存在
 `~/.aki/channel-history`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
-消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息
-`<new-message>` 中；`<channel-turn>` 也会明确写出新消息的 sender、seq、source 和
-正文，避免模型只看到空事件。由其他智能体触发的频道 turn 结束后会
+消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息前缀中；
+`<turn-control>` 不再重复消息正文。由其他智能体触发的频道 turn 结束后会
 回滚本次新增的 conversation 消息，因此这些临时触发消息和回复不会进入下个 turn 的对话
 历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
 tool result 和最终回复都会正常留在 conversation 中，并交给 Letta 自己的 compaction
@@ -369,7 +369,6 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - `engine/akictl/`、`bin/akictl`：MQTT 对话客户端 + 本地管理 CLI。
 - `engine/channel_history.py`：akid 与 CLI 共用的频道历史 key/路径 helper。
 - `engine/solo_memory.py`：独处会话存储、摘要、确定性整轮预算淘汰与 MemFS 归档。
-- `engine/public_memory.py`：跨 profile 去重保存 final 群聊消息，提供共享公共记忆索引。
 - `aki-layer/`：Qt Quick + LayerShellQt 透明全屏画布层（overlay layer）。
 - `install-daemon.py`：`akid@.service` / `akid-proxy@.service` 安装、vendored Letta 构建与 legacy 迁移。
 - `vendor/letta-code/`：固定版本的 Letta Code upstream submodule。
