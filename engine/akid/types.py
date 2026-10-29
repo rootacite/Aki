@@ -22,6 +22,7 @@ class ChannelTurnState:
     suppressed: bool = False
     guard_blocked: bool = False
     tool_names: dict[str, str] = field(default_factory=dict)
+    tool_arguments: dict[str, str] = field(default_factory=dict)
     wake: str = ""
     wake_ids: str = ""
     client_message_id: str = ""

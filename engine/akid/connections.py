@@ -26,6 +26,11 @@ from .constants import (
     LOGGER,
 )
 from .no_reply import contains_no_reply_marker
+from .tool_detail import (
+    render_tool_result,
+    render_tool_value,
+    tool_detail_body,
+)
 from .types import ChannelTurnState
 
 
@@ -418,10 +423,12 @@ class ChannelConnection:
             await self._flush_progress(turn_id, seq, state, force=True)
             tool_name = str(data.get("name") or "unknown")
             tool_call_id = str(data.get("tool_call_id") or "")
+            arguments = render_tool_value(data.get("arguments"))
             if tool_call_id:
                 state.tool_names[tool_call_id] = tool_name
+                state.tool_arguments[tool_call_id] = arguments
             self._enqueue_text(
-                f"tool: {tool_name} running",
+                tool_detail_body(arguments=arguments, result=None),
                 {
                     "schema": "akid.v1",
                     "kind": "tool",
@@ -440,15 +447,20 @@ class ChannelConnection:
             return
         if event_type == "tool_result":
             status = str(data.get("status") or "success").lower()
-            tool_name = str(state.tool_names.get(str(data.get("tool_call_id") or ""), "tool"))
+            tool_call_id = str(data.get("tool_call_id") or "")
+            tool_name = str(state.tool_names.get(tool_call_id, "tool"))
+            arguments = state.tool_arguments.get(tool_call_id, "")
             self._enqueue_text(
-                f"tool: {tool_name} {status}",
+                tool_detail_body(
+                    arguments=arguments,
+                    result=render_tool_result(data),
+                ),
                 {
                     "schema": "akid.v1",
                     "kind": "tool",
                     "turnId": turn_id,
                     "seq": seq,
-                    "toolCallId": str(data.get("tool_call_id") or ""),
+                    "toolCallId": tool_call_id,
                     "toolName": tool_name,
                     "toolStatus": "error" if status == "error" else "success",
                 },

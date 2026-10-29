@@ -1194,6 +1194,33 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((conversation_dir / "messages.jsonl").read_bytes() == b"")
         self.assertTrue(Path(result["backup_path"]).is_dir())
 
+    def _assert_tool_detail(
+        self,
+        events: list[dict[str, Any]],
+        *,
+        argument_needle: str,
+        result_needle: str,
+        status: str,
+    ) -> None:
+        running = [
+            json.loads(str(event.get("text") or "{}"))
+            for event in events
+            if event.get("toolStatus") == "running"
+            and argument_needle in str(event.get("text") or "")
+        ]
+        self.assertTrue(running)
+        self.assertNotIn("result", running[-1])
+        self.assertIn(argument_needle, running[-1]["arguments"])
+        finished = [
+            json.loads(str(event.get("text") or "{}"))
+            for event in events
+            if event.get("toolStatus") == status
+            and argument_needle in str(event.get("text") or "")
+        ]
+        self.assertTrue(finished)
+        self.assertIn(argument_needle, finished[-1]["arguments"])
+        self.assertIn(result_needle, finished[-1]["result"])
+
     async def test_approval_allow_deny_and_safe_tool(self) -> None:
         server = await self.start_server(
             channel=FakeChannel(), approval_timeout=2.0
@@ -1206,6 +1233,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         allowed = await allowed_task
         self.assertIn("success", [event.get("toolStatus") for event in allowed.events_of("tool")])
+        self._assert_tool_detail(
+            allowed.events_of("tool"),
+            argument_needle="echo channel-unsafe",
+            result_needle="tool output",
+            status="success",
+        )
 
         denied_task = asyncio.create_task(channel_send(server, "dangerous"))
         approval = await wait_for_approval(server)
@@ -1218,6 +1251,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         safe = await channel_send(server, "safe")
         self.assertFalse(safe.events_of("approval"))
         self.assertIn("success", [event.get("toolStatus") for event in safe.events_of("tool")])
+        self._assert_tool_detail(
+            safe.events_of("tool"),
+            argument_needle="MEMORY.md",
+            result_needle="tool output",
+            status="success",
+        )
 
     async def test_bash_auto_allowed_when_sandbox_enabled(self) -> None:
         server = await self.start_server(
