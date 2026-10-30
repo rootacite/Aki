@@ -325,7 +325,7 @@ def render_user_format_guard(user_name: str) -> str:
             "You are chatting in a real-time IM chatroom, NOT writing an essay or documentation. "
             "Obey these output constraints unconditionally:",
             f"1. **CONVERSATIONAL BREVITY (CRITICAL)**: Match {name}'s pacing. "
-            f"Keep your total reply concise (**1 to 4 short sentences, strictly under 60 words total**) "
+            "Keep your total reply concise "
             f"unless {name} explicitly asks for a detailed breakdown. Never give background lectures or unsolicited long advice.",
             "2. **IM BUBBLE SPLITTING (`\\n\\n`)**: Real people in IM don't pack multiple thoughts into one giant wall of text. "
             "Whenever your reply has more than one sentence or shifts from an emotional reaction to a question/action, "
