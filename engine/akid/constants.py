@@ -49,6 +49,20 @@ SCREENSHOT_TOOL_NAME = "desktop_take_screenshot"
 
 IMAGE_GENERATION_TOOL_NAME = "generate_image"
 
+COMFYUI_STARTUP_TOOL_NAME = "comfyui_startup"
+
+COMFYUI_GENERATE_TOOL_NAME = "comfyui_generate"
+
+COMFYUI_END_TOOL_NAME = "comfyui_end"
+
+COMFYUI_TOOL_NAMES = frozenset(
+    {
+        COMFYUI_STARTUP_TOOL_NAME,
+        COMFYUI_GENERATE_TOOL_NAME,
+        COMFYUI_END_TOOL_NAME,
+    }
+)
+
 SEARCH_CHAT_HISTORY_TOOL_NAME = "search_chat_history"
 
 EXTERNAL_TOOL_NAMES = {
@@ -57,6 +71,7 @@ EXTERNAL_TOOL_NAMES = {
     CAMERA_TOOL_NAME,
     SCREENSHOT_TOOL_NAME,
     IMAGE_GENERATION_TOOL_NAME,
+    *COMFYUI_TOOL_NAMES,
     LOCK_ACQUIRE_TOOL,
     WAIT_OTHER_TOOL,
     WAIT_USER_TOOL,
@@ -420,6 +435,7 @@ CAPABILITIES = {
     "camera_tool": True,
     "screenshot_tool": True,
     "image_generation_tool": True,
+    "comfyui_tools": True,
     "mcp_native_tools": True,
     "avatar": True,
     "mqtt_manage": True,

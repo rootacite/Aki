@@ -17,6 +17,7 @@ from engine.avatar import (
     load_avatar,
 )
 from engine.channel import TokifactorChannel
+from engine.comfyui import ComfyUIManager
 from engine.execution_lock import (
     ExecutionLock,
     default_execution_lock_path,
@@ -67,6 +68,7 @@ from .backend_turn import BackendTurnMixin
 from .capture import CaptureMixin
 from .channel_history import ChannelHistoryMixin
 from .channel_status import ChannelStatusMixin
+from .comfyui_tools import ComfyUIToolsMixin
 from .conversation import ConversationMixin
 from .delivery import DeliveryMixin
 from .exclusive import ExclusiveMixin
@@ -310,6 +312,7 @@ class ServerMixin:
             missed_grace_seconds=config.schedule_missed_grace_seconds,
         )
         self.life_ledger = LifeLedger(self.ledger_state)
+        self.comfyui = ComfyUIManager(config.comfyui, profile=config.profile)
         self.presence_monitor = PresenceMonitor(
             self.presence_state,
             provider=LogindActivityProvider(
@@ -460,5 +463,5 @@ class ServerMixin:
             self.config.backend_dir, self.config.agent_id
         )
 
-class GatewayServer(ServerMixin, LifecycleMixin, HealthMixin, ChannelHistoryMixin, PromptsMixin, TurnsMixin, ProactiveMixin, OverlaysMixin, TurnFinishMixin, WritableRpcMixin, ChannelStatusMixin, MembersMixin, SoloMixin, ModelMixin, MqttIngressMixin, MqttCommandsMixin, BackendMixin, BackendTurnMixin, ExclusiveMixin, WaitToolsMixin, RemoteToolsMixin, CaptureMixin, DeliveryMixin, IdentityMixin, UsernameMixin, ConversationMixin, MemoryMixin):
+class GatewayServer(ServerMixin, LifecycleMixin, HealthMixin, ChannelHistoryMixin, PromptsMixin, TurnsMixin, ProactiveMixin, OverlaysMixin, TurnFinishMixin, WritableRpcMixin, ChannelStatusMixin, MembersMixin, SoloMixin, ModelMixin, MqttIngressMixin, MqttCommandsMixin, BackendMixin, BackendTurnMixin, ExclusiveMixin, WaitToolsMixin, RemoteToolsMixin, ComfyUIToolsMixin, CaptureMixin, DeliveryMixin, IdentityMixin, UsernameMixin, ConversationMixin, MemoryMixin):
     pass

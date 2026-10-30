@@ -251,6 +251,97 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
         read_only=True,
     ),
     ExclusiveTool(
+        name="comfyui_startup",
+        owner_profile="haru",
+        label="Start ComfyUI",
+        description=(
+            "Start the managed ComfyUI process using the startup script configured "
+            "in the Haru profile [comfyui] section. comfyui_generate cannot be used "
+            "until this tool has started ComfyUI successfully. If the profile does "
+            "not configure a startup script, this tool returns exactly: "
+            "用户未正确配置ComfyUI. Exclusive to Haru."
+        ),
+        parameters=_parameters({}),
+        timeout_ms=190_000,
+    ),
+    ExclusiveTool(
+        name="comfyui_generate",
+        owner_profile="haru",
+        label="Generate image with ComfyUI",
+        description=(
+            "Generate an image with Haru's local ComfyUI workflow (misc/Haru.json). "
+            "必须先使用comfyui_startup启动comfyui，才能使用。This tool only accepts a "
+            "ComfyUI process started and tracked by comfyui_startup. positive is "
+            "required; negative, seed, cfg, steps, width and height are optional. "
+            "When seed is omitted a random seed is used; other omitted values keep "
+            "the workflow defaults. Generation has a hard 300 second timeout. On "
+            "success it returns the absolute path of the saved final image, plus "
+            "size, MIME, seed and prompt id. It may ask for user approval. Exclusive "
+            "to Haru and does not require the execution lock."
+        ),
+        parameters=_parameters(
+            {
+                "positive": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 8000,
+                    "description": "Required positive prompt.",
+                },
+                "negative": {
+                    "type": "string",
+                    "maxLength": 8000,
+                    "description": "Optional negative prompt.",
+                },
+                "seed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 18446744073709551615,
+                    "description": "Optional seed; a random seed is used when omitted.",
+                },
+                "cfg": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Optional KSampler CFG; defaults to Haru.json.",
+                },
+                "steps": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 200,
+                    "description": "Optional KSampler steps; defaults to Haru.json.",
+                },
+                "width": {
+                    "type": "integer",
+                    "minimum": 64,
+                    "maximum": 4096,
+                    "multipleOf": 8,
+                    "description": "Optional width; must be a multiple of 8.",
+                },
+                "height": {
+                    "type": "integer",
+                    "minimum": 64,
+                    "maximum": 4096,
+                    "multipleOf": 8,
+                    "description": "Optional height; must be a multiple of 8.",
+                },
+            },
+            ("positive",),
+        ),
+        timeout_ms=300_000,
+    ),
+    ExclusiveTool(
+        name="comfyui_end",
+        owner_profile="haru",
+        label="Stop ComfyUI",
+        description=(
+            "Stop the ComfyUI process group started by comfyui_startup. It sends "
+            "SIGINT first and only escalates to SIGKILL if the process group does not "
+            "exit during the configured shutdown timeout. Exclusive to Haru."
+        ),
+        parameters=_parameters({}),
+        timeout_ms=30_000,
+    ),
+    ExclusiveTool(
         name="generate_image",
         owner_profile="haru",
         label="Generate image",
@@ -367,7 +458,7 @@ DOMAIN_OWNERS: tuple[tuple[str, tuple[str, ...]], ...] = (
         ),
     ),
     ("fuyu", ("code authoring and review", "system operations", "Git audits")),
-    ("haru", ("image generation",)),
+    ("haru", ("image generation", "local ComfyUI generation and process lifecycle")),
 )
 
 

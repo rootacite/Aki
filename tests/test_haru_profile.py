@@ -66,6 +66,12 @@ class HaruConfigTests(unittest.TestCase):
         self.assertEqual(config.image.output_dir, "/tmp/aki/images")
         self.assertEqual(config.image.base_url, "https://api.minimaxi.com/v1")
         self.assertTrue(config.image.require_approval)
+        self.assertIsNotNone(config.comfyui)
+        assert config.comfyui is not None
+        self.assertFalse(config.comfyui.configured)
+        self.assertEqual(config.comfyui.endpoint, "http://127.0.0.1:8188")
+        self.assertEqual(config.comfyui.output_dir, "/tmp/aki/comfyui")
+        self.assertTrue(config.comfyui.require_approval)
         route = next(
             model for model in config.models if model.model_id == "gemini-3.8-flash"
         )
@@ -99,6 +105,9 @@ class HaruConfigTests(unittest.TestCase):
         self.assertIn("tokifactor_send_image", config.tool_policy.allow)
         self.assertIn("tokifactor_send_file", config.tool_policy.allow)
         self.assertIn("generate_image", config.tool_policy.allow)
+        self.assertIn("comfyui_startup", config.tool_policy.allow)
+        self.assertIn("comfyui_generate", config.tool_policy.allow)
+        self.assertIn("comfyui_end", config.tool_policy.allow)
         self.assertNotIn("Bash", config.tool_policy.allow)
         self.assertIn("Task", config.tool_policy.deny)
         self.assertEqual(config.tool_policy.write_roots, ("/tmp", "~/.local/share/tmp"))
@@ -163,6 +172,9 @@ class HaruConfigTests(unittest.TestCase):
         self.assertNotIn("ListDir", allowed)
         self.assertIn("wait_other", allowed)
         self.assertIn("search_chat_history", allowed)
+        self.assertIn("comfyui_startup", allowed)
+        self.assertIn("comfyui_generate", allowed)
+        self.assertIn("comfyui_end", allowed)
         self.assertNotIn("Bash", allowed)
         self.assertIn("--disallowedTools", command)
         self.assertIn("--no-system-info-reminder", command)
@@ -223,7 +235,9 @@ class HaruPersonaTests(unittest.TestCase):
             "There is no Bash",
             "There are no subagents",
             "Text-to-image is available through the `generate_image` tool",
-            "`generate_image`, `tokifactor_send_image`, and `tokifactor_send_file` do not require the device-wide execution lock",
+            "`comfyui_startup`, `comfyui_generate`, and `comfyui_end`",
+            "The exclusive image and ComfyUI tools do not require the device-wide execution lock",
+            "用户未正确配置ComfyUI",
             "Do not use `Read`",
             "/tmp",
             "~/.local/share/tmp",

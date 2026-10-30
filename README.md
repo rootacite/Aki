@@ -21,7 +21,7 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 
 你可以把它理解成一个随叫随到的小组：Aki 负责陪伴、文书和日程，Fuyu 负责代码、Review 和系统运维，Haru 负责创意、氛围和视觉脑暴。Natsu 的档案已经预留，等工具链就绪后上线。聊天、记忆和文件权限默认都留在本机。
 
-目前 **Aki（秋）**、**Fuyu（冬）** 与 **Haru（春）** 已经上线；**Natsu（夏）** 的设定、立绘和工具位已经预留，但 profile 与完整工具链仍在开发中，文档中统一标为 `Coming Soon`。Haru 是创意 Agent，已接入 MiniMax 文生图、桌面截图、摄像头和频道发图工具；语音、视频和 ComfyUI 属于后续阶段。
+目前 **Aki（秋）**、**Fuyu（冬）** 与 **Haru（春）** 已经上线；**Natsu（夏）** 的设定、立绘和工具位已经预留，但 profile 与完整工具链仍在开发中，文档中统一标为 `Coming Soon`。Haru 是创意 Agent，已接入 MiniMax 文生图、本机 ComfyUI 生图、桌面截图、摄像头和频道发图工具；语音和视频属于后续阶段。
 
 ---
 
@@ -66,7 +66,7 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 <li><strong>性格：</strong>活泼好奇、鬼点子极多、不按常理出牌的妹妹系画师，喜欢用即兴比喻和突然跑题的点子打破沉默。</li>
 <li><strong>职责：</strong>团队的 Art Director 与创意引擎，负责 UI/UX 脑暴、角色设定迭代、宣传文案和视觉方向，并把选定的方向生成成图片。</li>
 <li><strong>推荐模型：</strong>Gemini 3.8 Flash (low)</li>
-<li><strong>工具链：</strong>文本工具、Haru 专属的 MiniMax 文生图、截图、摄像头与频道发图；无 Bash、无子代理、无 MCP。TTS、视频与 ComfyUI 仍待接入。</li>
+<li><strong>工具链：</strong>文本工具、Haru 专属的 MiniMax 与 ComfyUI 文生图、截图、摄像头与频道发图；无 Bash、无子代理、无 MCP。TTS 与视频仍待接入。</li>
 </ul>
 </td>
 <td width="50%" valign="top">
@@ -95,7 +95,7 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 - 四季成员的专属通知气泡：Aki 粉色秋叶、Fuyu 浅蓝雪花、Haru 翠绿画笔耳机、Natsu 红色网格几何；
   右上角堆叠并显示时间；悬停会暂停倒计时，未悬停的气泡到期后收出屏幕上边缘，靠近上边缘即可拉回。
 - 人格和长期记忆以 Markdown 保存，可按 profile 备份、同步和恢复。
-- 支持 MiniMax 文生图、tokifactor 图片、摄像头、桌面截图、MCP / Tavily 和桌面实况上下文（Haru 已启用文生图、截图、相机、发图和桌面实况；MCP、语音、视频与 ComfyUI 仍未启用）。
+- 支持 MiniMax 文生图、本机 ComfyUI 生图、tokifactor 图片、摄像头、桌面截图、MCP / Tavily 和桌面实况上下文（Haru 已启用两种生图、截图、相机、发图和桌面实况；MCP、语音与视频仍未启用）。
 - 危险工具需要发起者批准；可写目录需要手动授权，Letta 运行在 bubblewrap 沙盒里。
 
 完整功能列表和运行细节见 [进阶使用](docref/advanced-usage.md)。

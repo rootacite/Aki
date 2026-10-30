@@ -64,7 +64,8 @@
 时间戳加随机后缀，避免并发调用互相覆盖。
 
 非只读工具默认受同一把整机排他锁保护，覆盖所有 profile、频道 turn 和本地 CLI turn；
-`generate_image`、`tokifactor_send_image` 和 `tokifactor_send_file` 是显式豁免项。
+`generate_image`、`tokifactor_send_image` 和 `tokifactor_send_file` 是显式豁免项，
+所有 exclusive tools（包括 Haru 的 `comfyui_*`）也按 ownership 授权并绕过整机锁。
 需要锁的模型必须先调用 `acquire_execution_lock`；
 锁被其他 Agent 持有时立即失败，当前 turn 应结束而不是重试。锁由网关在 turn 正常结束、
 取消、异常或进程退出时自动释放。
@@ -97,7 +98,10 @@ Haru 的 profile 有显式 `[tools]` 段。akid 启动 Letta 时追加
 注册也按同一 allowlist 过滤，Haru 会注册 `acquire_execution_lock` 和
 `wait_other`（用于等待 Aki、Fuyu）、`wait_user`（等待当前真人用户继续补充）、
 `desktop_take_screenshot`、`camera_take_photo` 和
-`tokifactor_send_image`，以及 MiniMax `generate_image`，不会注册任何 MCP 工具。文生图使用
+`tokifactor_send_image`，以及 MiniMax `generate_image` 和 Haru 专属的
+`comfyui_startup`/`comfyui_generate`/`comfyui_end`，不会注册任何 MCP 工具。ComfyUI 启动脚本来自
+`[comfyui] startup_script`；生成使用 `misc/Haru.json`，仅接受由 `comfyui_startup` 启动并跟踪的
+进程组，`comfyui_end` 向该进程组发送 SIGINT。文生图使用
 `[upstream.minimax]` 与 `[image]` 配置，固定请求 base64 回传，文件写入 `/tmp/aki/images`；
 生成与分享是两个步骤，Haru 先拿本地路径，再调用 `tokifactor_send_image` 发布到频道。
 `generate_image` 同时也是 Haru 的 exclusive tool：其他 profile 不会在 schema 中看到它，

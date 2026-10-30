@@ -1,0 +1,385 @@
+{
+  "19": {
+    "inputs": {
+      "seed": [
+        "224",
+        0
+      ],
+      "steps": 50,
+      "cfg": 5.2,
+      "sampler_name": "dpmpp_2s_ancestral",
+      "scheduler": "normal",
+      "denoise": 1,
+      "model": [
+        "207:208",
+        0
+      ],
+      "positive": [
+        "215",
+        0
+      ],
+      "negative": [
+        "216",
+        0
+      ],
+      "latent_image": [
+        "217",
+        0
+      ]
+    },
+    "class_type": "KSampler",
+    "_meta": {
+      "title": "KSampler"
+    }
+  },
+  "21": {
+    "inputs": {
+      "samples": [
+        "19",
+        0
+      ],
+      "vae": [
+        "207:266",
+        2
+      ]
+    },
+    "class_type": "VAEDecode",
+    "_meta": {
+      "title": "VAE Decode"
+    }
+  },
+  "92": {
+    "inputs": {
+      "images": [
+        "21",
+        0
+      ]
+    },
+    "class_type": "PreviewImage",
+    "_meta": {
+      "title": "Preview Image"
+    }
+  },
+  "215": {
+    "inputs": {
+      "text": "1girl, large breasts, hair ornament, solo, shy, open eyes, blush, from above, sitting, cleavage, looking at viewer, bedroom, indoors, bed, night, warm light, best quality, newest, highres",
+      "clip": [
+        "207:219",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "216": {
+    "inputs": {
+      "text": "worst quality, low quality, deformed, bad anatomy, out of frame, logo, watermark, censorship, internal, gore, horror, non-human, monster, alien, zombie, fused fingers, distorted anatomy, bad composition, bad quality, dead eyes, (censored, mosaic censoring:1.2), (pointy chin, sharp chin, sharp jawline:1.2), (v-shaped face:1.1),",
+      "clip": [
+        "207:219",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  },
+  "217": {
+    "inputs": {
+      "width": 1152,
+      "height": 768,
+      "batch_size": 1
+    },
+    "class_type": "EmptyLatentImage",
+    "_meta": {
+      "title": "Empty Latent Image"
+    }
+  },
+  "222": {
+    "inputs": {
+      "filename_prefix": [
+        "227",
+        0
+      ],
+      "images": [
+        "198:197:86",
+        0
+      ]
+    },
+    "class_type": "SaveImage",
+    "_meta": {
+      "title": "Save Image"
+    }
+  },
+  "224": {
+    "inputs": {
+      "seed": 712539060003119
+    },
+    "class_type": "SeedNode",
+    "_meta": {
+      "title": "Seed"
+    }
+  },
+  "227": {
+    "inputs": {
+      "string_a": "CM_",
+      "string_b": [
+        "228",
+        0
+      ],
+      "delimiter": ""
+    },
+    "class_type": "StringConcatenate",
+    "_meta": {
+      "title": "Concatenate Text"
+    }
+  },
+  "228": {
+    "inputs": {
+      "int_": [
+        "224",
+        0
+      ],
+      "use_commas": "false"
+    },
+    "class_type": "Int to String",
+    "_meta": {
+      "title": "Int to String (Mikey)"
+    }
+  },
+  "207:219": {
+    "inputs": {
+      "lora_name": "Asumi.safetensors",
+      "strength_model": 0.6,
+      "strength_clip": 0.6,
+      "model": [
+        "207:266",
+        0
+      ],
+      "clip": [
+        "207:266",
+        1
+      ]
+    },
+    "class_type": "LoraLoader",
+    "_meta": {
+      "title": "Load LoRA (Model and CLIP)"
+    }
+  },
+  "207:208": {
+    "inputs": {
+      "multiplier": 0.6,
+      "model": [
+        "207:219",
+        0
+      ]
+    },
+    "class_type": "RescaleCFG",
+    "_meta": {
+      "title": "RescaleCFG"
+    }
+  },
+  "207:266": {
+    "inputs": {
+      "ckpt_name": "waiIllustriousSDXL_v170.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "198:41": {
+    "inputs": {
+      "model_name": "RealESRGAN_x4plus_anime_6B.pth"
+    },
+    "class_type": "UpscaleModelLoader",
+    "_meta": {
+      "title": "Load Upscale Model"
+    }
+  },
+  "198:196": {
+    "inputs": {
+      "upscale_by": 2,
+      "seed": 1101326571581140,
+      "steps": 18,
+      "cfg": 5.2,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "normal",
+      "denoise": 0.32,
+      "mode_type": "Chess",
+      "tile_width": 768,
+      "tile_height": 768,
+      "mask_blur": 64,
+      "tile_padding": 64,
+      "seam_fix_mode": "None",
+      "seam_fix_denoise": 1,
+      "seam_fix_width": 64,
+      "seam_fix_mask_blur": 8,
+      "seam_fix_padding": 16,
+      "force_uniform_tiles": true,
+      "tiled_decode": true,
+      "batch_size": 1,
+      "image": [
+        "21",
+        0
+      ],
+      "model": [
+        "207:208",
+        0
+      ],
+      "positive": [
+        "198:259",
+        0
+      ],
+      "negative": [
+        "216",
+        0
+      ],
+      "vae": [
+        "207:266",
+        2
+      ],
+      "upscale_model": [
+        "198:41",
+        0
+      ]
+    },
+    "class_type": "UltimateSDUpscale",
+    "_meta": {
+      "title": "Ultimate SD Upscale"
+    }
+  },
+  "198:197:87": {
+    "inputs": {
+      "model_name": "bbox/hand_yolov8s.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:103": {
+    "inputs": {
+      "model_name": "bbox/Eyes.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:85": {
+    "inputs": {
+      "model_name": "bbox/face_yolov8m.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:108": {
+    "inputs": {
+      "model_name": "bbox/breasts_seg.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:112": {
+    "inputs": {
+      "model_name": "bbox/footDetectionForAdetailer_bbox.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:101": {
+    "inputs": {
+      "model_name": "bbox/pussy.pt"
+    },
+    "class_type": "UltralyticsDetectorProvider",
+    "_meta": {
+      "title": "UltralyticsDetectorProvider"
+    }
+  },
+  "198:197:86": {
+    "inputs": {
+      "guide_size": 384,
+      "guide_size_for": true,
+      "max_size": 512,
+      "seed": 974021680117518,
+      "steps": 28,
+      "cfg": 5.2,
+      "sampler_name": "euler_ancestral",
+      "scheduler": "normal",
+      "denoise": 0.4,
+      "feather": 10,
+      "noise_mask": true,
+      "force_inpaint": true,
+      "bbox_threshold": 0.5,
+      "bbox_dilation": 20,
+      "bbox_crop_factor": 1.8,
+      "sam_detection_hint": "center-1",
+      "sam_dilation": 0,
+      "sam_threshold": 0.93,
+      "sam_bbox_expansion": 16,
+      "sam_mask_hint_threshold": 0.7,
+      "sam_mask_hint_use_negative": "False",
+      "drop_size": 10,
+      "wildcard": "",
+      "cycle": 1,
+      "inpaint_model": false,
+      "noise_mask_feather": 20,
+      "tiled_encode": false,
+      "tiled_decode": false,
+      "image": [
+        "198:196",
+        0
+      ],
+      "model": [
+        "207:208",
+        0
+      ],
+      "clip": [
+        "207:219",
+        1
+      ],
+      "vae": [
+        "207:266",
+        2
+      ],
+      "positive": [
+        "198:259",
+        0
+      ],
+      "negative": [
+        "216",
+        0
+      ],
+      "bbox_detector": [
+        "198:197:87",
+        0
+      ]
+    },
+    "class_type": "FaceDetailer",
+    "_meta": {
+      "title": "FaceDetailer"
+    }
+  },
+  "198:259": {
+    "inputs": {
+      "text": "best quality, anime illustration, detailed skin, detailed fabric, newest, highres",
+      "clip": [
+        "207:219",
+        1
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Prompt)"
+    }
+  }
+}

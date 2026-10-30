@@ -311,7 +311,10 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `acquire_execution_lock`；生图审批仍由 `[image] require_approval` 控制。
   `generate_image` 还是 Haru 的
   exclusive tool：其他成员不会注册该工具，会在 `<tool-ownership>` 中看到
-  “图片创作/文生图归 Haru”并以 `@Haru` 转交。MCP、TTS、视频和 ComfyUI 留到后续阶段。
+  “图片创作/文生图归 Haru”并以 `@Haru` 转交。Haru 另有专属的
+  `comfyui_startup`、`comfyui_generate`、`comfyui_end`；它们同为 exclusive tools，免整机锁：启动脚本从
+  `[comfyui] startup_script` 读取，生成使用 `misc/Haru.json`，严格只连接由
+  `comfyui_startup` 托管且健康的进程，结束工具向进程组发送 SIGINT。MCP、TTS 和视频留到后续阶段。
 - 频道 turn 时间：每条 user role 频道 prompt 的前缀包含
   `message-time: YYYY-MM-DD HH:mm`，使用消息 `sent_at` 转换到本机时区。历史上下文可由
   `scripts/migrate-channel-turn-times.py` 迁移：默认 dry-run；`--apply` 前会备份各 profile

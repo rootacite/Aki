@@ -15,6 +15,7 @@ from engine.akid import (
     Turn,
 )
 from engine.aki_config import ImageGeneration
+from engine.comfyui import ComfyUIManager
 from engine.life_ledger import LifeLedger
 from engine.schedule_store import ScheduleStore
 
@@ -144,8 +145,13 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         )
         haru_names = {tool["name"] for tool in haru._external_tools()}
         self.assertIn("generate_image", haru_names)
+        self.assertIn("comfyui_startup", haru_names)
+        self.assertIn("comfyui_generate", haru_names)
+        self.assertIn("comfyui_end", haru_names)
         self.assertNotIn("generate_image", aki_names)
         self.assertNotIn("generate_image", fuyu_names)
+        self.assertNotIn("comfyui_startup", aki_names)
+        self.assertNotIn("comfyui_startup", fuyu_names)
         self.assertNotIn(
             "generate_image",
             {tool["name"] for tool in aki_configured._external_tools()},
@@ -206,6 +212,34 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("TOOL_OWNERSHIP_DENIED", text)
         self.assertIn("Haru", text)
         self.assertIn("@Haru", text)
+
+    async def test_unconfigured_comfyui_startup_reports_exact_error(self) -> None:
+        backend = DummyBackend()
+        server = make_server(self.root, profile="haru", backend=backend)
+        server.comfyui = ComfyUIManager(
+            None,
+            profile="haru",
+            state_path=self.root / "comfy-state.json",
+        )
+        server.active = Turn(
+            turn_id="turn-1",
+            conn=NullConnection(),
+            message="x",
+            include_reasoning=False,
+            client_message_id=None,
+        )
+        await server._handle_external_tool(
+            {
+                "request": {
+                    "tool_call_id": "call-1",
+                    "tool_name": "comfyui_startup",
+                    "input": {},
+                }
+            }
+        )
+        _call_id, text, is_error = backend.results[0]
+        self.assertTrue(is_error)
+        self.assertEqual(text, "用户未正确配置ComfyUI")
 
     async def test_schedule_tool_crud(self) -> None:
         server = make_server(self.root)
@@ -362,6 +396,14 @@ class ExclusiveToolTests(unittest.IsolatedAsyncioTestCase):
         server = make_server(self.root)
         health = server._health()
         self.assertIn("tool_ownership", health)
+        haru = make_server(self.root / "haru-health", profile="haru")
+        haru_health = haru._health()
+        self.assertIn("comfyui", haru_health["external_tools"])
+        self.assertFalse(haru_health["external_tools"]["comfyui"]["configured"])
+        self.assertIn(
+            "comfyui_generate",
+            haru_health["external_tools"]["exclusive_tools"],
+        )
         self.assertIn("proactive", health)
         self.assertIn("schedule", health["proactive"])
         self.assertIn("presence", health["proactive"])

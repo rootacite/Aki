@@ -157,7 +157,7 @@ Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和
 
 Haru profile 使用 `userdata3/`、`aki-haru` provider 和 7723 proxy 端口，默认模型句柄
 是 `aki-haru/gemini-3.8-flash`。她的 `[tools]` 段显式把工具收窄为 `Read,Write,Edit,ViewImage,
-Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image`，并把 `Bash/exec_command/write_stdin` 与子代理工具
+Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image,comfyui_startup,comfyui_generate,comfyui_end`，并把 `Bash/exec_command/write_stdin` 与子代理工具
 从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
 bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
@@ -167,7 +167,7 @@ Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算�
 `extra_body` 发送 `{"reasoning_effort": "low"}`。`low` 用于降低创意对话的延迟和过度
 推理；如果后续需要更深的规划，可改为 `medium` 或 `high`。上游是 Aki 共用的本机
 `cli-proxy-api`（`127.0.0.1:8317`），使用 `use_proxy = false` 直连。文生图走独立的
-MiniMax `image-01` API；TTS、视频与 ComfyUI 仍属于后续阶段，Haru 的人格和提示词会明确
+MiniMax `image-01` API 和本机 ComfyUI；TTS 与视频仍属于后续阶段，Haru 的人格和提示词会明确
 说明这些能力尚未安装。
 
 在新机器上首次创建 Haru 的 profile、agent、conversation、MemFS 和 system prompt：
@@ -853,6 +853,40 @@ aigc_watermark = false
 
 `aki.health` / `aki.status` 的 `external_tools.image_generation` 会公开是否启用、模型、输出目录、
 是否需要审批和错误；不会公开 API key。图片生成失败不会伪造路径，也不会自动发布图片。
+
+### 本地 ComfyUI（Haru）
+
+Haru 另有三个专属 external tools：`comfyui_startup`、`comfyui_generate` 和
+`comfyui_end`。它们只注册给 Haru，并由所有权检查拒绝其他成员调用。
+
+- `comfyui_startup` 使用 `[comfyui] startup_script` 拉起前台启动脚本，等待
+  `/system_stats` 就绪。未配置脚本时精确返回 `用户未正确配置ComfyUI`。
+- `comfyui_generate` **必须先调用 `comfyui_startup`**。它使用仓库内的
+  `misc/Haru.json`，只接受由当前 Haru profile 启动并跟踪的进程组，不会连接手工启动的服务。
+  `positive` 必填，`negative`、`seed`、`cfg`、`steps`、`width`、`height` 可选；省略 seed
+  时随机生成，其他省略项保留工作流原值。参数只覆盖第一段 KSampler 与 EmptyLatentImage，
+  放大和 FaceDetailer 保持工作流默认。硬超时 300 秒。
+- 生成结果通过 ComfyUI `/view` 下载，校验图片格式后写入 `[comfyui] output_dir`，默认
+  `/tmp/aki/comfyui`；工具只返回最终绝对路径、字节数、MIME、seed 和 prompt id。
+- `comfyui_generate` 默认需要用户审批（`channel=comfyui`）；startup/end 直接执行。
+- `comfyui_end` 向 startup 建立的整个进程组发送 SIGINT，超时后才用 SIGKILL 兜底。
+  akid 会把进程组和 `/proc` start ticks 持久化到 `~/.aki/comfyui/<profile>.json`，服务重启后
+  仍能恢复跟踪并避免 PID 复用误杀。
+
+配置示例：
+
+```ini
+[comfyui]
+startup_script = /home/acite/LLM/comfyui/start_patched.sh
+endpoint = http://127.0.0.1:8188
+output_dir = /tmp/aki/comfyui
+require_approval = true
+startup_timeout = 180
+shutdown_timeout = 15
+```
+
+`aki.health` / `aki.status` 的 `external_tools.comfyui` 会公开配置状态、endpoint、输出目录、
+进程 pid/pgid、启动时间、日志和审批设置；不会主动启动或停止进程。
 
 ### 摄像头
 

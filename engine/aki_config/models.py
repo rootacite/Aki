@@ -28,6 +28,7 @@ _KNOWN_SECTIONS = {
     "camera",
     "screenshot",
     "image",
+    "comfyui",
     "live",
     "schedule",
     "presence",
@@ -107,6 +108,22 @@ class ImageGeneration:
     @property
     def available(self) -> bool:
         return self.enabled and bool(self.api_key.strip())
+
+
+@dataclass(frozen=True)
+class ComfyUI:
+    """Optional managed ComfyUI process and local ComfyUI API settings."""
+
+    startup_script: str = ""
+    endpoint: str = "http://127.0.0.1:8188"
+    output_dir: str = "/tmp/aki/comfyui"
+    require_approval: bool = True
+    startup_timeout: float = 180.0
+    shutdown_timeout: float = 15.0
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.startup_script.strip())
 
 
 
@@ -228,6 +245,7 @@ class AkiConfig:
     solo_prompt_file: str = ""
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     image: ImageGeneration | None = None
+    comfyui: ComfyUI | None = None
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:

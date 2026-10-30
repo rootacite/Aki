@@ -11,6 +11,7 @@ from engine.member_profile import truncate_member_description
 from .models import (
     AkiConfig,
     ChannelIdentity,
+    ComfyUI,
     ConfigError,
     DEFAULT_AGENT_ID,
     ImageGeneration,
@@ -354,6 +355,61 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             aigc_watermark=_bool_or(parser, "image", "aigc_watermark", False),
         )
 
+    comfyui: ComfyUI | None = None
+    if parser.has_section("comfyui"):
+        endpoint = (
+            parser.get("comfyui", "endpoint", fallback="").strip()
+            or "http://127.0.0.1:8188"
+        )
+        parsed_endpoint = urlsplit(endpoint)
+        if (
+            parsed_endpoint.scheme not in ("http", "https")
+            or not parsed_endpoint.netloc
+            or parsed_endpoint.query
+            or parsed_endpoint.fragment
+        ):
+            raise ConfigError(
+                "[comfyui] endpoint must be an http(s) URL without query or fragment"
+            )
+        output_dir = (
+            parser.get("comfyui", "output_dir", fallback="").strip()
+            or "/tmp/aki/comfyui"
+        )
+        if not output_dir.startswith("/") and not output_dir.startswith("~/"):
+            raise ConfigError(
+                "[comfyui] output_dir must be absolute or start with ~/"
+            )
+        try:
+            startup_timeout = float(
+                parser.get("comfyui", "startup_timeout", fallback="180").strip()
+                or "180"
+            )
+        except ValueError as exc:
+            raise ConfigError("[comfyui] startup_timeout must be a number") from exc
+        if startup_timeout <= 0:
+            raise ConfigError("[comfyui] startup_timeout must be positive")
+        try:
+            shutdown_timeout = float(
+                parser.get("comfyui", "shutdown_timeout", fallback="15").strip()
+                or "15"
+            )
+        except ValueError as exc:
+            raise ConfigError("[comfyui] shutdown_timeout must be a number") from exc
+        if shutdown_timeout <= 0:
+            raise ConfigError("[comfyui] shutdown_timeout must be positive")
+        comfyui = ComfyUI(
+            startup_script=(
+                parser.get("comfyui", "startup_script", fallback="").strip()
+            ),
+            endpoint=endpoint.rstrip("/"),
+            output_dir=output_dir,
+            require_approval=_bool_or(
+                parser, "comfyui", "require_approval", True
+            ),
+            startup_timeout=startup_timeout,
+            shutdown_timeout=shutdown_timeout,
+        )
+
     tool_policy = ToolPolicy()
     if parser.has_section("tools"):
         toolset = parser.get("tools", "toolset", fallback="auto").strip() or "auto"
@@ -491,4 +547,5 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         solo_prompt_file=parser.get("solo", "prompt_file", fallback="").strip(),
         tool_policy=tool_policy,
         image=image,
+        comfyui=comfyui,
     )

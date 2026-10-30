@@ -298,6 +298,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         spectacle_bin=os.environ.get("AKI_SPECTACLE_BIN", "spectacle"),
         screenshot_output_dir=Path(aki.screenshot_output_dir),
         screenshot_wayland_display=aki.screenshot_wayland_display or None,
+        comfyui=aki.comfyui,
         live_context_enabled=aki.live_enabled,
         live_context_budget_tokens=clamp_budget_tokens(aki.live_budget_tokens),
         mcp_native_tools_enabled=aki.mcp_native_tools,

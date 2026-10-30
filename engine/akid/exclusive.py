@@ -37,6 +37,7 @@ from engine.tool_ownership import (
 from engine.protocol import SERVER_VERSION
 from .constants import (
     CAMERA_TOOL_NAME,
+    COMFYUI_TOOL_NAMES,
     IMAGE_GENERATION_TOOL_NAME,
     LOGGER,
     MCP_TOOL_PREFIX,
@@ -97,6 +98,11 @@ class ExclusiveMixin:
             return
         if tool_name == IMAGE_GENERATION_TOOL_NAME:
             await self._handle_image_generation_tool(
+                turn, tool_call_id, tool_name, tool_input
+            )
+            return
+        if tool_name in COMFYUI_TOOL_NAMES:
+            await self._handle_comfyui_tool(
                 turn, tool_call_id, tool_name, tool_input
             )
             return

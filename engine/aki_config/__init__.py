@@ -21,6 +21,7 @@ from .load import (
 from .models import (
     AkiConfig,
     ChannelIdentity,
+    ComfyUI,
     ConfigError,
     DEFAULT_AGENT_ID,
     DEFAULT_PROFILE,

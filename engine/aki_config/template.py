@@ -203,7 +203,7 @@ wait_for = Aki,Fuyu
 [tools]
 # Haru 的建模能力显式收窄；Bash/子代理从 schema 中移除。
 toolset = letta
-allow = Read,Grep,Glob,LS,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,wait_user,search_chat_history,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image
+allow = Read,Grep,Glob,LS,Write,Edit,ViewImage,Memory,Skill,acquire_execution_lock,wait_other,wait_user,search_chat_history,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image,comfyui_startup,comfyui_generate,comfyui_end
 deny = Bash,exec_command,write_stdin,Agent,Task,Workflow,Monitor,WatchPR,Wake
 write_roots = /tmp,~/.local/share/tmp
 
@@ -251,6 +251,15 @@ max_bytes = 33554432
 aspect_ratio = 1:1
 prompt_optimizer = true
 aigc_watermark = false
+
+[comfyui]
+# 留空时 comfyui_startup 直接返回“用户未正确配置ComfyUI”。
+startup_script =
+endpoint = http://127.0.0.1:8188
+output_dir = /tmp/aki/comfyui
+require_approval = true
+startup_timeout = 180
+shutdown_timeout = 15
 
 [live]
 enabled = true

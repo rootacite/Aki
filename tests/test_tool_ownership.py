@@ -18,7 +18,15 @@ class ToolOwnershipTests(unittest.TestCase):
     def test_exclusive_tools_are_profile_scoped(self) -> None:
         aki_names = {tool["name"] for tool in tools_for_profile("aki")}
         haru_names = {tool["name"] for tool in tools_for_profile("haru")}
-        self.assertEqual(haru_names, {"generate_image"})
+        self.assertEqual(
+            haru_names,
+            {
+                "comfyui_startup",
+                "comfyui_generate",
+                "comfyui_end",
+                "generate_image",
+            },
+        )
         self.assertNotIn("generate_image", aki_names)
         self.assertTrue(aki_names)
         self.assertEqual(tools_for_profile("fuyu"), [])
@@ -43,6 +51,14 @@ class ToolOwnershipTests(unittest.TestCase):
         image_message = ownership_denied_message("generate_image")
         self.assertIn("Haru", image_message)
         self.assertIn("@Haru", image_message)
+        for name in ("comfyui_startup", "comfyui_generate", "comfyui_end"):
+            allowed, owner = authorize_exclusive_tool("haru", name)
+            self.assertTrue(allowed)
+            self.assertEqual(owner, "Haru")
+            allowed, owner = authorize_exclusive_tool("aki", name)
+            self.assertFalse(allowed)
+            self.assertEqual(owner, "Haru")
+            self.assertIn("@Haru", ownership_denied_message(name))
 
     def test_non_owner_prompt_lists_hidden_tools_and_handoff(self) -> None:
         block = render_tool_ownership_prompt("fuyu")
@@ -53,6 +69,9 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn("[NO_REPLY]", block)
         self.assertIn("@Aki", block)
         self.assertIn("generate_image", block)
+        self.assertIn("comfyui_startup", block)
+        self.assertIn("comfyui_generate", block)
+        self.assertIn("comfyui_end", block)
         self.assertIn("@Haru", block)
         self.assertIn("image generation", block)
         self.assertIn("NEVER try to recreate", block)
@@ -67,6 +86,8 @@ class ToolOwnershipTests(unittest.TestCase):
         block = render_tool_ownership_prompt("haru")
         self.assertIn('profile="haru"', block)
         self.assertIn("generate_image", block)
+        self.assertIn("comfyui_generate", block)
+        self.assertIn("必须先使用comfyui_startup启动comfyui，才能使用", block)
         self.assertIn("You OWN these exclusive tools", block)
         self.assertIn("do not need the device-wide execution lock", block)
         self.assertIn("@Aki for schedules", block)

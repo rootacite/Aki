@@ -36,6 +36,7 @@ from engine.protocol import (
 from .constants import (
     CAMERA_TOOL_NAME,
     CAPABILITIES,
+    COMFYUI_GENERATE_TOOL_NAME,
     IMAGE_GENERATION_TOOL_NAME,
     LOGGER,
     SCREENSHOT_TOOL_NAME,
@@ -300,10 +301,12 @@ class HealthMixin:
                     self.config.image_generation
                     and self.config.image_generation.require_approval
                 ),
+                COMFYUI_GENERATE_TOOL_NAME: self.comfyui.require_approval,
             },
             "camera": self._camera_health(),
             "screenshot": self._screenshot_health(),
             "image_generation": self._image_generation_health(),
+            "comfyui": self.comfyui.status(),
         }
 
 

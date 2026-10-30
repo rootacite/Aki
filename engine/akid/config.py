@@ -7,7 +7,7 @@ from dataclasses import (
     field,
 )
 from pathlib import Path
-from engine.aki_config import ToolPolicy
+from engine.aki_config import ComfyUI, ToolPolicy
 from engine.layer_process import default_layer_binary
 from engine.avatar import default_avatar_path
 from engine.channel import (
@@ -99,6 +99,7 @@ class GatewayConfig:
     screenshot_output_dir: Path | None = None
     screenshot_wayland_display: str | None = None
     image_generation: ImageGeneration | None = None
+    comfyui: ComfyUI | None = None
     live_context_enabled: bool = True
     live_context_budget_tokens: int = DEFAULT_LIVE_CONTEXT_BUDGET_TOKENS
     zsh_history_path: Path | None = None
