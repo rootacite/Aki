@@ -144,8 +144,8 @@ class SoloModeTests(unittest.TestCase):
             user_name="Master",
             solo=True,
         )
-        self.assertIn("直接获取整机执行锁", turn)
-        self.assertIn("不需要Master先 @ 指派", turn)
+        self.assertIn("MAY acquire the device-wide execution lock directly", turn)
+        self.assertIn("does NOT need to @mention you first", turn)
 
     def test_old_framework_tags_are_migrated(self) -> None:
         old = (

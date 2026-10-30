@@ -409,7 +409,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   turn overlay。**
   - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
   - stable system overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
-    <channel-identity> → <channel-context roster> → <format-guard>`。
+    <channel-identity> → <channel-context roster>`。
+  - `<format-guard>` 规则已固化在 `prompts/<profile>-system.md` 的 `# Format Guard` 段，
+    不再作为 per-turn overlay 注入。
   - per-turn user prefix：`<turn-control> → <channel-transcript> → <solo-mode> →
     <solo-memories> → <solo-transcript> → <live-context>`，临时拼在当前 user role
     消息开头，不写回持久消息。

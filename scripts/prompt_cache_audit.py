@@ -48,7 +48,7 @@ STABLE_TAGS = (
     "<channel-wake-routing",
     "<channel-identity",
     "<channel-context>",
-    "<format-guard",
+    "# Format Guard",
 )
 
 

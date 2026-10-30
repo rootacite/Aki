@@ -240,31 +240,37 @@ class ChannelContextTests(unittest.TestCase):
     def test_guidance_covers_self_other_and_no_mentions(self) -> None:
         self_member = self.members()[0]
         policy = render_channel_policy(user_name="Master")
-        self.assertIn("@名字", policy)
-        self.assertIn("Master不在成员列表中", policy)
+        self.assertIn("`@Name `", policy)
+        self.assertIn("Master is NOT in the member list", policy)
         self.assertIn(
-            "只有Master的明确指名才算被指名；被非Master指名不算被指名", policy
+            "ONLY an explicit mention from Master counts as addressing you", policy
         )
         self.assertNotIn("wait_user(timeout_s)", policy)
 
         self_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
-        self.assertIn("Master在消息中点名了你，请直接回复。", self_text)
+        self.assertIn(
+            "Master explicitly mentioned you in this message. Reply directly.",
+            self_text,
+        )
         self.assertNotIn("<reply-target>", self_text)
         other_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
-        self.assertIn("点名了其他成员，未点名你", other_text)
+        self.assertIn("mentions other members, NOT you", other_text)
         plain_text = render_turn_control(
             self_member=self_member, members=self.members(), message="大家好"
         )
-        self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain_text)
-        self.assertNotIn("没有提到你", plain_text)
+        self.assertIn(
+            "This is a group-chat message. You may decide whether to reply.",
+            plain_text,
+        )
+        self.assertNotIn("did not mention you", plain_text)
         self.assertIn('remaining="3"', plain_text)
         self.assertIn('resets="user-message"', plain_text)
         self.assertIn('allowed="true"', plain_text)
-        self.assertIn("可调用 `wait_user`", plain_text)
+        self.assertIn("MAY call `wait_user`", plain_text)
 
         agent_text = render_turn_control(
             self_member=self_member,
@@ -272,10 +278,10 @@ class ChannelContextTests(unittest.TestCase):
             message="@秋 帮我改一下这个文件",
             from_agent=True,
         )
-        self.assertIn("被非Master指名不算被指名", agent_text)
-        self.assertIn("不要试图获取执行锁", agent_text)
+        self.assertIn("does NOT count as addressing you", agent_text)
+        self.assertIn("Do NOT try to acquire the execution lock", agent_text)
         self.assertIn('allowed="false"', agent_text)
-        self.assertIn("禁止调用 `wait_user`", agent_text)
+        self.assertIn("Calling `wait_user` is FORBIDDEN", agent_text)
 
     def test_policy_and_turn_are_system_prompt_blocks(self) -> None:
         members = self.members()
@@ -288,7 +294,7 @@ class ChannelContextTests(unittest.TestCase):
         )
         self.assertTrue(policy.startswith(f"<{CHANNEL_POLICY_TAG}"))
         self.assertIn(
-            "若判断本轮无需回复，直接输出 [NO_REPLY]",
+            "If no reply is needed this turn, output [NO_REPLY]",
             policy,
         )
         self.assertTrue(turn.startswith(f"<{TURN_CONTROL_TAG}"))
@@ -364,12 +370,14 @@ class ChannelContextTests(unittest.TestCase):
             self_member=members[0], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="true">', aki)
-        self.assertIn("负责确认执行者的唯一成员", aki)
+        self.assertIn(
+            "YOU are the only member responsible for confirming the executor", aki
+        )
         fuyu = render_turn_control(
             self_member=members[1], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="false">', fuyu)
-        self.assertIn("不要尝试执行", fuyu)
+        self.assertIn("do NOT attempt to execute it", fuyu)
         mentioned = render_turn_control(
             self_member=members[1], members=members, message="@Fuyu do this"
         )
@@ -390,7 +398,7 @@ class ChannelContextTests(unittest.TestCase):
             self_member=member, members=[member], message="do this"
         )
         self.assertNotIn("<execution-ownership", text)
-        self.assertIn("唯一在线成员", text)
+        self.assertIn("You are the only member online", text)
         self.assertIn(
             "acquire_execution_lock",
             render_channel_policy(user_name="Master"),
@@ -508,7 +516,7 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn('remaining="0"', blocked)
         self.assertIn('limit="3"', blocked)
         self.assertIn("[NO_REPLY]", blocked)
-        self.assertIn("主动启动次数已耗尽", blocked)
+        self.assertIn("agent-initiated reply budget is exhausted", blocked)
 
     def test_descriptions_are_escaped_limited_and_marked_untrusted(self) -> None:
         members = self.members()

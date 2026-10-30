@@ -1429,7 +1429,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         overlay = "\n\n".join([*stable, *mid])
         self.assertIn("<channel-policy", overlay)
         self.assertIn(
-            "你的回复会被自动发布，不要通过工具发送文字消息。若判断本轮无需回复，直接输出 [NO_REPLY]。",
+            "Your reply will be published automatically. Do NOT send text through "
+            "tools. If no reply is needed this turn, output [NO_REPLY].",
             overlay,
         )
         self.assertNotIn("wake-reminder:", prompt)
@@ -1552,7 +1553,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "<channel-wake-routing",
             "<channel-identity",
             "<channel-context>",
-            "<format-guard",
         ):
             self.assertIn(opening, stable_text)
         for opening in (
@@ -3345,7 +3345,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             f'<execution-ownership responder="{legacy_member_id("Aki")}" self="true">',
             prompt,
         )
-        self.assertIn("负责确认执行者的唯一成员", prompt)
+        self.assertIn(
+            "YOU are the only member responsible for confirming the executor",
+            prompt,
+        )
 
     async def test_single_channel_member_may_acquire_lock_without_mention(self) -> None:
         await self.start_server()
@@ -4273,9 +4276,11 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             message="hello everyone",
             user_name=server.config.username,
         )
-        self.assertIn("这是一条群聊消息；你可自行决定是否回复。", plain)
+        self.assertIn(
+            "This is a group-chat message. You may decide whether to reply.", plain
+        )
         policy = render_channel_policy(user_name=server.config.username)
-        self.assertIn("Master不在成员列表中", policy)
+        self.assertIn("Master is NOT in the member list", policy)
         self.assertNotIn("<wake-routing>", plain)
         self.assertNotIn("不希望其他成员注意到这条消息", plain)
         prompt = server._channel_prompt("alice", "alice-1", "hello everyone")
@@ -4292,16 +4297,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             message="@冬 hello",
             user_name=server.config.username,
         )
-        self.assertIn("点名了其他成员，未点名你", other)
+        self.assertIn("mentions other members, NOT you", other)
         own = render_turn_control(
             self_member=server._channel_self_member(),
             members=server._channel_member_views(),
             message="@秋 hello",
             user_name=server.config.username,
         )
-        self.assertIn("Master在消息中点名了你，请直接回复。", own)
+        self.assertIn(
+            "Master explicitly mentioned you in this message. Reply directly.", own
+        )
         self.assertNotIn("<reply-target>", own)
-        self.assertNotIn("未点名你", own)
+        self.assertNotIn("mentions other members, NOT you", own)
         await server._on_channel_control(
             TextEnvelope(
                 sender="Fuyu",
@@ -4716,7 +4723,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn('remaining="2"', prompt)
         self.assertIn('limit="3"', prompt)
-        self.assertIn("每产生一次对外可见的回复", prompt)
+        self.assertIn(
+            "Each externally visible reply consumes 1 agent-initiated reply", prompt
+        )
 
     async def test_channel_status_metadata_is_complete(self) -> None:
         fake_channel = FakeChannel()
@@ -5935,12 +5944,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 overlay = overlay_text(server)
                 self.assertEqual(overlay.count("<live-context"), 1)
                 self.assertIn("echo channel", overlay)
-                self.assertIn("<format-guard", overlay)
-                self.assertLess(
-                    overlay.index("<format-guard"),
-                    overlay.index("<live-context"),
-                )
-                self.assertIn("不要使用 Markdown 标题", overlay)
+                self.assertNotIn("<format-guard", overlay)
                 self.assertNotIn("<live-context", system)
         finally:
             for sock in sockets:

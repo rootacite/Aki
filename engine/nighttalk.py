@@ -88,9 +88,10 @@ def render_nighttalk_prompt(username: str) -> str:
 def render_nighttalk_overlay() -> str:
     return (
         '<night-talk version="1">\n'
-        "这是夜话。本轮只能调用只读工具，任何情况下都不能获取执行锁，"
-        "免锁工具和专属写入也不能调用。\n"
-        "若没有想说的，直接输出 [NO_REPLY]。\n"
+        "This is night talk. This turn MAY call ONLY read-only tools. Under NO "
+        "circumstances may you acquire the execution lock, and you MUST NOT call "
+        "lock-exempt tools or exclusive write tools.\n"
+        "If you have nothing to say, output [NO_REPLY].\n"
         "</night-talk>"
     )
 

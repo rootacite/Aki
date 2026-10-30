@@ -28,7 +28,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-wake-routing></channel-wake-routing>\n"
             "<channel-identity></channel-identity>\n"
             "<channel-context></channel-context>\n"
-            "<format-guard></format-guard>"
+            "# Format Guard"
         )
         payloads = [
             (
@@ -60,7 +60,7 @@ class PromptCacheAuditTests(unittest.TestCase):
                         "<channel-wake-routing></channel-wake-routing>"
                         "<channel-identity></channel-identity>"
                         "<channel-context></channel-context>"
-                        "<format-guard></format-guard>"
+                        "# Format Guard"
                         "<turn-control></turn-control>"
                     ),
                 }
@@ -77,7 +77,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-wake-routing></channel-wake-routing>"
             "<channel-identity></channel-identity>"
             "<channel-context></channel-context>"
-            "<format-guard></format-guard>"
+            "# Format Guard"
             "<turn-control></turn-control>"
         )
         payload = {
@@ -88,7 +88,7 @@ class PromptCacheAuditTests(unittest.TestCase):
         }
         normalized = audit._normalize_debug_payload(payload)
         self.assertEqual(normalized["messages"][0]["role"], "system")
-        self.assertIn("<format-guard", normalized["messages"][0]["content"])
+        self.assertIn("# Format Guard", normalized["messages"][0]["content"])
         self.assertNotIn("<turn-control", normalized["messages"][0]["content"])
         self.assertIn("<turn-control", normalized["messages"][1]["content"])
 
@@ -100,7 +100,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-wake-routing></channel-wake-routing>"
             "<channel-identity></channel-identity>"
             "<channel-context></channel-context>"
-            "<format-guard></format-guard>"
+            "# Format Guard"
         )
         payload = {
             "messages": [

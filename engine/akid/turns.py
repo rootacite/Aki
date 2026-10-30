@@ -20,17 +20,6 @@ from .constants import (
 )
 
 
-def render_format_guard(user_name: str) -> str:
-    return (
-        '<format-guard version="1">\n'
-        "默认用自然、口语化的对话体回复。不要使用 Markdown 标题、粗体标签、表格或工作报告模板；"
-        f"不要用“第一步/第二步”式的汇报结构。即使 {user_name or 'Master'} 明确要求“要点”或“分步骤”，"
-        "也用简短自然段或朴素编号表达，保持聊天语气，不要写成汇报文档。"
-        "分析、技术解释和总结同样适用。"
-        f"回复以人类聊天时使用的自然的短句为主，{user_name or 'Master'} 未明确要求时，不长篇分析。\n"
-        "</format-guard>"
-    )
-
 class TurnsMixin:
 
     # ------------------------------------------------------------------ turns
@@ -172,7 +161,6 @@ class TurnsMixin:
                 self_member=self._channel_self_member(),
                 members=self._channel_member_views(),
             ),
-            self._format_guard_block(),
         ]
         mid_parts: list[str] = []
         exclude_seq = (
@@ -213,10 +201,6 @@ class TurnsMixin:
         if turn.nighttalk:
             stable_parts.append(render_nighttalk_overlay())
         return stable_parts, mid_parts
-
-
-    def _format_guard_block(self) -> str:
-        return render_format_guard(self.config.username)
 
 
     async def _update_busy_turn_overlay(self, turn: Turn) -> None:

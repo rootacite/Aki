@@ -54,22 +54,22 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn("@Aki", block)
         self.assertIn("generate_image", block)
         self.assertIn("@Haru", block)
-        self.assertIn("图片创作/文生图", block)
-        self.assertIn("never try to recreate", block)
+        self.assertIn("image generation", block)
+        self.assertIn("NEVER try to recreate", block)
 
     def test_owner_prompt_has_self_budget_guard(self) -> None:
         block = render_tool_ownership_prompt("aki")
         self.assertIn('profile="aki"', block)
-        self.assertIn("Never use aki_zero_reply_budget on yourself", block)
+        self.assertIn("NEVER use aki_zero_reply_budget on yourself", block)
         self.assertIn("Fuyu", block)
 
     def test_haru_owner_prompt_has_image_tool_without_lock(self) -> None:
         block = render_tool_ownership_prompt("haru")
         self.assertIn('profile="haru"', block)
         self.assertIn("generate_image", block)
-        self.assertIn("You own these exclusive tools", block)
+        self.assertIn("You OWN these exclusive tools", block)
         self.assertIn("do not need the device-wide execution lock", block)
-        self.assertIn("@Aki for 日程与提醒", block)
+        self.assertIn("@Aki for schedules", block)
 
     def test_block_is_idempotent_and_precedes_channel_blocks(self) -> None:
         block = render_tool_ownership_prompt("fuyu")

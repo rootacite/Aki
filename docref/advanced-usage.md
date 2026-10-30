@@ -244,7 +244,7 @@ live context）都由 akid 在请求前作为 turn overlay 注入。脚本会先
 
 编译后模型看到的固定顺序是 `base → core memory → stable system overlay → messages`。
 stable system overlay 内部顺序为 `tool ownership → channel policy →
-wake routing → identity → roster → format guard`；易变 per-turn tail 为
+wake routing → identity → roster`；易变 per-turn tail 为
 `turn control → transcript → solo mode → solo memories → solo transcript → live context`：
 
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
@@ -258,7 +258,8 @@ wake routing → identity → roster → format guard`；易变 per-turn tail �
    使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
 6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 作为 overlay 注入。
 7. `<channel-context>`：当前在线成员 roster，作为稳定 system overlay 注入。
-8. `<format-guard>`：Aki、Fuyu、Haru 全部启用，使用各自 username，作为稳定 system overlay 注入。
+8. `# Format Guard`：已固化在 Aki、Fuyu、Haru 各自的静态 base prompt 中，使用各自
+   username 渲染，不再作为 per-turn overlay 注入。
 9. `<turn-control>`：当前频道 turn 的 guidance、initiation budget、execution responder、
    `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
 10. `<channel-transcript>`：只包含历史消息，不包含当前消息和 `new` 标记；临时拼在当前 user role

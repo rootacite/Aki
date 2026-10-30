@@ -1,19 +1,32 @@
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
-from engine.akid.turns import render_format_guard
 from engine.live_context import ChannelMember, render_turn_control
+
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class PromptLayoutTests(unittest.TestCase):
-    def test_format_guard_is_enabled_for_all_profiles(self) -> None:
-        for user_name in ("Master", "主人", "哥哥"):
-            block = render_format_guard(user_name)
-            self.assertIn('<format-guard version="1">', block)
-            self.assertIn(user_name, block)
-            self.assertIn("回复以人类聊天时使用的自然的短句为主", block)
-            self.assertIn("未明确要求时，不长篇分析", block)
+    def test_format_guard_lives_in_all_base_prompts(self) -> None:
+        for profile, user_name in (
+            ("aki", "Master"),
+            ("fuyu", "Master"),
+            ("haru", "哥哥"),
+        ):
+            text = (ROOT / "prompts" / f"{profile}-system.md").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn("# Format Guard", text)
+            self.assertIn(
+                "By default, do NOT use Markdown headings, bold tags, tables",
+                text,
+            )
+            self.assertIn(user_name, text)
+            self.assertIn(
+                "Do NOT launch into a lengthy, detailed analysis", text
+            )
 
     def test_turn_control_contains_control_fields_but_no_message_copy(self) -> None:
         member = ChannelMember(id="aki", name="Aki", is_self=True)
