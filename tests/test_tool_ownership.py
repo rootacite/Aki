@@ -97,6 +97,17 @@ class ToolOwnershipTests(unittest.TestCase):
         seed = tools["comfyui_generate"]["parameters"]["properties"]["seed"]
         self.assertEqual(seed["maximum"], 9007199254740991)
 
+    def test_comfyui_generate_description_requires_tag_first_prompt(self) -> None:
+        tools = {tool["name"]: tool for tool in tools_for_profile("haru")}
+        generate = tools["comfyui_generate"]
+        self.assertIn("SDXL/Illustrious", generate["description"])
+        self.assertIn("Danbooru-style", generate["description"])
+        self.assertIn("tag-first", generate["description"])
+        self.assertIn("may be interleaved", generate["description"])
+        positive = generate["parameters"]["properties"]["positive"]["description"]
+        self.assertIn("comma-separated", positive)
+        self.assertIn("may be interleaved", positive)
+
     def test_block_is_idempotent_and_precedes_channel_blocks(self) -> None:
         block = render_tool_ownership_prompt("fuyu")
         system = (

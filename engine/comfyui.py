@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import copy
 import json
+import logging
 import os
 import secrets
 import shlex
@@ -24,11 +25,14 @@ from engine.aki_config import ComfyUI, state_dir
 from engine.tokifactor import detect_image_mime
 
 
+LOGGER = logging.getLogger("akid.comfyui")
+
 WORKFLOW_PATH = Path(__file__).resolve().parents[1] / "misc" / "Haru.json"
 DEFAULT_ENDPOINT = "http://127.0.0.1:8188"
 DEFAULT_OUTPUT_DIR = "/tmp/aki/comfyui"
 DEFAULT_STARTUP_TIMEOUT = 180.0
 DEFAULT_SHUTDOWN_TIMEOUT = 15.0
+DEFAULT_IDLE_TIMEOUT = 1800.0
 GENERATION_TIMEOUT = 300.0
 POLL_INTERVAL = 0.5
 MAX_HTTP_JSON_BYTES = 8 * 1024 * 1024
@@ -542,7 +546,16 @@ class ComfyUIManager:
         self._state_endpoint: str | None = None
         self._log_path: Path | None = None
         self._started_at: str | None = None
+        self._idle_timeout = (
+            max(0.0, float(config.idle_timeout))
+            if config is not None
+            else DEFAULT_IDLE_TIMEOUT
+        )
+        self._last_activity: float | None = None
+        self._idle_task: asyncio.Task[None] | None = None
         self._load_state()
+        if _group_alive(self._pgid):
+            self._activate_idle_monitor()
 
     @property
     def endpoint(self) -> str:
@@ -627,8 +640,81 @@ class ComfyUIManager:
         self._state_endpoint = None
         self._started_at = None
         self._log_path = None
+        self._last_activity = None
         with contextlib.suppress(FileNotFoundError):
             self.state_path.unlink()
+
+    def _activate_idle_monitor(self) -> None:
+        if self._idle_timeout <= 0 or not _group_alive(self._pgid):
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        if self._last_activity is None:
+            self._last_activity = loop.time()
+        task = self._idle_task
+        if task is None or task.done():
+            self._idle_task = loop.create_task(
+                self._idle_monitor(), name=f"comfyui-idle-{self.profile}"
+            )
+
+    def _mark_activity(self) -> None:
+        self._last_activity = asyncio.get_running_loop().time()
+        self._activate_idle_monitor()
+
+    async def _cancel_idle_monitor(self) -> None:
+        task = self._idle_task
+        self._idle_task = None
+        if task is None or task is asyncio.current_task():
+            return
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await task
+
+    async def _idle_monitor(self) -> None:
+        try:
+            while True:
+                timeout = self._idle_timeout
+                if timeout <= 0 or not _group_alive(self._pgid):
+                    return
+                loop = asyncio.get_running_loop()
+                last = self._last_activity
+                if last is None:
+                    last = loop.time()
+                    self._last_activity = last
+                delay = last + timeout - loop.time()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                    continue
+                async with self._lock:
+                    if not _group_alive(self._pgid):
+                        return
+                    last = self._last_activity
+                    if last is None:
+                        last = loop.time()
+                        self._last_activity = last
+                    if loop.time() - last < timeout:
+                        continue
+                    pgid = self._pgid
+                    pid = self._leader_pid
+                    await self._stop_locked()
+                    LOGGER.info(
+                        "ComfyUI stopped after idle timeout profile=%s pid=%s "
+                        "pgid=%s timeout=%ss",
+                        self.profile,
+                        pid,
+                        pgid,
+                        timeout,
+                    )
+                    return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("ComfyUI idle monitor failed profile=%s", self.profile)
+        finally:
+            if self._idle_task is asyncio.current_task():
+                self._idle_task = None
 
     async def _healthy(self) -> bool:
         return await asyncio.to_thread(_probe_health, self.endpoint)
@@ -648,6 +734,7 @@ class ComfyUIManager:
             "started_at": self._started_at,
             "log_path": str(self._log_path) if self._log_path else None,
             "state_path": str(self.state_path),
+            "idle_timeout": self._idle_timeout,
         }
 
     async def start(self) -> dict[str, Any]:
@@ -656,6 +743,7 @@ class ComfyUIManager:
         async with self._lock:
             if _group_alive(self._pgid):
                 if await self._healthy():
+                    self._mark_activity()
                     return {
                         "status": "already_running",
                         "pid": self._leader_pid,
@@ -712,6 +800,7 @@ class ComfyUIManager:
                 while True:
                     if await self._healthy():
                         self._save_state(endpoint=self.config.endpoint, log_path=log_path)
+                        self._mark_activity()
                         return {
                             "status": "started",
                             "pid": self._leader_pid,
@@ -781,28 +870,36 @@ class ComfyUIManager:
             return "SIGKILL"
         return "SIGINT"
 
+    async def _stop_locked(self) -> dict[str, Any]:
+        if not _group_alive(self._pgid):
+            self._clear_state()
+            raise ComfyUIError(
+                "ComfyUI is not running from comfyui_startup"
+            )
+        pgid = self._pgid
+        pid = self._leader_pid
+        used_signal = await self._stop_group(graceful=True)
+        if _group_alive(pgid):
+            raise ComfyUIError("ComfyUI process group did not stop")
+        if self._proc is not None:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(self._proc.wait(), timeout=1.0)
+        self._clear_state()
+        return {
+            "status": "stopped",
+            "pid": pid,
+            "pgid": pgid,
+            "signal": used_signal,
+        }
+
     async def stop(self) -> dict[str, Any]:
         async with self._lock:
-            if not _group_alive(self._pgid):
-                self._clear_state()
-                raise ComfyUIError(
-                    "ComfyUI is not running from comfyui_startup"
-                )
-            pgid = self._pgid
-            pid = self._leader_pid
-            used_signal = await self._stop_group(graceful=True)
-            if _group_alive(pgid):
-                raise ComfyUIError("ComfyUI process group did not stop")
-            if self._proc is not None:
-                with contextlib.suppress(Exception):
-                    await asyncio.wait_for(self._proc.wait(), timeout=1.0)
-            self._clear_state()
-            return {
-                "status": "stopped",
-                "pid": pid,
-                "pgid": pgid,
-                "signal": used_signal,
-            }
+            result = await self._stop_locked()
+        await self._cancel_idle_monitor()
+        return result
+
+    async def close(self) -> None:
+        await self._cancel_idle_monitor()
 
     async def _require_running(self) -> None:
         if not _group_alive(self._pgid):
@@ -820,8 +917,9 @@ class ComfyUIManager:
             render_workflow, self.workflow_path, arguments
         )
         async with self._lock:
-            await self._require_running()
+            self._mark_activity()
             try:
+                await self._require_running()
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
                         _execute_workflow,
@@ -836,4 +934,6 @@ class ComfyUIManager:
                 raise ComfyUIError(
                     f"ComfyUI generation timed out after {GENERATION_TIMEOUT:g}s"
                 ) from exc
+            finally:
+                self._mark_activity()
         return {**result, "seed": seed, "parameters": applied}

@@ -260,6 +260,7 @@ output_dir = /tmp/aki/comfyui
 require_approval = true
 startup_timeout = 180
 shutdown_timeout = 15
+idle_timeout = 1800
 
 [live]
 enabled = true

@@ -397,6 +397,15 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             raise ConfigError("[comfyui] shutdown_timeout must be a number") from exc
         if shutdown_timeout <= 0:
             raise ConfigError("[comfyui] shutdown_timeout must be positive")
+        try:
+            idle_timeout = float(
+                parser.get("comfyui", "idle_timeout", fallback="1800").strip()
+                or "1800"
+            )
+        except ValueError as exc:
+            raise ConfigError("[comfyui] idle_timeout must be a number") from exc
+        if idle_timeout < 0:
+            raise ConfigError("[comfyui] idle_timeout must be zero or positive")
         comfyui = ComfyUI(
             startup_script=(
                 parser.get("comfyui", "startup_script", fallback="").strip()
@@ -408,6 +417,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             ),
             startup_timeout=startup_timeout,
             shutdown_timeout=shutdown_timeout,
+            idle_timeout=idle_timeout,
         )
 
     tool_policy = ToolPolicy()

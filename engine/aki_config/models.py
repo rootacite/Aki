@@ -120,6 +120,7 @@ class ComfyUI:
     require_approval: bool = True
     startup_timeout: float = 180.0
     shutdown_timeout: float = 15.0
+    idle_timeout: float = 1800.0
 
     @property
     def configured(self) -> bool:

@@ -368,6 +368,35 @@ finally:
         self.assertIsNone(manager._pgid)
         self.assertFalse((self.root / "state.json").exists())
 
+    async def test_idle_timeout_stops_the_process_group(self) -> None:
+        port = free_port()
+        script = self._server_script()
+        config = ComfyUI(
+            startup_script=f"{sys.executable} {script} {port}",
+            endpoint=f"http://127.0.0.1:{port}",
+            output_dir=str(self.root / "images"),
+            startup_timeout=5,
+            shutdown_timeout=5,
+            idle_timeout=0.4,
+        )
+        state_path = self.root / "state.json"
+        manager = ComfyUIManager(
+            config, profile="haru", state_path=state_path, workflow_path=WORKFLOW_PATH
+        )
+        result = await manager.start()
+        pgid = result["pgid"]
+        self.assertTrue(_group_alive(pgid))
+
+        deadline = asyncio.get_running_loop().time() + 5
+        while (
+            (_group_alive(pgid) or state_path.exists())
+            and asyncio.get_running_loop().time() < deadline
+        ):
+            await asyncio.sleep(0.05)
+
+        self.assertFalse(_group_alive(pgid))
+        self.assertFalse(state_path.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -72,6 +72,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertEqual(config.comfyui.endpoint, "http://127.0.0.1:8188")
         self.assertEqual(config.comfyui.output_dir, "/tmp/aki/comfyui")
         self.assertTrue(config.comfyui.require_approval)
+        self.assertEqual(config.comfyui.idle_timeout, 1800)
         route = next(
             model for model in config.models if model.model_id == "gemini-3.8-flash"
         )

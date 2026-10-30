@@ -860,7 +860,8 @@ Haru 另有三个专属 external tools：`comfyui_startup`、`comfyui_generate` 
 `comfyui_end`。它们只注册给 Haru，并由所有权检查拒绝其他成员调用。
 
 - `comfyui_startup` 使用 `[comfyui] startup_script` 拉起前台启动脚本，等待
-  `/system_stats` 就绪。未配置脚本时精确返回 `用户未正确配置ComfyUI`。
+  `/system_stats` 就绪。未配置脚本时精确返回 `用户未正确配置ComfyUI`。启动后若连续
+  `idle_timeout` 秒没有 startup/generate 活动，会自动停止整个进程组；默认 1800 秒。
 - `comfyui_generate` **必须先调用 `comfyui_startup`**。它使用仓库内的
   `misc/Haru.json`，只接受由当前 Haru profile 启动并跟踪的进程组，不会连接手工启动的服务。
   `positive` 必填，`negative`、`seed`、`cfg`、`steps`、`width`、`height` 可选；省略 seed
@@ -883,6 +884,7 @@ output_dir = /tmp/aki/comfyui
 require_approval = true
 startup_timeout = 180
 shutdown_timeout = 15
+idle_timeout = 1800
 ```
 
 `aki.health` / `aki.status` 的 `external_tools.comfyui` 会公开配置状态、endpoint、输出目录、

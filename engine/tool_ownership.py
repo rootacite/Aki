@@ -259,7 +259,8 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
             "in the Haru profile [comfyui] section. comfyui_generate cannot be used "
             "until this tool has started ComfyUI successfully. If the profile does "
             "not configure a startup script, this tool returns exactly: "
-            "用户未正确配置ComfyUI. Exclusive to Haru."
+            "用户未正确配置ComfyUI. The managed process stops automatically after "
+            "the configured idle timeout (1800 seconds by default). Exclusive to Haru."
         ),
         parameters=_parameters({}),
         timeout_ms=190_000,
@@ -269,15 +270,29 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
         owner_profile="haru",
         label="Generate image with ComfyUI",
         description=(
-            "Generate an image with Haru's local ComfyUI workflow (misc/Haru.json). "
-            "必须先使用comfyui_startup启动comfyui，才能使用。This tool only accepts a "
-            "ComfyUI process started and tracked by comfyui_startup. positive is "
-            "required; negative, seed, cfg, steps, width and height are optional. "
-            "When seed is omitted a random seed is used; other omitted values keep "
-            "the workflow defaults. Generation has a hard 300 second timeout. On "
-            "success it returns the absolute path of the saved final image, plus "
-            "size, MIME, seed and prompt id. It may ask for user approval. Exclusive "
-            "to Haru and does not require the execution lock."
+            "Generate an image with Haru's local ComfyUI workflow (misc/Haru.json), "
+            "which uses the SDXL/Illustrious checkpoint waiIllustriousSDXL_v170 plus "
+            "the Asumi LoRA. 必须先使用comfyui_startup启动comfyui，才能使用。This tool "
+            "only accepts a ComfyUI process started and tracked by comfyui_startup. "
+            "positive is required; negative, seed, cfg, steps, width and height are "
+            "optional. When seed is omitted a random seed is used; other omitted "
+            "values keep the workflow defaults. Generation has a hard 300 second "
+            "timeout. On success it returns the absolute path of the saved final "
+            "image, plus size, MIME, seed and prompt id. It may ask for user approval. "
+            "Exclusive to Haru and does not require the execution lock.\n\n"
+            "PROMPT FORMAT: This is an SDXL/Illustrious model, so the prompt should be "
+            "tag-first. Use a comma-separated list of lowercase Danbooru-style tags "
+            "as the backbone, one concept per tag, with underscores for multi-word "
+            "tags. Natural-language short or long sentences may be interleaved "
+            "between tags to clarify mood, relationships, action, or scene detail; "
+            "keep tags as the primary syntax rather than relying on prose alone. "
+            "Lead with subject/count, then character features, hair and eyes, "
+            "clothing, expression, pose, framing, background, lighting, and style. "
+            "Example: '1girl, solo, silver_hair, twin_tails, blue_hoodie, "
+            "headphones_around_neck, smile, looking_at_viewer, upper_body, "
+            "standing under cherry blossoms, soft morning light, detailed_background'. "
+            "Use the same tag-first style for negative prompts, for example: "
+            "'lowres, bad_anatomy, bad_hands, extra_digits, watermark, text'."
         ),
         parameters=_parameters(
             {
@@ -285,12 +300,22 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 8000,
-                    "description": "Required positive prompt.",
+                    "description": (
+                        "Required positive prompt. Use comma-separated lowercase "
+                        "Danbooru/SDXL tags as the backbone; natural-language short or "
+                        "long phrases may be interleaved for nuance. Example: "
+                        "'1girl, solo, silver_hair, smile, upper_body, standing under "
+                        "cherry blossoms, soft morning light'."
+                    ),
                 },
                 "negative": {
                     "type": "string",
                     "maxLength": 8000,
-                    "description": "Optional negative prompt.",
+                    "description": (
+                        "Optional negative prompt, tag-first with optional short "
+                        "phrases. Example: 'lowres, bad_anatomy, bad_hands, "
+                        "extra_digits, watermark, text'."
+                    ),
                 },
                 "seed": {
                     "type": "integer",
