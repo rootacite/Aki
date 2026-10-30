@@ -92,6 +92,11 @@ class ToolOwnershipTests(unittest.TestCase):
         self.assertIn("do not need the device-wide execution lock", block)
         self.assertIn("@Aki for schedules", block)
 
+    def test_comfyui_seed_maximum_is_json_safe(self) -> None:
+        tools = {tool["name"]: tool for tool in tools_for_profile("haru")}
+        seed = tools["comfyui_generate"]["parameters"]["properties"]["seed"]
+        self.assertEqual(seed["maximum"], 9007199254740991)
+
     def test_block_is_idempotent_and_precedes_channel_blocks(self) -> None:
         block = render_tool_ownership_prompt("fuyu")
         system = (

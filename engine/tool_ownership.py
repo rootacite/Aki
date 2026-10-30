@@ -295,7 +295,7 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
                 "seed": {
                     "type": "integer",
                     "minimum": 0,
-                    "maximum": 18446744073709551615,
+                    "maximum": 9007199254740991,
                     "description": "Optional seed; a random seed is used when omitted.",
                 },
                 "cfg": {
