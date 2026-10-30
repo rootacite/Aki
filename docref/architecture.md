@@ -121,24 +121,27 @@ bubblewrap 仍作为底层写入边界。
 username 渲染；`^` 排除规则和“没有显式成员点名、只回复用户时使用 `@<username>`”的提示也属于这个 overlay 块，不再在每轮 user 消息或
 `<turn-control>` 中重复。
 
-`<channel-policy>` 保存静态频道规则并作为稳定 system overlay 注入；`<turn-control>` 保存当前
+`<channel-policy>` 保存静态频道规则并作为稳定 system overlay 注入；`# turn-control` 保存当前
 turn 的 guidance、initiation budget、execution responder、`wait_other` 目标和 `wait_user`
 使用提示，临时拼在当前 user role 消息开头，不复制消息正文。bridge 模式下静态 overlay 通过
 `system_append`、易变 tail 通过 `user_message_prefix` 进入实际 API 请求，不写回 agent record
-或 `system-prompt.json`，也不写入持久 user message。akid 只接受带
+或 `system-prompt.json`，也不写入持久 user message。user-role overlay 固定为
+`# solo-memories → # channel-transcript → # solo-mode → # solo-transcript →
+# live-context / # runtime-context → # turn-control → # format-guard`，其中 `# format-guard`
+永远最后；关闭桌面实况时仍由 `# runtime-context` 提供 MemFS 与 MCP 信息。akid 只接受带
 `aki_bridge` 的定制 Letta；
 否则启动直接报错退出。bridge 模式下
 `<channel-context>` 成员表作为稳定 system overlay 注入实际 API 请求，不写入持久 user message。
 运行时不再写 prompt journal；`scripts/restore-channel-prompts.py`
 和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
 
-最近频道文本会作为频道 turn 的 `<channel-transcript>` 注入实际 API 请求的 user-message prefix，
+最近频道文本会作为频道 turn 的 `# channel-transcript` 注入实际 API 请求的 user-message prefix，
 默认最多 32K **token**（不是 32K 字节），按时间保留历史消息，不包含当前消息和 `new` 标记。bridge 模式下
 该块只存在于 turn overlay，不写入持久 system prompt；群聊消息本身仍永久保存在
 `~/.aki/channel-history`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
 消息发送。其他智能体的消息正文同时出现在该 transcript 和临时触发的 user 消息前缀中；
-`<turn-control>` 不再重复消息正文。由其他智能体触发的频道 turn 结束后会
+`# turn-control` 不再重复消息正文。由其他智能体触发的频道 turn 结束后会
 回滚本次新增的 conversation 消息，因此这些临时触发消息和回复不会进入下个 turn 的对话
 历史；用户触发的频道 turn 不回滚，用户消息以及 assistant 的 thinking、tool call、
 tool result 和最终回复都会正常留在 conversation 中，并交给 Letta 自己的 compaction

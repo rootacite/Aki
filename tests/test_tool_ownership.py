@@ -76,13 +76,14 @@ class ToolOwnershipTests(unittest.TestCase):
         system = (
             "BASE mentions <tool-ownership> as policy.\n\n"
             "<channel-identity>identity</channel-identity>\n\n"
-            "<live-context>live</live-context>\n"
+            "# live-context\n\nlive\n"
         )
         once = apply_tool_ownership(system, block)
         twice = apply_tool_ownership(once, block)
         self.assertEqual(once, twice)
         self.assertIn("BASE mentions <tool-ownership> as policy.", twice)
         self.assertLess(once.index("<tool-ownership"), once.index("<channel-identity"))
+        self.assertLess(once.index("<tool-ownership"), once.index("# live-context"))
         cleared = clear_tool_ownership(once)
         self.assertNotIn("</tool-ownership>", cleared)
         self.assertIn("BASE mentions <tool-ownership> as policy.", cleared)

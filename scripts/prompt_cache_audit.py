@@ -33,12 +33,14 @@ from engine.solo_mode import default_solo_state_path  # noqa: E402
 
 TEST_PREFIX = "CACHE-TEST"
 DYNAMIC_TAGS = (
-    "<turn-control",
-    "<channel-transcript",
-    "<solo-mode",
-    "<solo-memories",
-    "<solo-transcript",
-    "<live-context",
+    "# turn-control",
+    "# channel-transcript",
+    "# solo-mode",
+    "# solo-memories",
+    "# solo-transcript",
+    "# live-context",
+    "# runtime-context",
+    "# format-guard",
     "<wait-user",
     "<wait-other",
 )
@@ -504,7 +506,7 @@ def _report_profile(
             raise RuntimeError(f"{profile} system prompt contains dynamic blocks")
         if not all(tag in system for tag in STABLE_TAGS):
             raise RuntimeError(f"{profile} system prompt is missing a stable block")
-    if not any("<turn-control" in text for text in runtime_tails):
+    if not any("# turn-control" in text for text in runtime_tails):
         raise RuntimeError(f"{profile} runtime overlay is missing turn-control")
     hashes = {hashlib.sha256(system.encode()).hexdigest() for system in systems}
     system_stable = len(hashes) == 1

@@ -250,22 +250,26 @@ wake routing → identity → roster`；易变 per-turn tail 为
 1. 稳定基座 prompt（`prompts/aki-system.md`、`prompts/fuyu-system.md` 或
    `prompts/haru-system.md`），包含身份、记忆机制、工具规则、执行锁规则和模式边界。
 2. `{CORE_MEMORY}` 被 MemFS 中的人格与关系文件替换。
-3. `<tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
+3. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 作为 overlay 注入。
+4. `<channel-context>`：当前在线成员 roster，作为稳定 system overlay 注入。
+5. `<tool-ownership>`：当前 profile 可用的专属工具、禁止调用的他人工具、任务归属和
    `@Owner` 转述规则，每个 turn 作为 overlay 注入。
-4. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
+6. `<channel-policy>`：频道静态规则，包括 untrusted roster 说明、mention 语法、
    execution guidance、专属域规则和输出规则。
-5. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
+7. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
    使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
-6. `<channel-identity>`：当前智能体自己的固定资料，每个 turn 作为 overlay 注入。
-7. `<channel-context>`：当前在线成员 roster，作为稳定 system overlay 注入。
-8. `# Format Guard`：已固化在 Aki、Fuyu、Haru 各自的静态 base prompt 中，使用各自
-   username 渲染，不再作为 per-turn overlay 注入。
-9. `<turn-control>`：当前频道 turn 的 guidance、initiation budget、execution responder、
-   `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
-10. `<channel-transcript>`：只包含历史消息，不包含当前消息和 `new` 标记；临时拼在当前 user role
-    消息开头。
-11. `<live-context>`：桌面时间、焦点窗口、进程、zsh 历史、截图路径和 Aki 生活账本；
-    临时拼在当前 user role 消息开头，不落盘。
+8. `# format-guard`：静态 base 中保留 `# Format Guard`；每个 turn 在 user-role overlay
+   末尾完整重复一次，使用各自 username 渲染。
+9. `# live-context` / `# runtime-context`：桌面时间、焦点窗口、进程、zsh 历史、截图路径、
+   Aki 生活账本，以及 MemFS 绝对路径和 MCP 信息；关闭桌面实况时使用 `# runtime-context`。
+10. `# turn-control`：当前频道 turn 的 guidance、initiation budget、execution responder、
+    `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
+11. `# channel-transcript` / `# solo-transcript` / `# solo-memories` / `# solo-mode`：
+    只包含历史消息与独处数据，不包含当前消息和 `new` 标记；全部临时拼在 user-role 前缀。
+
+user-role overlay 顺序固定为 `# solo-memories → # channel-transcript → # solo-mode →
+# solo-transcript → # live-context / # runtime-context → # turn-control → # format-guard`，
+`# format-guard` 永远最后，不落盘。
 
 ### Aki 专属工具与触发器
 
@@ -561,17 +565,25 @@ API call 或后续 turn 的 transcript 中看到它。邮箱地址（例如 `114
 `<channel-wake-routing>` 中，在线成员列表
 `<channel-context>` 只在 turn overlay 中。运行时不会生成 prompt journal。其他智能体触发的 turn
 还会在 user role 的统一前缀中带 sender、seq、source 和正文。点名/未点名 guidance、
-initiation budget、execution responder 和 `wait_other` 提示都在 `<turn-control>` 中，
+initiation budget、execution responder 和 `wait_other` 提示都在 `# turn-control` 中，
 并临时拼在当前 user role 消息开头。
 
 历史频道 prompt 的成员表迁移（仅用于旧数据）：
 
 ```bash
+python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru  # dry-run
+python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru --apply
 python3 scripts/migrate-channel-prompts.py            # dry-run
 python3 scripts/migrate-channel-prompts.py --apply    # backup + stop/restart akid@<profile>
 python3 scripts/restore-channel-prompts.py --turn-id turn-...          # dry-run restore
 python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore one journaled turn
 ```
+
+reminder 迁移只清理 environment、agent-info、MCP、permission-mode 四类旧
+`<system-reminder>`，备份目录位于 `~/.letta/backups/letta-reminder-migration-<timestamp>/`
+并带 `SHA256SUMS`；功能性 reminder 保留。迁移后可在全部服务和自动化测试完成后运行
+`python3 scripts/live_api_acceptance.py --profile aki --turns 5 --timeout 1800`，脚本只读取
+Unix debug socket，由操作者手动发送 5 条真实消息。
 
 迁移脚本会完整备份 `messages.jsonl`、`conversation.json`、`system-prompt.json` 和
 `manifest.json`，并按成员表、频道历史、身份注册表的顺序推断说话者类型；无法匹配时报告，
@@ -581,11 +593,11 @@ python3 scripts/restore-channel-prompts.py --turn-id turn-... --apply  # restore
 列表中，普通回复直接说话即可；当回复没有显式 `@成员` 时，任意位置的 `@<username>`（例如
 `@Master`）表示这条回复只对该 username 说、无需打扰其他成员，会只唤醒该 username。若同时写了
 显式 `@成员`，则以 `@成员` 为准，`@<username>` 只从正文移除、不再抑制这些唤醒。本地 turn 不包含频道 transcript 或 turn
-块；`<channel-identity>` 与 `<channel-wake-routing>` 作为 turn overlay 刷新，`<live-context>` 在
+块；`<channel-identity>` 与 `<channel-wake-routing>` 作为 turn overlay 刷新，`# live-context` 在
 bridge 模式下作为 per-turn overlay 注入，不落盘。
 
 智能体的每条最终回复都按以下 Agent-Agent 唤醒规则执行。这些规则位于真实 system prompt
-的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `<turn-control>` 中重复。
+的 `<channel-wake-routing>` 块中，不再在每轮 user 消息或 `# turn-control` 中重复。
 
 - 正文中写一个或多个有效的 `@成员名 `：只唤醒被点名的成员；即使同时写了 `@<username>` 也如此。
 - 没有显式 `@成员`、但任意位置写 `@<username>`：只唤醒该 username，不触发全局唤醒；该标记发布前会被移除。

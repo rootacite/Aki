@@ -171,6 +171,7 @@ def build_letta_command(config: GatewayConfig) -> list[str]:
         "--output-format",
         "stream-json",
         "--include-partial-messages",
+        "--no-system-info-reminder",
         "--reflection-trigger",
         REFLECTION_TRIGGER,
         "--reflection-step-count",

@@ -27,6 +27,9 @@ _LATER_BLOCK_RE = re.compile(
     r"channel-transcript|solo-mode|solo-transcript|live-context|"
     r"aki-channel-policy|aki-channel-wake-routing|aki-channel-identity|"
     r"aki-channel-turn|aki-turn-control|aki-channel-transcript|aki-live-context)\b"
+    r"|^# (?:turn-control|format-guard|solo-mode|solo-transcript|"
+    r"channel-transcript|live-context|runtime-context)\b[^\n]*$",
+    re.MULTILINE,
 )
 
 

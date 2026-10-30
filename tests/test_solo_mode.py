@@ -116,13 +116,13 @@ class SoloModeTests(unittest.TestCase):
             system,
             render_solo_transcript(solo),
         )
-        self.assertIn('<channel-transcript', system)
-        self.assertIn('frozen="true"', system)
+        self.assertIn('# channel-transcript', system)
+        self.assertIn("frozen when solo mode began", system)
         self.assertIn("群聊旧消息", system)
-        self.assertIn("<solo-mode", system)
+        self.assertIn("# solo-mode", system)
         self.assertIn("当下你正在与Master独处", system)
         self.assertIn("不要写 @成员", system)
-        self.assertIn("<solo-transcript", system)
+        self.assertIn("# solo-transcript", system)
         self.assertIn("独处私密消息", system)
         self.assertLess(system.index("群聊旧消息"), system.index("独处私密消息"))
         self.assertNotIn("<aki-channel-transcript", system)
@@ -144,8 +144,8 @@ class SoloModeTests(unittest.TestCase):
             user_name="Master",
             solo=True,
         )
-        self.assertIn("MAY acquire the device-wide execution lock directly", turn)
-        self.assertIn("does NOT need to @mention you first", turn)
+        self.assertIn("may call `acquire_execution_lock` directly", turn)
+        self.assertIn("without needing an @mention from Master", turn)
 
     def test_old_framework_tags_are_migrated(self) -> None:
         old = (
@@ -158,7 +158,7 @@ class SoloModeTests(unittest.TestCase):
         )
         migrated = apply_channel_transcript(old, new_block)
         self.assertNotIn("<aki-channel-transcript", migrated)
-        self.assertIn("<channel-transcript", migrated)
+        self.assertIn("# channel-transcript", migrated)
 
     def test_strip_mentions_removes_only_known_member_aliases(self) -> None:
         members = [
@@ -324,11 +324,17 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<channel-transcript", system)
         self.assertTrue(any(item.get("kind") == "solo_ready" for item in self.channel.controls))
         overlay = await self.overlay_text(self.server)
-        self.assertIn("<solo-mode", overlay)
+        self.assertIn("# solo-mode", overlay)
         self.assertIn("当下你正在与Master独处", overlay)
         self.assertIn("group old", overlay)
-        self.assertIn('frozen="true"', overlay)
-        self.assertIn("<solo-transcript", overlay)
+        self.assertIn("frozen when solo mode began", overlay)
+        self.assertIn("# solo-transcript", overlay)
+        self.assertLess(
+            overlay.index("# channel-transcript"), overlay.index("# solo-mode")
+        )
+        self.assertLess(
+            overlay.index("# solo-mode"), overlay.index("# solo-transcript")
+        )
 
         await self.server._on_channel_control(
             TextEnvelope(
@@ -517,7 +523,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         active_prompt = await self.overlay_text(self.server)
         # The in-progress session belongs to <solo-transcript>, not the
         # historical <solo-memories> block.
-        self.assertNotIn("<solo-memories", active_prompt)
+        self.assertNotIn("# solo-memories", active_prompt)
 
         await self.server._on_channel_control(
             TextEnvelope(
@@ -552,7 +558,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<solo-memories", system)
         self.assertNotIn("<solo-mode", system)
         overlay = await self.overlay_text(self.server)
-        self.assertIn("<solo-memories", overlay)
+        self.assertIn("# solo-memories", overlay)
         self.assertIn("这是独处里说的秘密", overlay)
         self.assertIn("独处里的私密回复", overlay)
         group_path = self.server.group_channel_history_path
@@ -595,13 +601,16 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         overlay = await self.overlay_text(self.server)
-        self.assertIn("<solo-mode", overlay)
-        self.assertIn("<solo-memories", overlay)
+        self.assertIn("# solo-mode", overlay)
+        self.assertIn("# solo-memories", overlay)
+        self.assertLess(
+            overlay.index("# solo-memories"), overlay.index("# solo-mode")
+        )
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertNotIn("<solo-mode", system)
         self.assertNotIn("<solo-memories", system)
         self.assertIn("旧独处秘密", overlay)
-        self.assertNotIn("solo-active", overlay.split("<solo-memories", 1)[1])
+        self.assertNotIn("solo-active", overlay.split("# solo-memories", 1)[1])
 
 
 if __name__ == "__main__":

@@ -2,6 +2,12 @@
 
 > 项目宪章与目标说明。本文档定义“要做什么、为什么这样做、什么不做”，是后续架构与实现的最高层依据。
 
+## 强制：动作边界不可超过用户的指令边界
+
+## 强制：禁止主动注入生产消息
+
+用户未明确要求的情况下，绝对禁止在真实生产环境中输入任何消息，“抓API call” 是个被动行为，不等于自己注入消息制造洪水。
+
 ## 强制：先查清故障机理，再允许修复
 
 没有弄清楚一个故障的发生原因以及所有现象的发生机理之前，不允许进行任何“修复”。
@@ -403,18 +409,23 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
 - 记忆整理：`reflectionTrigger = step-count`，阈值 25；累计 25 个未反思 step 后由 reflection 将稳定信息写入 MemFS。backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式生效。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
-- 桌面实况：每个 turn 采集一次桌面快照。`<live-context>` 只作为 per-turn overlay 追加在
-  实际 API 请求末尾，不写回持久 system prompt。截图只放路径与元数据，默认 64K token 上限。
+- 桌面实况：每个 turn 采集一次桌面快照。`# live-context` 只作为 user-role overlay
+  注入实际 API 请求，不写回持久 system prompt。关闭时仍输出最小 `# runtime-context`，
+  两者都包含 MemFS 绝对路径与 MCP 工具信息。截图只放路径与元数据，默认 64K token 上限。
 - Prompt 分层原则：**规则性、记忆性信息进 system prompt；时效性信息进当前 user-role /
   turn overlay。**
   - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
-  - stable system overlay：`<tool-ownership> → <channel-policy> → <channel-wake-routing> →
-    <channel-identity> → <channel-context roster>`。
-  - `<format-guard>` 规则已固化在 `prompts/<profile>-system.md` 的 `# Format Guard` 段，
-    不再作为 per-turn overlay 注入。
-  - per-turn user prefix：`<turn-control> → <channel-transcript> → <solo-mode> →
-    <solo-memories> → <solo-transcript> → <live-context>`，临时拼在当前 user role
-    消息开头，不写回持久消息。
+  - stable system overlay：`<channel-identity> → <channel-context roster> →
+    <tool-ownership> → <channel-policy> → <channel-wake-routing>`。
+  - `# format-guard` 在 base prompt 中保留静态规则，并在每个 turn 的 user-role
+    overlay 末尾完整重复一次。
+  - per-turn user prefix 固定为：`# solo-memories → # channel-transcript →
+    # solo-mode → # solo-transcript → # live-context / # runtime-context →
+    # turn-control → # format-guard`，临时拼在当前 user role 消息开头，不写回持久消息。
+    `# format-guard` 永远最后；`# turn-control` 仅在原本适用的 turn 类型出现。
+  - environment、agent-info、MCP、permission-mode 四类 Letta reminder 不再生成；
+    Bridge 只兜底剥离这四类旧 `<system-reminder>`，agent-message、memory maintenance、
+    task、empty-response 等功能性 reminder 保留。
   - akid 运行时不写 `agent.system` 或 `system-prompt.json.content`；所有 Aki 运行时块
     都只通过 `turn_context.system_append` / `turn_context.user_message_prefix` 进入请求。
     没有 `aki_bridge` 的后端不允许启动。

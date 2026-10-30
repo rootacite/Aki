@@ -7,7 +7,7 @@ import base64
 import time
 from pathlib import Path
 from engine.letta_process import BackendUnavailable
-from engine.live_context import render_channel_roster
+from engine.live_context import render_channel_roster, render_user_format_guard
 from engine.nighttalk import render_nighttalk_overlay
 from engine.tokifactor import (
     MAX_IMAGE_BYTES,
@@ -16,7 +16,6 @@ from engine.tokifactor import (
 from .constants import (
     LOGGER,
     MAX_CHANNEL_ATTACHMENT_TOTAL_BYTES,
-    WAIT_GUARD_ORIGIN,
 )
 
 
@@ -111,14 +110,7 @@ class TurnsMixin:
                 await self._finish_turn(turn, "bridge_unavailable")
                 return
             stable_parts, mid_parts = await self._build_turn_overlay(turn)
-            live_block = await self._refresh_live_context()
-            if live_block:
-                mid_parts.append(live_block)
-            turn_context: dict[str, str] = {}
-            if stable_parts:
-                turn_context["system_append"] = "\n\n".join(stable_parts)
-            if mid_parts:
-                turn_context["user_message_prefix"] = "\n\n".join(mid_parts)
+            turn_context = self._turn_context_payload(stable_parts, mid_parts)
             overlay = {"turn_context": turn_context} if turn_context else {}
             try:
                 await self.backend.begin_aki_turn(turn.turn_id, overlay)
@@ -152,16 +144,21 @@ class TurnsMixin:
 
     async def _build_turn_overlay(self, turn: Turn) -> tuple[list[str], list[str]]:
         """Build the complete runtime system overlay for this turn."""
+        # 1. Stable parts (system_append): 身份与花名册在前，权限与唤醒路由规则殿后
         stable_parts: list[str] = [
-            self._tool_ownership_block(),
-            self._channel_policy_block(),
-            self._channel_wake_routing_block(),
             self._channel_identity_block(),
             render_channel_roster(
                 self_member=self._channel_self_member(),
                 members=self._channel_member_views(),
             ),
+            self._tool_ownership_block(),
+            self._channel_policy_block(),
+            self._channel_wake_routing_block(),
         ]
+        if turn.nighttalk:
+            stable_parts.append(render_nighttalk_overlay())
+
+        # 2. Mid parts (user_message_prefix): 历史与环境在前，回合控制与格式守卫紧贴用户输入
         mid_parts: list[str] = []
         exclude_seq = (
             turn.channel_message_seq
@@ -174,33 +171,48 @@ class TurnsMixin:
             solo_mode_block,
             solo_memories_block,
         ) = await self._render_transcript_blocks(exclude_seq=exclude_seq)
-        if solo_mode_block:
-            mid_parts.append(solo_mode_block)
+
+        # 记忆与历史对话（背景信息层）
         if solo_memories_block:
             mid_parts.append(solo_memories_block)
+        if group_block:
+            mid_parts.append(group_block)
+        if solo_mode_block:
+            mid_parts.append(solo_mode_block)
+        if solo_block:
+            mid_parts.append(solo_block)
+
         if turn.origin == "solo_notice":
-            transcript = self._transcript_overlay_block(group_block, solo_block)
-            if transcript:
-                mid_parts.append(transcript)
             await self._snapshot_turn_conversation(turn)
-        elif turn.origin in ("mqtt", "proactive", "nighttalk"):
-            block = await self._refresh_turn_control(turn)
-            if block:
-                mid_parts.append(block)
-            if group_block:
-                mid_parts.append(group_block)
-            if solo_block:
-                mid_parts.append(solo_block)
-            if turn.origin_is_agent or turn.origin == "nighttalk":
-                await self._snapshot_turn_conversation(turn)
-        elif turn.origin == WAIT_GUARD_ORIGIN:
-            if group_block:
-                mid_parts.append(group_block)
-            if solo_block:
-                mid_parts.append(solo_block)
-        if turn.nighttalk:
-            stable_parts.append(render_nighttalk_overlay())
+        elif turn.origin in ("mqtt", "proactive", "nighttalk") and (
+            turn.origin_is_agent or turn.origin == "nighttalk"
+        ):
+            await self._snapshot_turn_conversation(turn)
+
+        # 实时动态上下文（状态感知层）
+        live_block = await self._refresh_live_context()
+        if live_block:
+            mid_parts.append(live_block)
+
+        # 强约束指令层（紧贴在用户真实 message 之前，最大化 Recency Bias）
+        turn_control = await self._refresh_turn_control(turn)
+        if turn_control:
+            mid_parts.append(turn_control)
+        mid_parts.append(render_user_format_guard(self.config.username))
+
         return stable_parts, mid_parts
+
+
+    @staticmethod
+    def _turn_context_payload(
+        stable_parts: list[str], mid_parts: list[str]
+    ) -> dict[str, str]:
+        turn_context: dict[str, str] = {}
+        if stable_parts:
+            turn_context["system_append"] = "\n\n".join(stable_parts)
+        if mid_parts:
+            turn_context["user_message_prefix"] = "\n\n".join(mid_parts)
+        return turn_context
 
 
     async def _update_busy_turn_overlay(self, turn: Turn) -> None:
@@ -209,14 +221,7 @@ class TurnsMixin:
             return
         try:
             stable_parts, mid_parts = await self._build_turn_overlay(turn)
-            live_block = await self._refresh_live_context()
-            if live_block:
-                mid_parts.append(live_block)
-            turn_context: dict[str, str] = {}
-            if stable_parts:
-                turn_context["system_append"] = "\n\n".join(stable_parts)
-            if mid_parts:
-                turn_context["user_message_prefix"] = "\n\n".join(mid_parts)
+            turn_context = self._turn_context_payload(stable_parts, mid_parts)
             await self.backend.update_aki_turn(
                 turn.turn_id,
                 {"turn_context": turn_context},

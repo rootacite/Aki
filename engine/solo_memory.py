@@ -45,6 +45,11 @@ _COMPLETE_FRAMEWORK_BLOCK_RE = re.compile(
     r"solo-transcript|solo-memories|live-context)\b[^>]*>.*?</\1>",
     re.IGNORECASE | re.DOTALL,
 )
+_MARKDOWN_RUNTIME_BLOCK_RE = re.compile(
+    r"(?ms)^# (?:turn-control|format-guard|solo-mode|solo-transcript|"
+    r"solo-memories|channel-transcript|live-context|runtime-context)"
+    r"\b[^\n]*\n.*?(?=^# [^\n]+[ \t]*$|\Z)"
+)
 
 
 def default_solo_memory_path(profile: str, home: Path | None = None) -> Path:
@@ -66,6 +71,7 @@ def strip_runtime_prompt_blocks(system: str) -> str:
         return "\n\n".join(core_blocks)
     text = _COMPLETE_FRAMEWORK_BLOCK_RE.sub("\n", source)
     text = _FRAMEWORK_BLOCK_RE.sub("", text)
+    text = _MARKDOWN_RUNTIME_BLOCK_RE.sub("\n", text)
     return re.sub(r"\n{3,}", "\n\n", text).strip()
 
 

@@ -15,6 +15,7 @@ from .blocks import (
     render_channel_roster,
     render_channel_wake_routing,
     render_turn_control,
+    render_user_format_guard,
 )
 from .desktop import (
     _capture_source,
@@ -34,6 +35,7 @@ from .desktop import (
     parse_zsh_history_text,
     read_zsh_history,
     render_live_context,
+    render_runtime_context,
     screenshot_from_mapping,
 )
 from .mentions import (
@@ -83,6 +85,7 @@ from .types import (
     CHANNEL_WAKE_ROUTING_TAG,
     CHANNEL_WAKE_USER,
     CORE_MEMORY_PLACEHOLDER,
+    FORMAT_GUARD_TAG,
     ChannelImageAttachment,
     ChannelMember,
     ChannelReplyRoute,
@@ -98,6 +101,7 @@ from .types import (
     MAX_CHANNEL_MEMBER_DESCRIPTION,
     MAX_HISTORY_COMMAND_CHARS,
     ProcessInfo,
+    RUNTIME_CONTEXT_TAG,
     SOLO_MEMORIES_TAG,
     SOLO_MODE_TAG,
     SOLO_TRANSCRIPT_TAG,
@@ -111,6 +115,7 @@ from .types import (
     _CHANNEL_WAKE_ROUTING_RE,
     _CONTROL_RE,
     _EMAIL_RE,
+    _FORMAT_GUARD_RE,
     _LIVE_CONTEXT_RE,
     _SOLO_MEMORIES_RE,
     _SOLO_MODE_RE,

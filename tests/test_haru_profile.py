@@ -165,6 +165,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertIn("search_chat_history", allowed)
         self.assertNotIn("Bash", allowed)
         self.assertIn("--disallowedTools", command)
+        self.assertIn("--no-system-info-reminder", command)
         denied = command[command.index("--disallowedTools") + 1].split(",")
         self.assertIn("Bash", denied)
         self.assertIn("Task", denied)
@@ -176,6 +177,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertNotIn("--tools", base)
         self.assertNotIn("--toolset", base)
         self.assertNotIn("--disallowedTools", base)
+        self.assertIn("--no-system-info-reminder", base)
         self.assertEqual(
             base[base.index("--reflection-trigger") + 1],
             "step-count",

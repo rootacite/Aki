@@ -241,36 +241,30 @@ class ChannelContextTests(unittest.TestCase):
         self_member = self.members()[0]
         policy = render_channel_policy(user_name="Master")
         self.assertIn("`@Name `", policy)
-        self.assertIn("Master is NOT in the member list", policy)
+        self.assertIn("Master is the human user, not in the agent member list", policy)
         self.assertIn(
-            "ONLY an explicit mention from Master counts as addressing you", policy
+            "ONLY an explicit mention from Master authorizes non-read-only execution",
+            policy,
         )
         self.assertNotIn("wait_user(timeout_s)", policy)
 
         self_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@秋 你好"
         )
-        self.assertIn(
-            "Master explicitly mentioned you in this message. Reply directly.",
-            self_text,
-        )
+        self.assertIn("[DIRECTLY ADDRESSED BY Master] Reply directly to Master.", self_text)
         self.assertNotIn("<reply-target>", self_text)
         other_text = render_turn_control(
             self_member=self_member, members=self.members(), message="@Fuyu 你好"
         )
-        self.assertIn("mentions other members, NOT you", other_text)
+        self.assertIn("[ADDRESSED TO OTHERS, NOT YOU]", other_text)
         plain_text = render_turn_control(
             self_member=self_member, members=self.members(), message="大家好"
         )
-        self.assertIn(
-            "This is a group-chat message. You may decide whether to reply.",
-            plain_text,
-        )
-        self.assertNotIn("did not mention you", plain_text)
-        self.assertIn('remaining="3"', plain_text)
-        self.assertIn('resets="user-message"', plain_text)
+        self.assertIn("[UNADDRESSED GROUP MESSAGE]", plain_text)
+        self.assertIn("- status:", plain_text)
+        self.assertIn("remaining=3/3", plain_text)
         self.assertIn('allowed="true"', plain_text)
-        self.assertIn("MAY call `wait_user`", plain_text)
+        self.assertIn("MAY call hidden tool `wait_user(timeout=1..25)`", plain_text)
 
         agent_text = render_turn_control(
             self_member=self_member,
@@ -278,10 +272,10 @@ class ChannelContextTests(unittest.TestCase):
             message="@秋 帮我改一下这个文件",
             from_agent=True,
         )
-        self.assertIn("does NOT count as addressing you", agent_text)
-        self.assertIn("Do NOT try to acquire the execution lock", agent_text)
+        self.assertIn("does NOT address or authorize you", agent_text)
+        self.assertIn("FORBIDDEN: `acquire_execution_lock`", agent_text)
         self.assertIn('allowed="false"', agent_text)
-        self.assertIn("Calling `wait_user` is FORBIDDEN", agent_text)
+        self.assertIn("calling `wait_user` is FORBIDDEN", agent_text)
 
     def test_policy_and_turn_are_system_prompt_blocks(self) -> None:
         members = self.members()
@@ -293,15 +287,13 @@ class ChannelContextTests(unittest.TestCase):
             wait_labels=("Aki", "Fuyu"),
         )
         self.assertTrue(policy.startswith(f"<{CHANNEL_POLICY_TAG}"))
-        self.assertIn(
-            "If no reply is needed this turn, output [NO_REPLY]",
-            policy,
-        )
-        self.assertTrue(turn.startswith(f"<{TURN_CONTROL_TAG}"))
+        self.assertIn("Your final text output is published directly to the channel.", policy)
+        self.assertIn("To stay silent, output exact token: [NO_REPLY]", policy)
+        self.assertTrue(turn.startswith(f"# {TURN_CONTROL_TAG}"))
+        self.assertIn("## Turn Action & Permissions", turn)
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
-        self.assertIn("You MUST call `wait_other` once", turn)
-        self.assertIn("It is not in compliance to speak before", turn)
-        self.assertIn("Do not mention or emphasize whom you waited for", turn)
+        self.assertIn("You MUST call hidden tool `wait_other` once", turn)
+        self.assertIn("Synthesize their returned replies naturally", turn)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_policy(system, policy)
@@ -317,28 +309,10 @@ class ChannelContextTests(unittest.TestCase):
     def test_wake_routing_is_a_system_prompt_block(self) -> None:
         block = render_channel_wake_routing("Master")
         self.assertTrue(block.startswith(f"<{CHANNEL_WAKE_ROUTING_TAG}"))
-        self.assertIn(
-            "If the reply contains `@MemberName `: wake ONLY the mentioned members, "
-            "even if `@Master` also appears.",
-            block,
-        )
-        self.assertIn(
-            "If the reply contains no `@MemberName ` but contains `@Master`", block
-        )
-        self.assertIn(
-            "If the reply contains no `@MemberName ` and no `@Master` but contains "
-            "`^MemberName`",
-            block,
-        )
-        self.assertIn(
-            "If there is neither `@MemberName `, `@Master`, nor `^MemberName`: wake ALL "
-            "other online members.",
-            block,
-        )
-        self.assertIn("Use `^MemberName` to exclude members from being woken.", block)
-        self.assertIn(
-            "use `@Master`; the marker may appear anywhere in the reply", block
-        )
+        self.assertIn("Omitting wake tags wakes ALL online agents simultaneously", block)
+        self.assertIn("ONLY those mentioned agents will wake", block)
+        self.assertIn("Wakes all online agents EXCEPT the excluded ones", block)
+        self.assertIn("You MUST include `@Master `", block)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_wake_routing(system, block)
@@ -370,14 +344,12 @@ class ChannelContextTests(unittest.TestCase):
             self_member=members[0], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="true">', aki)
-        self.assertIn(
-            "YOU are the only member responsible for confirming the executor", aki
-        )
+        self.assertIn("YOU are the designated responder", aki)
         fuyu = render_turn_control(
             self_member=members[1], members=members, message="do this"
         )
         self.assertIn('<execution-ownership responder="aki" self="false">', fuyu)
-        self.assertIn("do NOT attempt to execute it", fuyu)
+        self.assertIn("do NOT execute it or race for the lock", fuyu)
         mentioned = render_turn_control(
             self_member=members[1], members=members, message="@Fuyu do this"
         )
@@ -398,7 +370,7 @@ class ChannelContextTests(unittest.TestCase):
             self_member=member, members=[member], message="do this"
         )
         self.assertNotIn("<execution-ownership", text)
-        self.assertIn("You are the only member online", text)
+        self.assertIn("You are the only agent online", text)
         self.assertIn(
             "acquire_execution_lock",
             render_channel_policy(user_name="Master"),
@@ -513,10 +485,9 @@ class ChannelContextTests(unittest.TestCase):
             initiation_limit=3,
             from_agent=True,
         )
-        self.assertIn('remaining="0"', blocked)
-        self.assertIn('limit="3"', blocked)
+        self.assertIn("remaining=0/3", blocked)
         self.assertIn("[NO_REPLY]", blocked)
-        self.assertIn("agent-initiated reply budget is exhausted", blocked)
+        self.assertIn("HARD STOP", blocked)
 
     def test_descriptions_are_escaped_limited_and_marked_untrusted(self) -> None:
         members = self.members()
@@ -592,8 +563,9 @@ class ChannelTranscriptTests(unittest.TestCase):
 
     def test_renders_final_text_and_marks_new_message(self) -> None:
         block = render_channel_transcript(self.entries())
-        self.assertTrue(block.startswith(f"<{CHANNEL_TRANSCRIPT_TAG}"))
-        self.assertIn('budget_tokens="32768"', block)
+        self.assertTrue(block.startswith(f"# {CHANNEL_TRANSCRIPT_TAG}"))
+        self.assertIn("## Note", block)
+        self.assertIn("## Content", block)
         self.assertIn(
             'Master (user, at 2026-10-21T13:00:00+08:00, seq=1): "先看方案。"',
             block,
@@ -658,7 +630,8 @@ class ChannelTranscriptTests(unittest.TestCase):
         block = render_channel_transcript(entries, budget_tokens=2048)
         self.assertLessEqual(estimate_tokens(block), 2048)
         self.assertNotIn(", new, at ", block)
-        self.assertIn("dropped=", block)
+        self.assertNotIn("budget_tokens=", block)
+        self.assertNotIn("dropped=", block)
         self.assertIn("message-19", block)
         self.assertNotIn("message-0-", block)
 
@@ -674,14 +647,15 @@ class ChannelTranscriptTests(unittest.TestCase):
             for index in range(120)
         ]
         channel = render_channel_transcript(entries, budget_tokens=10**9)
-        self.assertIn('budget_tokens="32768"', channel)
+        self.assertIn("## Content", channel)
+        self.assertNotIn("budget_tokens=", channel)
         self.assertLessEqual(estimate_tokens(channel), 32 * 1024)
-        self.assertIn("dropped=", channel)
+        self.assertNotIn("dropped=", channel)
         self.assertNotIn("message-0-", channel)
         solo = render_solo_transcript(entries, budget_tokens=10**9)
-        self.assertIn('budget_tokens="65536"', solo)
+        self.assertNotIn("budget_tokens=", solo)
         self.assertLessEqual(estimate_tokens(solo), 64 * 1024)
-        self.assertIn("<solo-transcript", solo)
+        self.assertIn("# solo-transcript", solo)
 
     def test_sender_timestamp_orders_offline_messages(self) -> None:
         entries = [
@@ -713,9 +687,9 @@ class ChannelTranscriptTests(unittest.TestCase):
         block = render_channel_transcript(self.entries())
         once = apply_channel_transcript("BASE PROMPT\n", block)
         twice = apply_channel_transcript(once, block)
-        self.assertEqual(twice.count(f"<{CHANNEL_TRANSCRIPT_TAG}"), 1)
+        self.assertEqual(twice.count(f"# {CHANNEL_TRANSCRIPT_TAG}"), 1)
         cleared = clear_channel_transcript(twice)
-        self.assertNotIn(f"<{CHANNEL_TRANSCRIPT_TAG}", cleared)
+        self.assertNotIn(f"# {CHANNEL_TRANSCRIPT_TAG}", cleared)
         self.assertIn("BASE PROMPT", cleared)
 
     def test_transcript_uses_sender_names_without_profiles(self) -> None:
@@ -733,7 +707,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         )
         identity = render_channel_identity(member)
         transcript = render_channel_transcript(self.entries())
-        live = '<live-context refreshed_at="now"><note>x</note></live-context>'
+        live = "# live-context\n\n## Note\nx"
         identity_once = apply_channel_identity("BASE\\n", identity)
         identity_twice = apply_channel_identity(identity_once, identity)
         self.assertEqual(identity_twice.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
@@ -742,16 +716,16 @@ class ChannelTranscriptTests(unittest.TestCase):
             live,
         )
         self.assertLess(system.index(CHANNEL_IDENTITY_TAG), system.index(CHANNEL_TRANSCRIPT_TAG))
-        self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("<live-context"))
+        self.assertLess(system.index(CHANNEL_TRANSCRIPT_TAG), system.index("# live-context"))
         refreshed_transcript = render_channel_transcript(self.entries())
         reordered = apply_channel_transcript(system, refreshed_transcript)
         self.assertLess(reordered.index(CHANNEL_IDENTITY_TAG), reordered.index(CHANNEL_TRANSCRIPT_TAG))
-        self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("<live-context"))
+        self.assertLess(reordered.index(CHANNEL_TRANSCRIPT_TAG), reordered.index("# live-context"))
         self.assertEqual(reordered.count(f"<{CHANNEL_IDENTITY_TAG}"), 1)
         cleared = clear_channel_transcript(reordered)
         self.assertIn(CHANNEL_IDENTITY_TAG, cleared)
         self.assertNotIn(CHANNEL_TRANSCRIPT_TAG, cleared)
-        self.assertIn("<live-context", cleared)
+        self.assertIn("# live-context", cleared)
         self.assertNotIn(f"<{CHANNEL_IDENTITY_TAG}", clear_channel_identity(cleared))
 
 
@@ -787,8 +761,9 @@ class LiveContextRenderTests(unittest.TestCase):
         self.assertIn("&lt;/live-context&gt;", block)
         self.assertIn("{ CORE_MEMORY }", block)
         self.assertNotIn("{CORE_MEMORY}", block)
-        self.assertTrue(block.startswith("<live-context"))
-        self.assertTrue(block.endswith("</live-context>"))
+        self.assertTrue(block.startswith("# live-context"))
+        self.assertIn("## MemFS", block)
+        self.assertIn("## MCP", block)
 
     def test_budget_truncates_oldest_history(self) -> None:
         history = [
@@ -797,17 +772,18 @@ class LiveContextRenderTests(unittest.TestCase):
         ]
         block = render_live_context(self.snapshot(history), budget_tokens=2048)
         self.assertLessEqual(estimate_tokens(block), 2048)
-        self.assertIn("<live-context", block)
-        self.assertIn("</live-context>", block)
+        self.assertIn("# live-context", block)
+        self.assertIn("## MemFS", block)
+        self.assertIn("## MCP", block)
 
     def test_apply_is_idempotent_and_clear_removes_block(self) -> None:
         block = render_live_context(self.snapshot(), budget_tokens=65536)
         once = apply_live_context("BASE PROMPT\n", block)
         twice = apply_live_context(once, block)
-        self.assertEqual(twice.count("<live-context"), 1)
+        self.assertEqual(twice.count("# live-context"), 1)
         self.assertEqual(twice.count("{CORE_MEMORY}"), 1)
         cleared = clear_live_context(twice)
-        self.assertNotIn("<live-context", cleared)
+        self.assertNotIn("# live-context", cleared)
         self.assertIn("BASE PROMPT", cleared)
         self.assertNotIn("{CORE_MEMORY}", cleared)
 

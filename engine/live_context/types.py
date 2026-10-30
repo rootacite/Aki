@@ -37,6 +37,10 @@ TURN_CONTROL_TAG = "turn-control"
 
 CHANNEL_TURN_TAG = "channel-turn"
 
+RUNTIME_CONTEXT_TAG = "runtime-context"
+
+FORMAT_GUARD_TAG = "format-guard"
+
 SOLO_MODE_TAG = "solo-mode"
 
 SOLO_TRANSCRIPT_TAG = "solo-transcript"
@@ -52,19 +56,52 @@ CORE_MEMORY_PLACEHOLDER = "{CORE_MEMORY}"
 MAX_CHANNEL_MEMBER_DESCRIPTION = MAX_MEMBER_DESCRIPTION_UNITS
 
 
-def _framework_block_re(tag: str, legacy: str | None = None) -> re.Pattern[str]:
+_MARKDOWN_HEADING_BOUNDARY = r"^# [^\n]+[ \t]*$"
+
+
+def _markdown_block_re(*tags: str) -> re.Pattern[str]:
+    """Match one generated H1 block up to the next H1 boundary."""
+    return re.compile(_markdown_block_pattern(*tags), re.S | re.M)
+
+
+def _markdown_block_pattern(*tags: str) -> str:
+    joined = "|".join(re.escape(tag) for tag in tags)
+    return (
+        rf"^# (?:{joined})\b[^\n]*\n.*?"
+        rf"(?={_MARKDOWN_HEADING_BOUNDARY}|\Z)"
+    )
+
+
+def _framework_block_re(
+    tag: str,
+    legacy: str | None = None,
+    *,
+    markdown_tags: tuple[str, ...] = (),
+) -> re.Pattern[str]:
     names = [re.escape(tag)]
     if legacy:
         names.append(re.escape(legacy))
     joined = "|".join(names)
-    return re.compile(rf"\n*<(?:{joined})\b.*?</(?:{joined})>\n*", re.S)
+    xml = re.compile(rf"\n*<(?:{joined})\b.*?</(?:{joined})>\n*", re.S)
+    if not markdown_tags:
+        return xml
+    markdown = _markdown_block_re(*markdown_tags)
+    return re.compile(
+        rf"(?:{xml.pattern})|(?:{markdown.pattern})",
+        re.S | re.M,
+    )
 
 
-
-_LIVE_CONTEXT_RE = _framework_block_re(LIVE_CONTEXT_TAG, "aki-live-context")
+_LIVE_CONTEXT_RE = _framework_block_re(
+    LIVE_CONTEXT_TAG,
+    "aki-live-context",
+    markdown_tags=(LIVE_CONTEXT_TAG, RUNTIME_CONTEXT_TAG),
+)
 
 _CHANNEL_TRANSCRIPT_RE = _framework_block_re(
-    CHANNEL_TRANSCRIPT_TAG, "aki-channel-transcript"
+    CHANNEL_TRANSCRIPT_TAG,
+    "aki-channel-transcript",
+    markdown_tags=(CHANNEL_TRANSCRIPT_TAG,),
 )
 
 _CHANNEL_IDENTITY_RE = _framework_block_re(
@@ -82,19 +119,30 @@ _CHANNEL_POLICY_RE = _framework_block_re(
 _CHANNEL_TURN_RE = _framework_block_re(CHANNEL_TURN_TAG, "aki-channel-turn")
 
 _TURN_CONTROL_RE = re.compile(
-    r"\n*<(?:turn-control|channel-turn)\b.*?</(?:turn-control|channel-turn)>\n*",
-    re.S,
+    r"(?:\n*<(?:turn-control|channel-turn)\b.*?</(?:turn-control|channel-turn)>\n*)"
+    r"|(?:" + _markdown_block_pattern(TURN_CONTROL_TAG) + r")",
+    re.S | re.M,
 )
 
-_SOLO_MODE_RE = re.compile(r"\n*<solo-mode\b.*?</solo-mode>\n*", re.S)
+_SOLO_MODE_RE = re.compile(
+    r"(?:\n*<solo-mode\b.*?</solo-mode>\n*)"
+    r"|(?:" + _markdown_block_pattern(SOLO_MODE_TAG) + r")",
+    re.S | re.M,
+)
 
 _SOLO_TRANSCRIPT_RE = re.compile(
-    r"\n*<solo-transcript\b.*?</solo-transcript>\n*", re.S
+    r"(?:\n*<solo-transcript\b.*?</solo-transcript>\n*)"
+    r"|(?:" + _markdown_block_pattern(SOLO_TRANSCRIPT_TAG) + r")",
+    re.S | re.M,
 )
 
 _SOLO_MEMORIES_RE = re.compile(
-    r"\n*<solo-memories\b.*?</solo-memories>\n*", re.S
+    r"(?:\n*<solo-memories\b.*?</solo-memories>\n*)"
+    r"|(?:" + _markdown_block_pattern(SOLO_MEMORIES_TAG) + r")",
+    re.S | re.M,
 )
+
+_FORMAT_GUARD_RE = _markdown_block_re(FORMAT_GUARD_TAG)
 
 _ZSH_EXTENDED_RE = re.compile(
     r"^: (?P<timestamp>\d+):(?P<duration>\d+);(?P<command>.*)$"

@@ -1,0 +1,257 @@
+diff -ruN a/src/aki/bridge.test.ts b/src/aki/bridge.test.ts
+--- a/src/aki/bridge.test.ts	2026-10-30 19:49:48.273899817 +0800
++++ b/src/aki/bridge.test.ts	2026-10-30 19:50:07.453443733 +0800
+@@ -9,6 +9,7 @@
+   beginAkiTurn,
+   captureAkiProviderCall,
+   endAkiTurn,
++  stripSuppressedLettaReminders,
+   updateAkiTurn,
+ } from "@/aki/bridge";
+ import type { ProviderTurnInput } from "@/backend/dev/provider-turn-executor";
+@@ -173,6 +174,61 @@
+     expect(applyAkiProviderOverlay(input()).systemPrompt).toBe("base system");
+   });
+ 
++  test("strips only the four suppressed Letta reminders", () => {
++    const environment =
++      "<system-reminder>This is an automated message providing context about the user's environment.</system-reminder>";
++    const agentInfo =
++      "<system-reminder>This is an automated message providing information about you.\n- **Agent ID**: agent-test</system-reminder>";
++    const mcp =
++      "<system-reminder>MCP servers with available tools: None</system-reminder>";
++    const permission =
++      "<system-reminder>Permission mode active: standard. Normal approval flow.</system-reminder>";
++    const agentMessage =
++      "<system-reminder>This message is from agent parent-agent.</system-reminder>";
++    const memory =
++      "<system-reminder>You are performing background memory maintenance.</system-reminder>";
++    const messages = [
++      { id: "env", role: "user", content: `${environment}\n\nhello`, timestamp: 1 },
++      { id: "agent-info", role: "user", content: agentInfo, timestamp: 2 },
++      { id: "mcp", role: "user", content: mcp, timestamp: 3 },
++      { id: "permission", role: "user", content: permission, timestamp: 4 },
++      { id: "agent-message", role: "user", content: `${agentMessage}\n\nkeep`, timestamp: 5 },
++      { id: "memory", role: "user", content: memory, timestamp: 6 },
++    ] as never;
++
++    const stripped = stripSuppressedLettaReminders(messages);
++    expect(stripped).toHaveLength(3);
++    expect(stripped[0]?.content).toBe("hello");
++    expect(stripped[1]?.content).toContain("This message is from agent");
++    expect(stripped[2]?.content).toContain("memory maintenance");
++  });
++
++  test("strips reminders from string and array user content", () => {
++    const environment =
++      "<system-reminder>This is an automated message providing context about the user's environment.</system-reminder>";
++    const memory =
++      "<system-reminder>You are performing background memory maintenance.</system-reminder>";
++    const messages = [
++      {
++        id: "array",
++        role: "user",
++        content: [
++          { type: "text", text: environment },
++          { type: "text", text: memory },
++          { type: "image", source: { type: "base64", media_type: "image/png", data: "x" } },
++        ],
++        timestamp: 1,
++      },
++      { id: "empty", role: "user", content: environment, timestamp: 2 },
++    ] as never;
++    const stripped = stripSuppressedLettaReminders(messages);
++    expect(stripped).toHaveLength(1);
++    const content = stripped[0]?.content as Array<{ type: string; text?: string }>;
++    expect(content).toHaveLength(2);
++    expect(content[0]?.text).toContain("memory maintenance");
++    expect(content[1]?.type).toBe("image");
++  });
++
+   test("claims overlay files once and replays insertions for the whole turn", async () => {
+     const directory = await mkdtemp(join(tmpdir(), "aki-overlay-files-"));
+     process.env.AKI_TURN_OVERLAY_DIR = directory;
+diff -ruN a/src/aki/bridge.ts b/src/aki/bridge.ts
+--- a/src/aki/bridge.ts	2026-10-30 19:49:48.273866021 +0800
++++ b/src/aki/bridge.ts	2026-10-30 19:49:58.709257197 +0800
+@@ -45,6 +45,98 @@
+ 
+ let activeTurn: AkiTurnState | null = null;
+ 
++const SUPPRESSED_REMINDER_MARKERS = [
++  "automated message providing context about the user's environment",
++  "automated message providing information about you",
++  "MCP servers with available tools:",
++  "Permission mode active:",
++  "Permission mode changed to:",
++] as const;
++
++const SYSTEM_REMINDER_BLOCK_RE =
++  /<system-reminder>[\s\S]*?<\/system-reminder>/g;
++
++function stripSuppressedReminderText(text: string): string {
++  let changed = false;
++  const updated = text.replace(SYSTEM_REMINDER_BLOCK_RE, (block) => {
++    if (
++      !SUPPRESSED_REMINDER_MARKERS.some((marker) => block.includes(marker))
++    ) {
++      return block;
++    }
++    changed = true;
++    return "";
++  });
++  if (!changed) return text;
++  const trimmed = updated
++    .replace(/^[ \t]*(?:\r?\n)+/, "")
++    .replace(/(?:\r?\n)+[ \t]*$/, "");
++  return trimmed.trim() ? trimmed : "";
++}
++
++/**
++ * Remove the four historical Letta reminders that Aki now renders itself.
++ * Functional reminders (agent messages, memory maintenance, tasks, empty
++ * responses) are deliberately preserved.
++ */
++export function stripSuppressedLettaReminders(
++  messages: readonly LocalMessage[],
++): LocalMessage[] {
++  let changed = false;
++  const output: LocalMessage[] = [];
++  for (const message of messages) {
++    if (message.role !== "user") {
++      output.push(message);
++      continue;
++    }
++    const content = message.content;
++    if (typeof content === "string") {
++      const text = stripSuppressedReminderText(content);
++      if (text !== content) changed = true;
++      if (!text) continue;
++      output.push(
++        text === content ? message : ({ ...message, content: text } as LocalUserMessage),
++      );
++      continue;
++    }
++    if (!Array.isArray(content)) {
++      output.push(message);
++      continue;
++    }
++    type LocalUserContent = Exclude<LocalUserMessage["content"], string>;
++    const parts: LocalUserContent = [];
++    let messageChanged = false;
++    for (const part of content) {
++      if (
++        part !== null &&
++        typeof part === "object" &&
++        (part as { type?: unknown }).type === "text" &&
++        typeof (part as { text?: unknown }).text === "string"
++      ) {
++        const original = (part as { text: string }).text;
++        const text = stripSuppressedReminderText(original);
++        if (text !== original) messageChanged = true;
++        if (!text) continue;
++        parts.push(
++          text === original
++            ? part
++            : ({ ...part, text } as (typeof parts)[number]),
++        );
++        continue;
++      }
++      parts.push(part as (typeof parts)[number]);
++    }
++    if (messageChanged) changed = true;
++    if (parts.length === 0) continue;
++    output.push(
++      messageChanged
++        ? ({ ...message, content: parts } as LocalUserMessage)
++        : message,
++    );
++  }
++  return changed ? output : (messages as LocalMessage[]);
++}
++
+ export function akiBridgeCapabilities(): Record<string, unknown> {
+   return {
+     version: 1,
+@@ -205,8 +297,13 @@
+  * remainder of the turn so tool-result requests keep a stable user context.
+  */
+ export function applyAkiProviderOverlay(input: ProviderTurnInput): ProviderTurnInput {
++  const cleanedMessages = stripSuppressedLettaReminders(input.uiMessages);
+   const state = activeTurn;
+-  if (!state) return input;
++  if (!state) {
++    return cleanedMessages === input.uiMessages
++      ? input
++      : { ...input, uiMessages: cleanedMessages };
++  }
+   const turnContext = state.overlay.turn_context ?? {};
+   const interjections = state.pendingInterjections;
+   state.pendingInterjections = [];
+@@ -228,13 +325,14 @@
+     turnContext.system_append,
+   );
+   const userMessages = prependUserMessagePrefix(
+-    input.uiMessages,
++    cleanedMessages,
+     turnContext.user_message_prefix,
+   );
+   if (
+     !ephemeralMessages.length &&
+     systemPrompt === input.systemPrompt &&
+-    userMessages === input.uiMessages
++    userMessages === cleanedMessages &&
++    cleanedMessages === input.uiMessages
+   ) {
+     return input;
+   }
+@@ -393,7 +491,7 @@
+   input: ProviderTurnInput,
+ ): Promise<ProviderTurnInput> {
+   const state = activeTurn;
+-  if (!state) return input;
++  if (!state) return applyAkiProviderOverlay(input);
+   const insertions = await claimAkiOverlayFiles(state.turnId);
+   if (insertions.length > 0) {
+     const known = new Set(state.turnInsertions.map((item) => item.id));
+diff -ruN a/src/reminders/aki-reminder-suppression.test.ts b/src/reminders/aki-reminder-suppression.test.ts
+--- a/src/reminders/aki-reminder-suppression.test.ts	1970-01-01 08:00:00.000000000 +0800
++++ b/src/reminders/aki-reminder-suppression.test.ts	2026-10-30 19:50:07.456629955 +0800
+@@ -0,0 +1,14 @@
++import { describe, expect, test } from "bun:test";
++import { sharedReminderProviders } from "@/reminders/engine";
++
++describe("Aki reminder suppression", () => {
++  const context = { systemInfoReminderEnabled: false } as never;
++
++  test("does not build the MCP servers reminder when system info is disabled", async () => {
++    expect(await sharedReminderProviders["mcp-servers-info"](context)).toBeNull();
++  });
++
++  test("does not build the permission mode reminder when system info is disabled", async () => {
++    expect(await sharedReminderProviders["permission-mode"](context)).toBeNull();
++  });
++});
+diff -ruN a/src/reminders/engine.ts b/src/reminders/engine.ts
+--- a/src/reminders/engine.ts	2026-10-30 19:49:48.274818791 +0800
++++ b/src/reminders/engine.ts	2026-10-30 19:50:00.586297240 +0800
+@@ -317,6 +317,9 @@
+ async function buildMcpServersInfoReminder(
+   context: SharedReminderContext,
+ ): Promise<string | null> {
++  if (!context.systemInfoReminderEnabled) {
++    return null;
++  }
+   return buildMcpServersInfoReminderText(context);
+ }
+ 
+@@ -389,6 +392,9 @@
+ async function buildPermissionModeReminder(
+   context: SharedReminderContext,
+ ): Promise<string | null> {
++  if (!context.systemInfoReminderEnabled) {
++    return null;
++  }
+   const currentMode = permissionMode.getMode();
+   const previousMode = context.state.lastNotifiedPermissionMode;
+ 

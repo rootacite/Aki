@@ -111,7 +111,10 @@ class SoloMemoryStoreTests(unittest.TestCase):
             ],
         )
         rendered = render_solo_memories([session])
-        self.assertIn('budget_tokens="65536"', rendered)
+        self.assertTrue(rendered.startswith("# solo-memories"))
+        self.assertIn("## Note", rendered)
+        self.assertIn("## Content", rendered)
+        self.assertNotIn('budget_tokens="65536"', rendered)
         self.assertNotIn("internal-session-id", rendered)
         self.assertNotIn("sme_internal_id", rendered)
         self.assertIn(
@@ -167,12 +170,16 @@ Exception: tools listed in `<tool-ownership>` as exclusive to you.
             "<tool-ownership>tools</tool-ownership>\n"
             "<channel-policy>policy</channel-policy>\n"
             "<live-context>live</live-context>\n"
+            "# solo-mode\n\n## Notice\nprivate\n\n"
+            "# format-guard (STRICT ENFORCEMENT)\n\nStay conversational.\n"
         )
         stripped = strip_runtime_prompt_blocks(prompt)
         self.assertIn("You are Aki.", stripped)
         self.assertNotIn("<tool-ownership", stripped)
         self.assertNotIn("<channel-policy", stripped)
         self.assertNotIn("<live-context", stripped)
+        self.assertNotIn("# solo-mode", stripped)
+        self.assertNotIn("# format-guard", stripped)
 
     def test_default_path_and_atomic_store(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

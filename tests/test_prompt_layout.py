@@ -36,9 +36,10 @@ class PromptLayoutTests(unittest.TestCase):
             message="UNIQUE_MESSAGE_BODY",
             wait_labels=("Fuyu",),
         )
-        self.assertIn('<turn-control version="1"', block)
-        self.assertIn("<guidance>", block)
-        self.assertIn("<initiation-budget", block)
+        self.assertTrue(block.startswith("# turn-control"))
+        self.assertIn("## Turn Action & Permissions", block)
+        self.assertIn("## Initiation Budget", block)
+        self.assertIn("remaining=3/3", block)
         self.assertIn('<wait-user allowed="true"', block)
         self.assertIn('<wait-other targets="Fuyu">', block)
         self.assertNotIn("UNIQUE_MESSAGE_BODY", block)

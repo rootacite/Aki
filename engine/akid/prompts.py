@@ -13,10 +13,12 @@ from engine.live_context import (
     collect_live_context,
     render_channel_transcript,
     render_live_context,
+    render_runtime_context,
     render_turn_control,
     render_solo_memories,
     render_solo_mode,
     render_solo_transcript,
+    render_user_format_guard,
 )
 from engine.solo_memory import SOLO_MEMORY_BUDGET_TOKENS
 from engine.solo_mode import load_solo_scene
@@ -240,8 +242,20 @@ class PromptsMixin:
 
 
     async def _refresh_live_context(self) -> str:
+        runtime = self._runtime_context_values()
         if not self.config.live_context_enabled:
-            return ""
+            block = render_runtime_context(**runtime)
+            self._live_context_status.update(
+                {
+                    "enabled": False,
+                    "budget_tokens": self.config.live_context_budget_tokens,
+                    "last_sections": ["memfs", "mcp"],
+                    "last_errors": [],
+                    "block_bytes": len(block.encode("utf-8")),
+                    "updated": True,
+                }
+            )
+            return block
         path = self._agent_record_path()
         captured_at = datetime.now().astimezone()
         options = LiveContextOptions(
@@ -272,6 +286,7 @@ class PromptsMixin:
                     if self.config.profile == "aki" and self.config.aki is not None
                     else ""
                 ),
+                **runtime,
             )
             self._live_context_status.update(
                 {
@@ -290,15 +305,32 @@ class PromptsMixin:
             return block
         except Exception as exc:
             LOGGER.warning("live context refresh failed: %s", exc)
+            fallback = render_runtime_context(
+                **runtime,
+                note="Desktop live context is unavailable this turn.",
+            )
             self._live_context_status.update(
                 {
                     "last_captured_at": captured_at.isoformat(timespec="seconds"),
                     "last_errors": [str(exc)],
                     "agent_path": str(path) if path is not None else "",
+                    "block_bytes": len(fallback.encode("utf-8")),
                     "updated": False,
                 }
             )
-            return ""
+            return fallback
+
+
+    def _runtime_context_values(self) -> dict[str, object]:
+        return {
+            "memory_dir": str(self.memory_dir),
+            "mcp_servers": list(self._mcp_native_active_servers),
+            "mcp_tools": list(self._mcp_tools),
+            "mcp_tools_error": self._mcp_tools_error,
+            "mcp_native_tools_enabled": bool(
+                self.config.mcp_native_tools_enabled
+            ),
+        }
 
 
     def _agent_info(self) -> tuple[str | None, str | None, int | None]:

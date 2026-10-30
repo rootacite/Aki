@@ -37,7 +37,7 @@ class PromptCacheAuditTests(unittest.TestCase):
                     "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": f"user-{index}"},
-                        {"role": "system", "content": f"<turn-control>{index}</turn-control>"},
+                        {"role": "user", "content": f"# turn-control\n\n{index}"},
                     ]
                 },
             )
@@ -61,7 +61,7 @@ class PromptCacheAuditTests(unittest.TestCase):
                         "<channel-identity></channel-identity>"
                         "<channel-context></channel-context>"
                         "# Format Guard"
-                        "<turn-control></turn-control>"
+                        "# turn-control\n\n"
                     ),
                 }
             ]
@@ -78,7 +78,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-identity></channel-identity>"
             "<channel-context></channel-context>"
             "# Format Guard"
-            "<turn-control></turn-control>"
+            "# turn-control\n\n"
         )
         payload = {
             "input": [
@@ -89,8 +89,8 @@ class PromptCacheAuditTests(unittest.TestCase):
         normalized = audit._normalize_debug_payload(payload)
         self.assertEqual(normalized["messages"][0]["role"], "system")
         self.assertIn("# Format Guard", normalized["messages"][0]["content"])
-        self.assertNotIn("<turn-control", normalized["messages"][0]["content"])
-        self.assertIn("<turn-control", normalized["messages"][1]["content"])
+        self.assertNotIn("# turn-control", normalized["messages"][0]["content"])
+        self.assertIn("# turn-control", normalized["messages"][1]["content"])
 
     def test_accepts_turn_control_in_current_user_prefix(self) -> None:
         audit = load_audit_module()
@@ -107,7 +107,7 @@ class PromptCacheAuditTests(unittest.TestCase):
                 {"role": "system", "content": system},
                 {
                     "role": "user",
-                    "content": "<turn-control>dynamic</turn-control>\n\nhello",
+                    "content": "# turn-control\n\ndynamic\n\nhello",
                 },
             ]
         }
