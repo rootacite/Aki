@@ -37,6 +37,7 @@ class Approval:
     future: asyncio.Future[tuple[bool, str | None]]
     tool_name: str
     tool_call_id: str
+    user_message: str | None = None
 
 
 
@@ -75,6 +76,7 @@ class Turn:
     wait_guard_targets: tuple[tuple[str, str, str], ...] = ()
     wait_guard_attempt: int = 0
     wait_guard_blocked: bool = False
+    approval_insertion_seq: int = 0
     tool_result_events: int = 0
     pending_tool_results: int = 0
     seq: int = 0

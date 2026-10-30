@@ -93,6 +93,7 @@ STRUCTURED_FIELDS = (
     "timeoutS",
     "details",
     "decision",
+    "approvalMessage",
     "attachmentCount",
     "attachmentIds",
     "attachmentNames",

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import uuid
+from typing import Any, Mapping
 from engine.protocol import (
     FrameError,
     make_event,
@@ -13,6 +14,7 @@ from engine.protocol import (
 from .constants import (
     HIDDEN_TOOL_NAMES,
     LOGGER,
+    MAX_APPROVAL_MESSAGE_CHARS,
 )
 from .history import (
     _format_channel_message_time,
@@ -23,27 +25,56 @@ from .types import Turn
 
 class MqttCommandsMixin:
 
-    async def _handle_channel_command(self, text: str, sender_id: str = "") -> bool:
-        tokens = text.split()
-        if not tokens:
-            return False
-        head = tokens[0].lower()
+    @staticmethod
+    def _parse_channel_approval_command(
+        text: str,
+    ) -> tuple[bool | None, str | None, str | None]:
+        """Parse approval commands, preserving an optional denial message."""
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return None, None, None
+        head = parts[0].lower()
+        tail = parts[1] if len(parts) > 1 else ""
         decision: bool | None = None
-        approval_id: str | None = None
         if head in ("akid-approve", "akid-allow"):
             decision = True
-            approval_id = tokens[1] if len(tokens) > 1 else None
         elif head in ("akid-deny", "akid-reject"):
             decision = False
-            approval_id = tokens[1] if len(tokens) > 1 else None
-        elif head == "akid" and len(tokens) > 1:
-            verb = tokens[1].lower()
+        elif head == "akid":
+            verb_parts = tail.split(maxsplit=1)
+            if not verb_parts:
+                return None, None, None
+            verb = verb_parts[0].lower()
             if verb in ("approve", "allow"):
                 decision = True
             elif verb in ("deny", "reject"):
                 decision = False
-            if decision is not None:
-                approval_id = tokens[2] if len(tokens) > 2 else None
+            else:
+                return None, None, None
+            tail = verb_parts[1] if len(verb_parts) > 1 else ""
+        else:
+            return None, None, None
+
+        target_parts = tail.split(maxsplit=1)
+        approval_id: str | None = None
+        message: str | None = None
+        if target_parts:
+            if target_parts[0] == "--":
+                message = target_parts[1] if len(target_parts) > 1 else None
+            else:
+                approval_id = target_parts[0]
+                message = target_parts[1] if len(target_parts) > 1 else None
+        return decision, approval_id, message
+
+    async def _handle_channel_command(
+        self,
+        text: str,
+        sender_id: str = "",
+        metadata: Mapping[str, Any] | None = None,
+    ) -> bool:
+        decision, approval_id, command_message = self._parse_channel_approval_command(
+            text
+        )
         if decision is None:
             return False
 
@@ -82,7 +113,17 @@ class MqttCommandsMixin:
             self._schedule_channel_notice("akid: that approval was already resolved")
             return True
 
-        reason = "approved via MQTT channel" if decision else "denied via MQTT channel"
+        if decision:
+            reason = "approved via MQTT channel"
+            approval.user_message = None
+        else:
+            metadata_message = str((metadata or {}).get("approvalMessage") or "").strip()
+            explicit_message = (
+                metadata_message or (command_message or "").strip()
+            )[:MAX_APPROVAL_MESSAGE_CHARS].strip()
+            approval.user_message = explicit_message or None
+            reason = explicit_message
+            reason = reason or "denied via MQTT channel"
         approval.future.set_result((decision, reason))
         verb = "approved" if decision else "denied"
         LOGGER.info(

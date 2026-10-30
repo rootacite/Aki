@@ -5050,18 +5050,98 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await server._on_channel_text("alice", "alice-1", "dangerous again")
         await wait_until(lambda: len(fake_channel.events_of("approval")) >= 2)
         second = fake_channel.events_of("approval")[1]
+        deny_message = "不要执行 shell，改成只读检查"
         await server._on_channel_text(
-            "alice", "alice-1", f"akid-deny {second['approvalId']}"
+            "alice",
+            "alice-1",
+            f"akid-deny {second['approvalId']} {deny_message}",
         )
         await wait_until(
-            lambda: any("channel tool denied" in text for text in fake_channel.final_texts())
+            lambda: any(deny_message in text for text in fake_channel.final_texts())
         )
-        self.assertTrue(
-            any(
-                event.get("decision") == "deny"
-                for event in fake_channel.events_of("approval_resolved")
+        resolved = fake_channel.events_of("approval_resolved")
+        self.assertTrue(any(event.get("decision") == "deny" for event in resolved))
+        self.assertEqual(resolved[-1].get("details"), deny_message)
+
+    async def test_channel_approval_metadata_message_reaches_model(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
+        )
+        insertion_payloads: list[dict[str, Any]] = []
+        original_write = server._write_turn_overlay_file
+
+        async def capture_insertion(turn: Turn, item: dict[str, Any]):
+            path = await original_write(turn, item)
+            if path is not None:
+                insertion_payloads.append(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+            return path
+
+        await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
+        await wait_until(lambda: bool(fake_channel.events_of("approval")))
+        approval = fake_channel.events_of("approval")[0]
+        deny_message = "先解释风险，再用只读命令验证"
+        with mock.patch.object(
+            server, "_write_turn_overlay_file", new=capture_insertion
+        ):
+            await server._on_channel_text(
+                "alice",
+                "alice-1",
+                f"akid-deny {approval['approvalId']}",
+                {"approvalMessage": deny_message},
             )
+            await wait_until(
+                lambda: any(
+                    deny_message in text for text in fake_channel.final_texts()
+                )
+            )
+        resolved = fake_channel.events_of("approval_resolved")
+        self.assertEqual(resolved[-1].get("decision"), "deny")
+        self.assertEqual(resolved[-1].get("details"), deny_message)
+        self.assertEqual(len(insertion_payloads), 1)
+        insertion = insertion_payloads[0]
+        self.assertIn("工具审批意见", insertion["text"])
+        self.assertIn(deny_message, insertion["text"])
+        self.assertIn("<user-insertion ", insertion["content"])
+        self.assertIn(deny_message, insertion["content"])
+        self.assertFalse(insertion["origin_is_agent"])
+
+    async def test_channel_deny_without_comment_skips_user_insertion(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            channel=fake_channel, approval_timeout=5.0
         )
+        insertion_payloads: list[dict[str, Any]] = []
+        original_write = server._write_turn_overlay_file
+
+        async def capture_insertion(turn: Turn, item: dict[str, Any]):
+            path = await original_write(turn, item)
+            if path is not None:
+                insertion_payloads.append(
+                    json.loads(path.read_text(encoding="utf-8"))
+                )
+            return path
+
+        await server._on_channel_text("alice", "alice-1", "run a dangerous tool")
+        await wait_until(lambda: bool(fake_channel.events_of("approval")))
+        approval = fake_channel.events_of("approval")[0]
+        with mock.patch.object(
+            server, "_write_turn_overlay_file", new=capture_insertion
+        ):
+            await server._on_channel_text(
+                "alice",
+                "alice-1",
+                f"akid-deny {approval['approvalId']}",
+            )
+            await wait_until(
+                lambda: any(
+                    "channel tool denied" in text
+                    for text in fake_channel.final_texts()
+                )
+            )
+        self.assertEqual(insertion_payloads, [])
 
     async def test_channel_only_original_sender_can_approve(self) -> None:
         fake_channel = FakeChannel()

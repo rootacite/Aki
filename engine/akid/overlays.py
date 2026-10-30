@@ -20,7 +20,10 @@ from engine.live_context import (
     render_new_message,
     render_user_insertion,
 )
-from .constants import LOGGER
+from .constants import (
+    APPROVAL_INSERTION_SEQ_BASE,
+    LOGGER,
+)
 from .paths import now_iso
 
 class OverlaysMixin:
@@ -257,6 +260,43 @@ class OverlaysMixin:
                 exc,
             )
             return None
+
+
+    async def _write_approval_feedback_insertion(
+        self,
+        turn: Turn,
+        *,
+        approval_id: str,
+        tool_name: str,
+        message: str,
+    ) -> Path | None:
+        text = message.strip()
+        if not text or not turn.bridge_turn_started or turn.end_sent:
+            return None
+        turn.approval_insertion_seq += 1
+        seq = APPROVAL_INSERTION_SEQ_BASE + turn.approval_insertion_seq
+        inserted_at_ms = int(time.time() * 1000)
+        item = {
+            "seq": seq,
+            "sender": turn.channel_sender or self.config.username,
+            "sender_id": turn.origin_sender_id,
+            "text": f"工具审批意见（{tool_name} 未执行）：\n{text}",
+            "sent_at": inserted_at_ms,
+            "inserted_at_ms": inserted_at_ms,
+            "origin_is_agent": False,
+        }
+        path = await self._write_turn_overlay_file(turn, item)
+        if path is None:
+            return None
+        turn.overlay_files[seq] = path
+        LOGGER.info(
+            "approval feedback inserted as user message id=%s tool=%s turn=%s seq=%s",
+            approval_id,
+            tool_name,
+            turn.turn_id,
+            seq,
+        )
+        return path
 
 
     @staticmethod

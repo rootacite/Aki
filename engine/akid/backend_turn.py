@@ -311,6 +311,7 @@ class BackendTurnMixin:
             turn.origin_is_agent,
         )
         timed_out = False
+        user_message: str | None = None
         try:
             allow, reason = await asyncio.wait_for(
                 future, timeout=self.config.approval_timeout
@@ -322,9 +323,24 @@ class BackendTurnMixin:
         except asyncio.CancelledError:
             allow, reason = False, "turn cancelled"
         finally:
+            user_message = approval.user_message
             self.operation_journal.approval_finished()
             self.approvals.pop(approval_id, None)
             self._schedule_status_refresh()
+        if not allow and user_message:
+            try:
+                await self._write_approval_feedback_insertion(
+                    turn,
+                    approval_id=approval_id,
+                    tool_name=tool_name,
+                    message=user_message,
+                )
+            except Exception:
+                LOGGER.exception(
+                    "failed to insert approval feedback as user message id=%s turn=%s",
+                    approval_id,
+                    turn.turn_id,
+                )
         decision = "timeout" if timed_out else ("allow" if allow else "deny")
         await self._emit(
             turn,

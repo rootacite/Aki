@@ -26,6 +26,7 @@ from engine.protocol import (
 from .constants import (
     CHANNEL_IMAGE_DIRECTIVE_RE,
     LOGGER,
+    MAX_APPROVAL_MESSAGE_CHARS,
     MAX_AGENT_IMAGE_DIRECTIVES,
     MAX_CHANNEL_ATTACHMENT_TOTAL_BYTES,
     MAX_IMAGE_CAPTION_CHARS,
@@ -242,6 +243,8 @@ class DeliveryMixin:
         if decision not in ("allow", "deny"):
             raise RpcError(ErrorCode.INVALID_PARAMS, "decision must be 'allow' or 'deny'")
         message = optional_string(params, "message")
+        if decision == "deny" and message:
+            message = message.strip()[:MAX_APPROVAL_MESSAGE_CHARS] or None
         approval = self.approvals.get(approval_id)
         if approval is None:
             raise RpcError(
@@ -253,6 +256,7 @@ class DeliveryMixin:
             raise RpcError(ErrorCode.NOT_INITIATOR, "only the initiating client may approve")
         if approval.future.done():
             raise RpcError(ErrorCode.TURN_NOT_FOUND, "approval already resolved")
+        approval.user_message = message if decision == "deny" else None
         approval.future.set_result((decision == "allow", message))
         LOGGER.info(
             "local approval decision id=%s decision=%s turn=%s origin=%s",

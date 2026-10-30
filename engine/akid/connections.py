@@ -499,7 +499,12 @@ class ChannelConnection:
                 lines.extend(["input:", rendered])
             if timeout_s is not None:
                 lines.append(f"timeout: {timeout_s}s")
-            lines.extend([f"reply: akid-approve {approval_id}", f"       akid-deny {approval_id}"])
+            lines.extend(
+                [
+                    f"reply: akid-approve {approval_id}",
+                    f"       akid-deny {approval_id} [message]",
+                ]
+            )
             self._enqueue_text(
                 "\n".join(lines),
                 {

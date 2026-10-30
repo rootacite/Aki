@@ -148,7 +148,7 @@ class PublishMixin:
             [
                 "",
                 f"reply: akid-approve {approval_id}",
-                f"       akid-deny {approval_id}",
+                f"       akid-deny {approval_id} [message]",
                 "or simply: akid-approve / akid-deny (oldest pending)",
             ]
         )

@@ -615,16 +615,21 @@ class FakeLetta:
                 response = self.request_tool(tool_name, tool_input, f"tool-ch-{number}")
                 body = (response or {}).get("response") or {}
                 allowed = body.get("behavior") == "allow"
+                denial_message = str(body.get("message") or "denied")
                 emit(
                     {
                         "type": "message",
                         "message_type": "tool_return_message",
                         "tool_call_id": f"tool-ch-{number}",
                         "status": "success" if allowed else "error",
-                        "tool_return": "tool output" if allowed else body.get("message", "denied"),
+                        "tool_return": "tool output" if allowed else denial_message,
                     }
                 )
-                text = "channel tool allowed" if allowed else "channel tool denied"
+                text = (
+                    "channel tool allowed"
+                    if allowed
+                    else f"channel tool denied: {denial_message}"
+                )
                 emit_chunk(
                     {"message_type": "assistant_message", "content": [{"type": "text", "text": text}]}
                 )

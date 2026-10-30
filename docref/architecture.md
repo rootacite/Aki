@@ -327,13 +327,20 @@ akid-approve              # 同意最早待处理的审批
 akid-deny                 # 拒绝最早待处理的审批
 akid-approve <approval_id>
 akid-deny <approval_id>
+akid-deny <approval_id> <审批意见>
+akid-deny -- <审批意见>    # 拒绝最早待处理的审批，并附意见
 ```
 
-也可写成 `akid approve|deny [approval_id]`。频道只能审批频道发起的 turn；
+也可写成 `akid approve [approval_id]` 或 `akid deny [approval_id] [审批意见]`。
+拒绝时附带的意见走双通道：既作为 deny 的 `message` 回传给 backend、进入工具结果，
+也作为 gateway 生成的 user-role `<user-insertion>` 注入当前 turn，让模型能以用户反馈而不是
+工具输出的身份读取。普通工具结果仍然不可信，不放宽这条边界。本地 RPC 的
+`aki.approval.respond` 同样支持可选的 `message` 字段。频道只能审批频道发起的 turn；
 审批命令必须来自真人成员（成员身份 `kind=user`）。如果 turn 的原始发送者是
 另一个智能体，该智能体不能审批自己唤醒的 turn，只有真人用户能批准或拒绝。
 本地 turn 仍需本地客户端调用 `aki.approval.respond`。tokifactor 会把这些请求
-渲染成 Allow/Deny 按钮，按钮发送的仍是上述加密文本命令。
+渲染成 Allow/Deny 按钮；Deny 会先弹出可选的审批意见输入框，并通过加密文本命令
+及 `approvalMessage` envelope 字段发送。
 
 结构化事件使用兼容的 `akid.v1` TextEnvelope 扩展字段；旧客户端仍会看到
 fallback 文本。工具 stdout/stderr、工具参数、reasoning 和 usage 不会发布到频道。

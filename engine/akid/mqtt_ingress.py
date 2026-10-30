@@ -459,7 +459,9 @@ class MqttIngressMixin:
             self._agent_initiation_remaining = max(
                 0, int(self.config.agent_initiation_limit)
             )
-        if await self._handle_channel_command(text, member_id or sender_id):
+        if await self._handle_channel_command(
+            text, member_id or sender_id, event_metadata
+        ):
             return
         entry = self._record_channel_message(
             sender=display_sender,
