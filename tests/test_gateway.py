@@ -454,6 +454,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         mqtt_port: int = 1883,
         mqtt_state: Path | None = None,
         channel_wait_for: tuple[str, ...] = (),
+        channel_mention_only: bool = False,
         camera_enabled: bool = True,
         camera_require_approval: bool = True,
         camera_device: str = "/dev/video0",
@@ -508,6 +509,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             mqtt_port=mqtt_port,
             mqtt_state=mqtt_state,
             channel_wait_for=channel_wait_for,
+            channel_mention_only=channel_mention_only,
             camera_enabled=camera_enabled,
             camera_require_approval=camera_require_approval,
             camera_device=camera_device,
@@ -4391,6 +4393,32 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(user_entry.text, body)
         self.assertFalse(user_entry.from_agent)
+
+    async def test_mention_only_profile_ignores_broadcasts_until_mentioned(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(
+            profile="natsu",
+            channel=fake_channel,
+            channel_mention_only=True,
+        )
+        server.config.channel_name = "Natsu"
+        server.config.channel_aliases = ("Natsu", "夏")
+
+        await server._on_channel_text("alice", "alice-1", "大家汇报一下进度。")
+        await server._on_channel_text(
+            "Fuyu",
+            "fuyu-1",
+            "这是给所有人的广播。",
+            {"schema": "akid.v1", "kind": "turn", "phase": "final", "wake": "all"},
+        )
+        await asyncio.sleep(0.1)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+        await server._on_channel_text("alice", "alice-1", "@Natsu 看一下这个样本。")
+        await wait_until(lambda: bool(fake_channel.events))
+        self.assertTrue(fake_channel.events)
 
     async def test_user_at_without_trailing_space_does_not_filter_turns(self) -> None:
         fake_channel = FakeChannel()

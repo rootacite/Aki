@@ -63,7 +63,7 @@ def profile_names(requested: list[str], config_root: Path) -> list[str]:
     if requested:
         return requested
     discovered = sorted(path.stem for path in config_root.glob("*.conf"))
-    return discovered or ["aki", "fuyu", "haru"]
+    return discovered or ["aki", "fuyu", "haru", "natsu"]
 
 
 def migration_summary(

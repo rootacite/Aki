@@ -92,7 +92,7 @@ class ExecutionPolicyTests(unittest.TestCase):
 
     def test_base_prompts_waive_mention_requirement_in_solo(self) -> None:
         root = Path(__file__).resolve().parent.parent
-        for name in ("aki-system.md", "fuyu-system.md", "haru-system.md"):
+        for name in ("aki-system.md", "fuyu-system.md", "haru-system.md", "natsu-system.md"):
             with self.subTest(name=name):
                 prompt = (root / "prompts" / name).read_text(encoding="utf-8")
                 self.assertIn("Solo mode is the exception", prompt)

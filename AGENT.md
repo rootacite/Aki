@@ -294,9 +294,20 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `scripts/install-system-prompt.py` 安装；Aki 自有，不跟随 Letta 上游自动更新。
 - 设置：每个 profile 使用 `~/.aki/<profile>.conf`；`aki.conf` 是默认 profile。
   Letta 只保存对应 profile 的回环代理地址和回环令牌。
-- 成员：Aki（7721）、Fuyu（7722）、Haru（7723）已上线；Natsu 仍为 Coming Soon。
-  Haru 使用 `userdata3/`、`aki-haru` provider 和 Gemini 3.8 Flash 文本模型（reasoning `low`），
+- 成员：Aki（7721）、Fuyu（7722）、Haru（7723）、Natsu（7724）均已上线。
+  Haru 使用 `userdata3/`、`aki-haru` provider 和 Gemini 3.8 Flash 文本模型，
   `[gateway] username = 哥哥`，并用 `[channel] wait_for = Aki,Fuyu` 固定前序发言顺序。
+- Natsu 使用 `userdata4/`、`aki-natsu` provider 和 7724 proxy 端口，默认模型为
+  `aki-natsu/deepseek-flash`，同时保留 `grok-4.6` 路由；`[gateway] username = 人类`，
+  `[channel] wait_for` 留空（不等其他成员），并设置 `[channel] mention_only = true`：无 `@Natsu`
+  的群聊广播只进入 transcript，不唤醒她。她没有显式 `[tools]` allowlist，保留 Bash 与完整工具面；
+  `[mcp] excluded` 为空，本机授权范围内的 recon/EDR MCP 工具会对她注册。安全边界由
+  `prompts/natsu-system.md` 和 `userdata4/character/boundaries.md` 约束：只处理本地、
+  沙箱内或明确授权的目标，破坏性操作先取得授权。
+- 本地 recon/EDR MCP server 源码内嵌在 `vendor/mcps/`，运行时命令是
+  `vendor/mcps/.venv/bin/mcps`，scope 配置在 `vendor/mcps/config/recon.yaml`。
+  `scripts/install-local-mcp.py` 负责创建 venv 并写入 per-agent MCP 配置；Natsu 默认启用
+  `local`，Aki/Fuyu/Haru 仍通过 `[mcp] excluded = local` 默认禁用。
 - Haru 工具边界：`[tools]` 显式使用 `letta` toolset，并在启动参数中加
   `--tools`/`--disallowedTools`，使 Bash、shell、子代理从 schema 中消失。
   `aki-write-policy.ts` 只允许 `Write/Edit/ApplyPatch/write_artifact_file`

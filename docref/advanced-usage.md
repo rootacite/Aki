@@ -26,7 +26,7 @@
   KDE widget 和 GUI bridge 已移除。
 - **可写目录沙盒。** 手动通过 `akictl allow` 注册，随时可吊销；注册/吊销会重启后端。
 - **多成员 profiles。** 每个 profile 有独立的 agent、conversation、socket、频道身份、
-  proxy 端口与 userdata；Aki、Fuyu 和 Haru 已上线，Natsu 作为 Coming Soon 预留。
+  proxy 端口与 userdata；Aki、Fuyu、Haru 和 Natsu 均已上线。
 - **人格与 userdata。** 每个 profile 使用自己的公开人格模板，支持称呼占位符、MemFS
   渲染、备份和 git 提交，互不覆盖。
 - **工具集。** tokifactor 图片发送、摄像头拍照、KDE/grim 截图，以及 `akictl` 管理命令。
@@ -79,9 +79,9 @@ python3 scripts/build-letta.py --check
 
 默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
 
-各成员的采样参数固定在该 profile 的 `[model.*] extra_body` 中，由本地代理合并进每次上游请求：
-Aki `temperature=0.67` / `top_p=0.83`，Fuyu `0.7` / `0.86`，Haru `0.88` / `0.92`。
-新增模型路由时也要带上对应成员的 `extra_body`；`extra_body` 不能覆盖 `model` 等路由字段。
+各 profile 的模板默认不再固定 `temperature` / `top_p` 等 `extra_body`，使用上游模型自身的
+采样参数。需要覆盖时可以在对应的 `[model.*]` 段添加 `extra_body`；`extra_body` 不能覆盖
+`model` 等路由字段。
 
 ### Profiles
 
@@ -150,8 +150,8 @@ akictl reasoning set low
 ```
 
 Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和 7722 proxy
-端口；配置里同时准备了 Grok 4.6（500k 上下文）与 DeepSeek Flash，可以用
-`akictl fuyu model set grok-4.6` 切换。它的基础提示词是 `prompts/fuyu-system.md`，
+端口；默认模型是 `aki-fuyu/grok-4.6`（500k 上下文），配置里同时准备了 DeepSeek Flash。
+它的基础提示词是 `prompts/fuyu-system.md`，
 与 Aki 一样属于本项目定制的基座，不使用 Letta 上游默认的
 “You are a Letta Code agent” 提示词。
 
@@ -163,9 +163,9 @@ bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
 本机 `cli-proxy-api` 提供的 Gemini 3.8 Flash 文本 API；key 未填写时模型不会暴露给 Letta。
 
-Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算，并通过
-`extra_body` 发送 `{"reasoning_effort": "low"}`。`low` 用于降低创意对话的延迟和过度
-推理；如果后续需要更深的规划，可改为 `medium` 或 `high`。上游是 Aki 共用的本机
+Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算；模板不再通过
+`extra_body` 固定 reasoning、temperature 或 top_p。需要调低延迟或加深规划时，可在
+`[model.gemini-3.8-flash]` 中显式添加 `extra_body`。上游是 Aki 共用的本机
 `cli-proxy-api`（`127.0.0.1:8317`），使用 `use_proxy = false` 直连。文生图走独立的
 MiniMax `image-01` API 和本机 ComfyUI；TTS 与视频仍属于后续阶段，Haru 的人格和提示词会明确
 说明这些能力尚未安装。
@@ -181,6 +181,26 @@ python3 scripts/bootstrap-member.py --profile haru
 `~/.aki/haru.conf` 的 `[upstream.cli-proxy-api] api_key`（通常与 `aki.conf` 相同），把
 MiniMax key 填进 `[upstream.minimax] api_key`，再启动
 `akid-proxy@haru.service` 与 `akid@haru.service`。
+
+Natsu profile 使用 `userdata4/`、`aki-natsu` provider 和 7724 proxy 端口，默认模型句柄是
+`aki-natsu/deepseek-flash`，同时保留 `grok-4.6` 路由，可用
+`akictl natsu model set grok-4.6` 切换。`[gateway] username = 人类`，她的基础提示词是
+`prompts/natsu-system.md`。`[channel] mention_only = true`：群聊广播只有在显式
+`@Natsu` / `@夏` / `@Natsu（夏）` 时才唤醒她；无 `@` 的消息只进入 transcript。
+Natsu 没有显式 `[tools]` allowlist，因此保留 Bash 和完整工具面；`[mcp] excluded` 为空，
+本机授权范围内的 recon/EDR MCP 工具会注册给她，而 Aki/Fuyu/Haru 仍默认排除 `local`。
+她的边界由人格、系统提示词和系统级授权规则共同约束：只处理本地、沙箱内或明确授权的目标，
+破坏性操作和样本执行必须先取得授权。Natsu 不拥有 Aki 的日程/账本工具，也不拥有 Haru 的
+生图与 ComfyUI 工具。
+
+在新机器上首次创建 Natsu 的 profile、agent、conversation、MemFS 和 system prompt：
+
+```bash
+python3 scripts/bootstrap-member.py --profile natsu
+```
+
+完成后把 DeepSeek key 填进 `~/.aki/natsu.conf` 的 `[upstream.deepseek] api_key`，再启动
+`akid-proxy@natsu.service` 与 `akid@natsu.service`。
 
 ### 上下文压缩阈值
 
@@ -377,15 +397,17 @@ akictl reset
 ## 人格与 userdata
 
 四季工坊里每位成员的人格都由仓库中的公开模板定义，再由运行时渲染进各自 agent 的
-MemFS。现在已经上线的是 Aki、Fuyu 和 Haru，所以仓库里有三套目录：
+MemFS。现在已经上线的是 Aki、Fuyu、Haru 和 Natsu，所以仓库里有四套目录：
 
 - `userdata/` — Aki 的人格模板、记忆策略和旧版称呼迁移源。
 - `userdata2/` — Fuyu 的人格模板与记忆策略，由 `~/.aki/fuyu.conf` 的
   `[gateway] userdata = userdata2` 指向。
 - `userdata3/` — Haru 的人格模板、记忆策略和文本/桌面采集能力边界，由
   `~/.aki/haru.conf` 的 `[gateway] userdata = userdata3` 指向。
+- `userdata4/` — Natsu 的人格模板、记忆策略和安全边界，由
+  `~/.aki/natsu.conf` 的 `[gateway] userdata = userdata4` 指向。
 
-三套目录的结构相同，核心文件包括：
+四套目录的结构相同，核心文件包括：
 
 - `persona.md` — 稳定人格与团队定位
 - `memory-policy.md` — 长期记忆写入策略
@@ -426,17 +448,29 @@ akictl fuyu set-username 主人    # 只修改 fuyu profile
 
 旧版 `aki` profile 在 `[gateway] username` 尚未设置时仍会读取
 `userdata/username.txt` 或旧的按 agent 状态文件作为迁移来源；首次 `set-username`
-会把结果写入 `[gateway] username`。手动修改模板后，可以分别同步三套人格：
+会把结果写入 `[gateway] username`。手动修改模板后，可以分别同步各 profile 的人格：
 
 ```bash
 python3 scripts/sync-persona.py --source userdata --dry-run
 python3 scripts/sync-persona.py --source userdata --agent-id <aki-agent-id>
 python3 scripts/sync-persona.py --source userdata2 --agent-id <fuyu-agent-id>
 python3 scripts/sync-persona.py --source userdata3 --agent-id <haru-agent-id>
+python3 scripts/sync-persona.py --source userdata4 --agent-id <natsu-agent-id>
 
 akictl recompile          # 重编译 Aki 当前会话
 akictl fuyu recompile     # 重编译 Fuyu 当前会话
 akictl haru recompile     # 重编译 Haru 当前会话
+akictl natsu recompile    # 重编译 Natsu 当前会话
+```
+
+也可以一次同步全部 profile。脚本会自动发现 `~/.aki/*.conf`、调用
+`sync-persona.py`、更新存在的 `MANIFEST.json`，并对正在运行的 profile 重编译；
+默认不会启动已停止的 gateway：
+
+```bash
+python3 scripts/sync-personas.py --dry-run   # 预览待同步 profile
+python3 scripts/sync-personas.py             # 同步并重编译运行中的 profile
+python3 scripts/sync-personas.py --start     # 同时启动有变更但已停止的 profile
 ```
 
 脚本只接受上述白名单文件，会校验 frontmatter、检查未解析的占位符、备份旧版本到
@@ -459,10 +493,20 @@ description = Aki（秋 / 小秋），温柔亲昵、有点黏人的少女感恋
 wait_for = Aki
 ```
 
-例如 Fuyu 配 `wait_for = Aki`，Haru 配 `wait_for = Aki,Fuyu`，Natsu 预留
-`wait_for = Aki,Fuyu`；Aki 留空。配置为空时不注册 `wait_other` 工具；即使误配，
+例如 Fuyu 配 `wait_for = Aki`，Haru 配 `wait_for = Aki,Fuyu`；Aki 与 Natsu 留空。
+配置为空时不注册 `wait_other` 工具；即使误配，
 代码层也不会给 Aki 注册或渲染 `wait_other`。
 顺序必须无环，否则两个 profile 会互相等待。
+
+如果某个成员只应在被点名时出现，可以开启 mention-only 唤醒：
+
+```ini
+[channel]
+mention_only = true
+```
+
+当前只有 Natsu 默认开启。无 `@` 的群聊广播只会写入 transcript，不会为它启动新 turn；
+已经激活的 turn 内到达的补充消息仍会并入该 turn。
 
 改角色定位时，最好把人格模板、MemFS 和 `[channel] description` 一起更新，避免群里
 显示的简介和成员实际表现对不上。当前 Aki 与 Fuyu 的简介分别写在
@@ -571,8 +615,8 @@ initiation budget、execution responder 和 `wait_other` 提示都在 `# turn-co
 历史频道 prompt 的成员表迁移（仅用于旧数据）：
 
 ```bash
-python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru  # dry-run
-python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru --apply
+python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru --profile natsu  # dry-run
+python3 scripts/migrate-letta-reminders.py --profile aki --profile fuyu --profile haru --profile natsu --apply
 python3 scripts/migrate-channel-prompts.py            # dry-run
 python3 scripts/migrate-channel-prompts.py --apply    # backup + stop/restart akid@<profile>
 python3 scripts/restore-channel-prompts.py --turn-id turn-...          # dry-run restore
@@ -731,6 +775,23 @@ external tool，名字保持 `mcp__<server>__<tool>`（例如
 
 这些值在 `~/.aki/aki.conf` 的 `[mcp]` 段：`native_tools`、`excluded`、`max_tools`、`timeout`。
 `AKI_MCP_NATIVE_SERVERS` 仍是可选的逗号分隔白名单，默认空表示不按白名单裁剪。
+
+### 内嵌本地渗透 MCP（Natsu）
+
+本地 recon/EDR MCP server 的源码已经内嵌到 `vendor/mcps/`，不再依赖 Aki 仓库外的
+`~/Deeppin/mcps`。它的运行时命令是 `vendor/mcps/.venv/bin/mcps`，侦察范围和限速配置在
+`vendor/mcps/config/recon.yaml`。
+
+```bash
+uv sync --project vendor/mcps --frozen             # 创建/更新内嵌 venv
+python3 scripts/install-local-mcp.py --profile natsu  # 配置 Natsu 的 per-agent MCP
+./aki-safectl.py restart natsu                     # 重新加载 MCP 工具
+```
+
+Natsu 的 `~/.aki/natsu.conf` 使用 `[mcp] native_tools = true` 且 `excluded` 为空，
+因此 `local` server 的 30 个 recon/预处理工具会注册为原生工具；Aki、Fuyu、Haru 仍默认
+排除 `local`。Natsu 的安全边界不会因为工具存在而放宽：未授权目标仍由 MCP 的 scope
+配置和人格/系统提示词共同拒绝。
 
 ### tokifactor 图片
 

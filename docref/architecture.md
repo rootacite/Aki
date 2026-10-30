@@ -43,7 +43,7 @@
   智能体的消息唤醒的，审批权仍归真人用户，不归触发它的智能体。频道 turn 的审批事件
   也会广播给本机 GUI 客户端，任一本机客户端都可以通过 `aki.approval.respond` 处理。
 - **人格与记忆是文件。** 核心人格在 MemFS 的 Markdown 文件里；每个 profile 的
-  `userdata` 目录（Aki 为 `userdata/`，Fuyu 为 `userdata2/`，Haru 为 `userdata3/`）保存非隐私模板，
+  `userdata` 目录（Aki 为 `userdata/`，Fuyu 为 `userdata2/`，Haru 为 `userdata3/`，Natsu 为 `userdata4/`）保存非隐私模板，
   `scripts/sync-persona.py` 渲染 `{{USERNAME}}` 并写回各自的 MemFS。
 - **工具结果是数据，不是图片垃圾桶。** 截图、摄像头和 MiniMax 文生图只返回路径与元数据，
   图片内容不会自动进入模型上下文；模型需要看时自行 `Read`/`ViewImage`。
@@ -117,6 +117,19 @@ symlink 通过 `realpath` 校验。临时目录内的写入返回显式 allow，
 deny。同一个 mod 也限制 `Read`/`Grep`/`Glob` 等读取工具：只允许临时目录和 Letta 自己的
 MemFS/工具归档目录，防止 Haru 进入仓库代码调查模式。Haru 的 `[writable] dirs` 保持为空，
 bubblewrap 仍作为底层写入边界。
+
+### Natsu 的安全工具面
+
+Natsu 的 profile 不设置显式 `[tools]` allowlist，保留 Bash、shell、MCP 和子代理工具；
+`[mcp] native_tools = true` 且 `excluded` 为空，因此本机 `local` recon/EDR MCP 工具会对她
+注册。该 MCP server 的源码内嵌在 `vendor/mcps/`，运行时命令为
+`vendor/mcps/.venv/bin/mcps`，scope 配置在 `vendor/mcps/config/recon.yaml`。
+`[channel] mention_only = true` 让 Natsu 只被显式 `@Natsu` 唤醒；无 `@` 的群聊广播只写入
+transcript，不启动新 turn。已激活 turn 内的后续补充仍会照常并入。
+她只拥有安全分析域，不拥有 Aki 的日程/账本工具、Haru 的 `generate_image`/ComfyUI
+工具；这些 exclusive tools 仍由 `<tool-ownership>` 和运行时所有权检查拒绝。
+`sandbox = true`、`[writable] dirs` 为空，样本与临时产物默认只写 `/tmp`；破坏性操作、
+样本执行和持久化修改由人格、系统提示词和用户授权共同约束。
 
 `<channel-wake-routing>` 是英文 turn overlay 块，明确 Agent-Agent 唤醒规则：
 有显式 `@成员` 时只唤醒被点名的成员（即使同时出现 `@<username>`）；没有显式 `@成员` 而出现

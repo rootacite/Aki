@@ -71,6 +71,7 @@ class GatewayConfig:
     channel_description: str = ""
     channel_aliases: tuple[str, ...] = ()
     channel_wait_for: tuple[str, ...] = ()
+    channel_mention_only: bool = False
     channel_transcript_budget_tokens: int = DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS
     agent_initiation_limit: int = DEFAULT_AGENT_INITIATION_LIMIT
     mqtt_state: Path | None = None

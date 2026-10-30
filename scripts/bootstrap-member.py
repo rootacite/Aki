@@ -41,10 +41,39 @@ from engine.aki_config import (  # noqa: E402
 from engine.member_identity import ensure_manifest  # noqa: E402
 
 DEFAULT_PROFILE = "haru"
-DEFAULT_SOURCE = ROOT / "userdata3"
-DEFAULT_PROMPT = ROOT / "prompts" / "haru-system.md"
-DEFAULT_MODEL_ID = "gemini-3.8-flash"
 USERNAME_PLACEHOLDER = "{{USERNAME}}"
+
+PROFILE_DEFAULTS: dict[str, dict[str, str]] = {
+    "haru": {
+        "display": "Haru",
+        "source": "userdata3",
+        "prompt": "prompts/haru-system.md",
+        "username": "哥哥",
+        "model": "gemini-3.8-flash",
+        "memory_summary": "创意、活泼、爱恶作剧的妹妹",
+    },
+    "natsu": {
+        "display": "Natsu",
+        "source": "userdata4",
+        "prompt": "prompts/natsu-system.md",
+        "username": "人类",
+        "model": "deepseek-flash",
+        "memory_summary": "冷面红队大姐头与底层安全架构师",
+    },
+}
+
+
+def profile_defaults(profile: str) -> dict[str, str]:
+    if profile in PROFILE_DEFAULTS:
+        return PROFILE_DEFAULTS[profile]
+    return {
+        "display": profile.replace("-", " ").title(),
+        "source": "userdata",
+        "prompt": f"prompts/{profile}-system.md",
+        "username": "Master",
+        "model": "gemini-3.8-flash",
+        "memory_summary": "独立成员人格",
+    }
 
 
 def now_iso() -> str:
@@ -141,8 +170,14 @@ def initial_core_memory(source: Path, username: str) -> str:
     return "\n\n".join(parts) + "\n"
 
 
-def initial_memory_index() -> str:
-    return """# Memory\n\n## Core\n\n- [persona.md](persona.md) — 稳定的 Haru 人格：创意、活泼、爱恶作剧的妹妹。\n- [memory-policy.md](memory-policy.md) — 压缩上下文时如何提炼长期记忆。\n\n## On demand\n\n- [character/MEMORY.md](character/MEMORY.md) — 语气、关系、示例与边界。\n"""
+def initial_memory_index(display_name: str, memory_summary: str) -> str:
+    return (
+        "# Memory\n\n## Core\n\n"
+        f"- [persona.md](persona.md) — 稳定的 {display_name} 人格：{memory_summary}。\n"
+        "- [memory-policy.md](memory-policy.md) — 压缩上下文时如何提炼长期记忆。\n"
+        "\n## On demand\n\n"
+        "- [character/MEMORY.md](character/MEMORY.md) — 语气、关系、示例与边界。\n"
+    )
 
 
 def run_git(memory_dir: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -154,11 +189,17 @@ def run_git(memory_dir: Path, *args: str, check: bool = True) -> subprocess.Comp
     )
 
 
-def initialize_memory(memory_dir: Path, agent_id: str) -> None:
+def initialize_memory(
+    memory_dir: Path,
+    agent_id: str,
+    *,
+    display_name: str,
+    memory_summary: str,
+) -> None:
     memory_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (memory_dir / ".git").is_dir():
         run_git(memory_dir, "init", "-b", "main")
-        run_git(memory_dir, "config", "user.name", "Haru")
+        run_git(memory_dir, "config", "user.name", display_name)
         run_git(memory_dir, "config", "user.email", f"{agent_id}@letta.com")
         run_git(memory_dir, "config", "commit.gpgsign", "false")
         run_git(memory_dir, "config", "letta.agentId", agent_id)
@@ -166,12 +207,12 @@ def initialize_memory(memory_dir: Path, agent_id: str) -> None:
         policy.write_text("root-marker\n", encoding="utf-8")
     index = memory_dir / "MEMORY.md"
     if not index.exists():
-        atomic_write(index, initial_memory_index())
+        atomic_write(index, initial_memory_index(display_name, memory_summary))
     staged = run_git(memory_dir, "diff", "--cached", "--name-only", check=False)
     if not staged.stdout.strip():
         run_git(memory_dir, "add", "--", "MEMORY.md")
         if run_git(memory_dir, "diff", "--cached", "--quiet", check=False).returncode != 0:
-            run_git(memory_dir, "commit", "-m", "bootstrap Haru memory index")
+            run_git(memory_dir, "commit", "-m", f"bootstrap {display_name} memory index")
 
 
 def create_conversation(
@@ -240,6 +281,7 @@ def create_agent(
     backend_dir: Path,
     agent_id: str,
     *,
+    profile: str,
     name: str,
     description: str,
     prompt: str,
@@ -256,7 +298,7 @@ def create_agent(
             "name": name,
             "description": description,
             "system": prompt.strip(),
-            "tags": ["origin:letta-code", "git-memory-enabled", "profile:haru"],
+            "tags": ["origin:letta-code", "git-memory-enabled", f"profile:{profile}"],
             "model": model,
             "model_settings": {
                 "parallel_tool_calls": True,
@@ -297,17 +339,31 @@ def update_settings(path: Path, agent_id: str, backend_dir: Path) -> bool:
 
 def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
     profile = args.profile
+    defaults = profile_defaults(profile)
     config_path = Path(args.config).expanduser() if args.config else profile_config_path(profile)
     backend_dir = Path(args.backend_dir).expanduser() if args.backend_dir else default_backend_dir()
     settings_path = Path(args.settings).expanduser() if args.settings else default_settings_path()
-    source = Path(args.source).expanduser() if args.source else DEFAULT_SOURCE
-    prompt_path = Path(args.prompt).expanduser() if args.prompt else DEFAULT_PROMPT
+    source = (
+        Path(args.source).expanduser()
+        if args.source
+        else ROOT / defaults["source"]
+    )
+    prompt_path = (
+        Path(args.prompt).expanduser()
+        if args.prompt
+        else ROOT / defaults["prompt"]
+    )
+    requested_username = args.username if args.username is not None else defaults["username"]
+    display_name = defaults["display"]
+    model_id = args.model or defaults["model"]
     result: dict[str, Any] = {
         "profile": profile,
         "config": str(config_path),
         "backend_dir": str(backend_dir),
         "settings": str(settings_path),
         "source": str(source),
+        "display_name": display_name,
+        "model_id": model_id,
         "dry_run": bool(args.dry_run),
     }
 
@@ -318,12 +374,12 @@ def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
             raise SystemExit(f"cannot read existing profile {config_path}: {exc}") from exc
         agent_id = existing.agent_id
         conversation_id = existing.conversation
-        username = existing.username or args.username
+        username = existing.username or requested_username
         result["config_created"] = False
     else:
         agent_id = args.agent_id or f"agent-local-{uuid.uuid4()}"
         conversation_id = args.conversation or "default"
-        username = args.username
+        username = requested_username
         result["config_created"] = True
 
     result.update(
@@ -383,7 +439,12 @@ def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
     memory_dir = backend_dir / "memfs" / agent_id / "memory"
     memory_worktrees = backend_dir / "memfs" / agent_id / "memory-worktrees"
     memory_worktrees.mkdir(parents=True, exist_ok=True, mode=0o700)
-    initialize_memory(memory_dir, agent_id)
+    initialize_memory(
+        memory_dir,
+        agent_id,
+        display_name=display_name,
+        memory_summary=defaults["memory_summary"],
+    )
 
     sync_persona = load_module("aki_sync_persona", ROOT / "scripts" / "sync-persona.py")
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
@@ -402,7 +463,7 @@ def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
                 if args.letta_home
                 else str(default_letta_home() / "backups"),
                 "--message",
-                "bootstrap Haru persona",
+                f"bootstrap {display_name} persona",
                 "--json",
             ]
         )
@@ -413,18 +474,21 @@ def bootstrap(args: argparse.Namespace) -> dict[str, Any]:
     if not core_memory.strip():
         raise SystemExit("initial core memory is empty")
     model_route = next(
-        (route for route in config.models if route.model_id == DEFAULT_MODEL_ID),
+        (route for route in config.models if route.model_id == model_id),
         None,
     )
+    if model_route is None:
+        raise SystemExit(f"model {model_id!r} is not configured in {config_path}")
     context_window = model_route.context_window if model_route else 1000000
     max_tokens = model_route.max_tokens if model_route else 65536
     create_agent(
         backend_dir,
         agent_id,
+        profile=profile,
         name=config.channel.name,
         description=config.channel.description,
         prompt=prompt,
-        model=f"{config.provider_id}/{DEFAULT_MODEL_ID}",
+        model=f"{config.provider_id}/{model_id}",
         context_window=context_window,
         max_tokens=max_tokens,
     )
@@ -468,9 +532,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", help="profile config path (default: ~/.aki/<profile>.conf)")
     parser.add_argument("--agent-id", help="agent id for a new profile")
     parser.add_argument("--conversation", default="default")
-    parser.add_argument("--username", default="哥哥")
-    parser.add_argument("--source", help="userdata template directory (default: userdata3)")
-    parser.add_argument("--prompt", help="system prompt path (default: prompts/haru-system.md)")
+    parser.add_argument("--username", help="username override (defaults per profile)")
+    parser.add_argument("--model", help="model id override (defaults per profile)")
+    parser.add_argument("--source", help="userdata template directory (defaults per profile)")
+    parser.add_argument("--prompt", help="system prompt path (defaults per profile)")
     parser.add_argument("--backend-dir", help="Letta local backend directory")
     parser.add_argument("--letta-home", help="Letta home (mods, backups)")
     parser.add_argument("--settings", help="Letta settings.json path")
@@ -489,7 +554,7 @@ def main(argv: list[str] | None = None) -> int:
     elif result.get("status") == "would_create":
         print(f"would create profile/agent/conversation: {result['agent_id']}")
     else:
-        print(f"created Haru profile and agent: {result['agent_id']}")
+        print(f"created {result['display_name']} profile and agent: {result['agent_id']}")
         print(f"identity: {result['identity']['id']}")
         print(f"memory: {result['memory_dir']}")
     return 0

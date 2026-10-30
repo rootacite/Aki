@@ -287,7 +287,7 @@ def main() -> int:
     parser.add_argument("--backup-root", type=Path)
     args = parser.parse_args()
 
-    profiles = args.profile or ["aki", "fuyu", "haru"]
+    profiles = args.profile or ["aki", "fuyu", "haru", "natsu"]
     stamp = datetime.now(timezone.utc).astimezone().strftime("%Y%m%d-%H%M%S")
     backup_root = args.backup_root or (
         Path.home() / ".letta" / "backups" / f"channel-turn-time-migration-{stamp}"

@@ -17,6 +17,7 @@ akid.service
 userdata/identity.json
 userdata2/identity.json
 userdata3/identity.json
+userdata4/identity.json
 
 # OS
 .DS_Store

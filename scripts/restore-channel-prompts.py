@@ -97,7 +97,7 @@ def main() -> int:
 
     if not args.all and not args.turn_id and not args.message_id:
         parser.error("choose --turn-id, --message-id, or --all")
-    profiles = args.profile or ["aki", "fuyu", "haru"]
+    profiles = args.profile or ["aki", "fuyu", "haru", "natsu"]
     journals = (
         [args.journal]
         if args.journal is not None

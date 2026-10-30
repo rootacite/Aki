@@ -1,0 +1,93 @@
+# MCP recon toolkit — scope, limits, privilege.
+# Hosts need allowed_domains. IPs/CIDRs need allowed_cidrs (or allow_private).
+# Explicit CIDRs are in-scope even when allow_private is false.
+# Override path with MCP_RECON_CONFIG.
+
+scope:
+  allowed_domains:
+    - localhost
+    - git.acitelight.top
+    - yq.vwell.com.cn
+  allowed_cidrs:
+    - 192.168.3.2/32
+    - 192.168.0.0/16
+    - 127.0.0.1/32
+  allow_private: false
+  allow_subdomains: true
+
+privilege:
+  # Checkpoint A: human allowed privileged SYN scan.
+  allow_syn_scan: true
+  # sudo -n -- <bin> only when bin is in sudo_bins and process lacks CAP_NET_RAW.
+  allow_sudo: true
+  sudo_bins:
+    - nmap
+    - naabu
+    - masscan
+  fallback_connect: true
+
+limits:
+  default_timeout_s: 120
+  long_timeout_s: 900
+  max_hosts: 256
+  max_output_bytes: 262144
+  max_lines_to_model: 200
+  naabu_default_top_ports: 100
+  naabu_max_rate: 2000
+  ffuf_max_threads: 20
+  nuclei_max_concurrency: 25
+  jshunter_max_urls: 50
+  jshunter_max_threads: 5
+  restringer_max_input_bytes: 1048576
+  restringer_max_iterations: 10
+  js_workspace: /tmp/mcp-recon-js
+  restringer_sandbox: isolated-vm
+  restringer_sb_timeout_ms: 1000
+  nuclei_templates_dir: /usr/share/nuclei-templates
+
+wordlists:
+  allowed_prefixes:
+    - /usr/share/seclists/
+    - /usr/share/wordlists/
+    - /usr/share/ffuf/
+
+jobs:
+  enabled: true
+  dir: /tmp/mcp-recon-jobs
+
+env:
+  passthrough:
+    - PATH
+    - HOME
+    - USER
+    - LANG
+    - LC_ALL
+    - LC_CTYPE
+    - TERM
+    - TZ
+    - TMPDIR
+    - XDG_CONFIG_HOME
+    - XDG_CACHE_HOME
+    - XDG_DATA_HOME
+    - SSL_CERT_FILE
+    - SSL_CERT_DIR
+    - REQUESTS_CA_BUNDLE
+    - HTTP_PROXY
+    - HTTPS_PROXY
+    - NO_PROXY
+    - http_proxy
+    - https_proxy
+    - no_proxy
+  passthrough_prefixes:
+    - NUCLEI_
+    - PDCP_
+    - BBOT_
+    - AMASS_
+    - SUBFINDER_
+    - HTTPX_
+    - NAABU_
+    - DNSX_
+    - FFUF_
+    - KATANA_
+    - GOPATH
+    - GOROOT

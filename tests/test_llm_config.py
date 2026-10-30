@@ -31,27 +31,29 @@ class AkiConfigTests(unittest.TestCase):
         set_key(self.path, "proxy", "token", "loopback-token")
         config = load_config(self.path)
         self.assertEqual(config.enabled_models, ())
-        self.assertEqual(config.upstream_proxy, "http://192.168.4.1:7890")
+        self.assertEqual(config.upstream_proxy, "http://192.168.3.2:7890")
         self.assertIn("deepseek-flash", {model.model_id for model in config.models})
 
-    def test_profile_templates_carry_sampling_params(self) -> None:
-        expected = {
-            "aki": {"temperature": 0.67, "top_p": 0.83},
-            "fuyu": {"temperature": 0.7, "top_p": 0.86},
-            "haru": {
-                "reasoning_effort": "low",
-                "temperature": 0.88,
-                "top_p": 0.92,
-            },
-        }
-        for profile, values in expected.items():
+    def test_profile_templates_do_not_pin_extra_body(self) -> None:
+        for profile in ("aki", "fuyu", "haru", "natsu"):
             with self.subTest(profile=profile):
                 atomic_write(self.path, template_text(profile=profile))
                 config = load_config(self.path, profile=profile)
                 self.assertTrue(config.models)
                 for route in config.models:
-                    for key, value in values.items():
-                        self.assertEqual(route.extra_body.get(key), value)
+                    self.assertEqual(route.extra_body, {})
+
+    def test_only_natsu_template_defaults_to_mention_only(self) -> None:
+        for profile in ("aki", "fuyu", "haru"):
+            with self.subTest(profile=profile):
+                atomic_write(self.path, template_text(profile=profile))
+                self.assertFalse(
+                    load_config(self.path, profile=profile).channel_mention_only
+                )
+        atomic_write(self.path, template_text(profile="natsu"))
+        self.assertTrue(
+            load_config(self.path, profile="natsu").channel_mention_only
+        )
 
     def test_upstream_proxy_can_be_cleared(self) -> None:
         self.assertEqual(parse_upstream_proxy(""), "")

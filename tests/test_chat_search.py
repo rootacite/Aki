@@ -148,7 +148,7 @@ class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir.cleanup()
 
     def test_registered_for_every_profile_hidden_and_read_only(self) -> None:
-        for profile in ("aki", "fuyu", "haru"):
+        for profile in ("aki", "fuyu", "haru", "natsu"):
             with self.subTest(profile=profile):
                 server = make_server(self.root / profile, profile=profile)
                 names = {tool["name"] for tool in server._external_tools()}

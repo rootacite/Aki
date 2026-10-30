@@ -1,0 +1,4 @@
+# Allowed wordlist path prefixes (authoritative copy is config/recon.yaml).
+/usr/share/seclists/
+/usr/share/wordlists/
+/usr/share/ffuf/

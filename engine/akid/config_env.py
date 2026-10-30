@@ -261,6 +261,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         channel_description=channel_description,
         channel_aliases=channel_aliases,
         channel_wait_for=aki.channel_wait_for,
+        channel_mention_only=aki.channel_mention_only,
         identity_manifest_path=identity_manifest_path,
         identity_registry_path=identity_registry_path,
         mqtt_state=config_path,

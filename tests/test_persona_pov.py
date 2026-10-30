@@ -9,6 +9,7 @@ PERSONAS = {
     "Aki": ROOT / "userdata" / "persona.md",
     "Fuyu": ROOT / "userdata2" / "persona.md",
     "Haru": ROOT / "userdata3" / "persona.md",
+    "Natsu": ROOT / "userdata4" / "persona.md",
 }
 
 

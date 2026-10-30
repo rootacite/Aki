@@ -14,6 +14,7 @@ class PromptLayoutTests(unittest.TestCase):
             ("aki", "Master"),
             ("fuyu", "Master"),
             ("haru", "哥哥"),
+            ("natsu", "人类"),
         ):
             text = (ROOT / "prompts" / f"{profile}-system.md").read_text(
                 encoding="utf-8"

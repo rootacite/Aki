@@ -81,10 +81,7 @@ class HaruConfigTests(unittest.TestCase):
         self.assertEqual(route.context_window, 1_000_000)
         self.assertEqual(route.max_tokens, 65536)
         self.assertEqual(route.inputs, ("text", "image"))
-        self.assertEqual(
-            route.extra_body,
-            {"reasoning_effort": "low", "temperature": 0.88, "top_p": 0.92},
-        )
+        self.assertEqual(route.extra_body, {})
         self.assertEqual(config.enabled_models, ())
 
     def test_tool_policy_is_parsed_and_defaults_for_other_profiles(self) -> None:
@@ -123,8 +120,9 @@ class HaruConfigTests(unittest.TestCase):
     def test_extra_body_cannot_override_routing_fields(self) -> None:
         atomic_write(self.path, template_text("agent-haru", profile="haru"))
         text = self.path.read_text(encoding="utf-8").replace(
-            'extra_body = {"reasoning_effort": "low", "temperature": 0.88, "top_p": 0.92}',
-            'extra_body = {"model": "evil"}',
+            "input = text,image\n",
+            'input = text,image\nextra_body = {"model": "evil"}\n',
+            1,
         )
         atomic_write(self.path, text)
         with self.assertRaises(ConfigError):

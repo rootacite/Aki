@@ -1,13 +1,13 @@
 {
   "source": "~/.letta/lc-local-backend/memfs/agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc/memory",
-  "memfs_commit": "5b6f5c4ad2743b1372b9ad287e4975c601229964",
+  "memfs_commit": "87597d823e353f20c021f5d2b34f04e930803da6",
   "username": "Master",
   "placeholder": "{{USERNAME}}",
-  "synced_at": "2026-10-30T19:08:28.826899Z",
+  "synced_at": "2026-10-30T19:19:50.273558Z",
   "templates": {
     "persona.md": {
-      "sha256": "048a724220e49320dcceb110a77d1738412ddccf5010d822b4a85294d646fffe",
-      "bytes": 5437
+      "sha256": "028b24ffe5f6f987d9a0bff939fe46288f797e4e0c044f4c7c904321a483bea9",
+      "bytes": 5428
     },
     "memory-policy.md": {
       "sha256": "692786a5ecd9967ff7985081aea6e3a125655501814d563e25914bb110a73320",
@@ -36,8 +36,8 @@
   },
   "rendered": {
     "persona.md": {
-      "sha256": "50d92794daf2c02f34cc51a9c56be28d67a47df419fb3904933966fb122fcc49",
-      "bytes": 5323
+      "sha256": "a7e672c381992bfaa84e39e9e73e4bb5dcebcb39a838af248f55f42564ab745c",
+      "bytes": 5314
     },
     "memory-policy.md": {
       "sha256": "7bdcbaf92f5768843aa15db4d5fe7977a208ff4e2780a35af88b5c88e0259844",

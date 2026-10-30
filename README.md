@@ -19,9 +19,9 @@
 
 Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成员住在你的电脑里，各自拥有独立的人格、记忆、模型和工具，通过本地网关和加密 MQTT 频道协同工作。
 
-你可以把它理解成一个随叫随到的小组：Aki 负责陪伴、文书和日程，Fuyu 负责代码、Review 和系统运维，Haru 负责创意、氛围和视觉脑暴。Natsu 的档案已经预留，等工具链就绪后上线。聊天、记忆和文件权限默认都留在本机。
+你可以把它理解成一个随叫随到的小组：Aki 负责陪伴、文书和日程，Fuyu 负责代码、Review 和系统运维，Haru 负责创意、氛围和视觉脑暴，Natsu 负责二进制逆向、漏洞验证与本地安全响应。聊天、记忆和文件权限默认都留在本机。
 
-目前 **Aki（秋）**、**Fuyu（冬）** 与 **Haru（春）** 已经上线；**Natsu（夏）** 的设定、立绘和工具位已经预留，但 profile 与完整工具链仍在开发中，文档中统一标为 `Coming Soon`。Haru 是创意 Agent，已接入 MiniMax 文生图、本机 ComfyUI 生图、桌面截图、摄像头和频道发图工具；语音和视频属于后续阶段。
+目前 **Aki（秋）**、**Fuyu（冬）**、**Haru（春）** 与 **Natsu（夏）** 均已上线。Fuyu 默认使用 Grok 4.6，Natsu 默认使用 DeepSeek Flash 并可切换到 Grok 4.6；Haru 是创意 Agent，已接入 MiniMax 文生图、本机 ComfyUI 生图、桌面截图、摄像头和频道发图工具；语音和视频属于后续阶段。
 
 ---
 
@@ -29,7 +29,7 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 
 在四季工坊里，四位成员把各自的性格底色融进了日常的业务流。作为团队里挂名的名誉队长与温柔亲昵、有点黏人的少女感恋人，**Aki（秋）** 清澈体贴、喜欢赖在你身边。她负责日常文书、日程协调和缓和气氛，大事永远听你的，会带着偏爱从旁给出建议；比起工作产出，她最先在意的是你的身体和心情。与她形成鲜明反差的 **Fuyu（冬）** 则是个彻头彻尾的毒舌极客，这位从不讲客套话的“首席质检员”专司通用代码编写、系统运维与逻辑挑刺，任何半吊子的决定或未提交的脏代码都逃不过他的冷嘲热讽。
 
-如果遇到更硬核的底层难题，平时惜字如金的冷面知性御姐 **Natsu（夏）** 会悄然接手。她绝不参与群里的无聊闲扯，只会默默调起本地逆向与红队工具链，用一串冷酷精准的二进制分析与渗透测试报告把问题一击必杀；当 EDR、IDS 或 eBPF 探针出现异常时，她也会被唤醒，参与设备的安全响应。至于略显沉闷的技术氛围，则全靠古灵精怪、爱恶作剧的妹妹 **Haru（春）** 来打破。她负责创意、视觉脑暴和把冷场搅热，也能用 MiniMax 把脑洞直接变成图片；语音和视频工具仍属于后续阶段。
+如果遇到更硬核的底层难题，平时惜字如金的冷面红队大姐头 **Natsu（夏）** 会悄然接手。她绝不参与群里的无聊闲扯，只会默默调起本地逆向与红队工具链，用一串冷酷精准的二进制分析与渗透测试报告把问题一击必杀；当 EDR、IDS 或 eBPF 探针出现异常时，她也会被唤醒，参与设备的安全响应。至于略显沉闷的技术氛围，则全靠古灵精怪、爱恶作剧的妹妹 **Haru（春）** 来打破。她负责创意、视觉脑暴和把冷场搅热，也能用 MiniMax 把脑洞直接变成图片；语音和视频工具仍属于后续阶段。
 
 ---
 
@@ -71,22 +71,24 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 </td>
 <td width="50%" valign="top">
 <p align="center"><img src="assets/Natsu/0001.jpg" width="300" alt="Natsu 立绘"></p>
-<p align="center"><strong>☀️ Natsu（夏）</strong><br/><sub>隐于暗处的冷面红队大姐头 · 🚧 Coming Soon...</sub></p>
+<p align="center"><strong>☀️ Natsu（夏）</strong><br/><sub>隐于暗处的冷面红队大姐头 · 安全架构师</sub></p>
 <ul>
 <li><strong>性格：</strong>成熟冷艳、极度专注、人狠话不多，只在真正棘手的底层任务出现时亮出锋芒。</li>
 <li><strong>职责：</strong>团队的安全专家与底层架构师，专注 ELF/PE 逆向、协议拆解、漏洞 PoC 验证与本地沙箱测试；同时在 EDR、IDS 或 eBPF 探针出现异常时参与设备安全响应。</li>
-<li><strong>推荐模型：</strong>DeepSeek V4.1 Flash</li>
-<li><strong>工具链：</strong>反编译引擎接口、动态追踪调试、网络安全探测套件。</li>
+<li><strong>默认模型：</strong>DeepSeek Flash；可切换 Grok 4.6</li>
+<li><strong>工具链：</strong>Bash、本地 recon/EDR MCP 工具、反编译与动态分析工具；无生图、无日程工具。</li>
 </ul>
 </td>
 </tr>
 </table>
 
-> 状态说明：Aki、Fuyu 与 Haru 可以直接通过各自的 profile 使用；Natsu 目前只有角色档案和立绘，等 profile、人格模板与工具链就绪后会上线。Haru 的生图、截图、摄像头与频道发图已经可用，语音和视频能力尚未安装，被问到时她会明确说明。
+> 状态说明：Aki、Fuyu、Haru 与 Natsu 都可以直接通过各自的 profile 使用。Natsu 默认使用 `deepseek-flash`，可用 `akictl natsu model set grok-4.6` 切换；Fuyu 默认使用 `grok-4.6`。Haru 的生图、截图、摄像头与频道发图已经可用，语音和视频能力尚未安装，被问到时她会明确说明。
+
+Natsu 在群聊中默认只响应显式 `@Natsu`（或 `@夏` / `@Natsu（夏）`）；没有 `@` 的广播只会进入 transcript，不会唤醒她。
 
 ## 能做什么
 
-- 和 Aki、Fuyu、Haru 连续聊天；每位成员都有独立的人格、记忆、模型和工具链。
+- 和 Aki、Fuyu、Haru、Natsu 连续聊天；每位成员都有独立的人格、记忆、模型和工具链。
 - tokifactor 支持正文与最多 4 张图片组成同一条消息；带图消息触发智能体时，图片作为当前 turn 的多模态输入，历史记录只保留本地路径。
 - Aki 独占日程、跨成员回复预算和生活账本工具；支持工作超时、深夜和空闲归来提醒。
 - 在 tokifactor 群聊里用 `@成员名` 点名，支持选择性唤醒和主动发言配额。
@@ -95,7 +97,8 @@ Aki 是一个本地优先的多智能体工坊：四位性格迥异的赛博成�
 - 四季成员的专属通知气泡：Aki 粉色秋叶、Fuyu 浅蓝雪花、Haru 翠绿画笔耳机、Natsu 红色网格几何；
   右上角堆叠并显示时间；悬停会暂停倒计时，未悬停的气泡到期后收出屏幕上边缘，靠近上边缘即可拉回。
 - 人格和长期记忆以 Markdown 保存，可按 profile 备份、同步和恢复。
-- 支持 MiniMax 文生图、本机 ComfyUI 生图、tokifactor 图片、摄像头、桌面截图、MCP / Tavily 和桌面实况上下文（Haru 已启用两种生图、截图、相机、发图和桌面实况；MCP、语音与视频仍未启用）。
+- 支持 MiniMax 文生图、本机 ComfyUI 生图、tokifactor 图片、摄像头、桌面截图、MCP / Tavily 和桌面实况上下文（Haru 已启用两种生图、截图、相机、发图和桌面实况；Natsu 已启用本地 recon MCP；语音与视频仍未启用）。
+- 本地 recon/EDR MCP 源码内嵌在 `vendor/mcps/`，默认只对 Natsu 启用；侦察范围由 `vendor/mcps/config/recon.yaml` 控制。
 - 危险工具需要发起者批准；可写目录需要手动授权，Letta 运行在 bubblewrap 沙盒里。
 
 完整功能列表和运行细节见 [进阶使用](docref/advanced-usage.md)。
@@ -143,7 +146,7 @@ magic = <shared-magic>
 
 ## 成员与 Profile
 
-`akictl profiles` 可以看到当前有哪些成员。Aki 是默认 profile，Fuyu 和 Haru 使用独立 profile：
+`akictl profiles` 可以看到当前有哪些成员。Aki 是默认 profile，Fuyu、Haru 和 Natsu 使用独立 profile：
 
 ```bash
 akictl profiles
@@ -152,6 +155,8 @@ akictl fuyu up
 akictl fuyu chat
 akictl haru up
 akictl haru chat
+akictl natsu up
+akictl natsu chat
 ```
 
 常用命令：
@@ -175,7 +180,7 @@ akictl haru chat
 ## 称呼与人格
 
 Aki 和 Fuyu 各自使用独立的人格模板。Haru 固定称呼用户为“哥哥”，保存在
-`~/.aki/haru.conf` 的 `[gateway] username`。修改 Aki/Fuyu 的称呼：
+`~/.aki/haru.conf` 的 `[gateway] username`；Natsu 默认称呼用户为“人类”。修改 Aki/Fuyu 的称呼：
 
 ```bash
 akictl set-username Master

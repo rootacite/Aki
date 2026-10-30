@@ -21,6 +21,7 @@ PROFILES = {
     "aki": ("aki.conf", "aki-system.md"),
     "fuyu": ("fuyu.conf", "fuyu-system.md"),
     "haru": ("haru.conf", "haru-system.md"),
+    "natsu": ("natsu.conf", "natsu-system.md"),
 }
 RUNTIME_TAGS = (
     "tool-ownership",

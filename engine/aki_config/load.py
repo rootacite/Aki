@@ -508,6 +508,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             description=channel_description,
         ),
         channel_wait_for=_list(parser.get("channel", "wait_for", fallback="")),
+        channel_mention_only=_bool_or(parser, "channel", "mention_only", False),
         userdata=parser.get("gateway", "userdata", fallback="").strip() or "userdata",
         schedule_enabled=_bool_or(parser, "schedule", "enabled", True),
         schedule_tick_seconds=_int_or(

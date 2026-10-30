@@ -13,7 +13,7 @@ from engine.image_generation import ASPECT_RATIOS, MAX_IMAGES, MAX_PROMPT_CHARS
 
 TOOL_OWNERSHIP_TAG = "tool-ownership"
 
-OWNER_LABELS: dict[str, str] = {"aki": "Aki", "haru": "Haru"}
+OWNER_LABELS: dict[str, str] = {"aki": "Aki", "haru": "Haru", "natsu": "Natsu"}
 
 TOOL_OWNERSHIP_DENIED = "TOOL_OWNERSHIP_DENIED"
 
@@ -484,6 +484,16 @@ DOMAIN_OWNERS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ),
     ("fuyu", ("code authoring and review", "system operations", "Git audits")),
     ("haru", ("image generation", "local ComfyUI generation and process lifecycle")),
+    (
+        "natsu",
+        (
+            "binary reverse engineering",
+            "exploit validation",
+            "local penetration testing",
+            "security incident response",
+            "EDR/IDS/eBPF triage",
+        ),
+    ),
 )
 
 

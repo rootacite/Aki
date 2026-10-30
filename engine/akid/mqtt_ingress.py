@@ -514,9 +514,12 @@ class MqttIngressMixin:
         )
         self_key = self._channel_self_key()
         directly_targeted = self_key in wake_ids or self_key in mentions
+        mention_only = bool(self.config.channel_mention_only)
         should_wake = True
         if from_agent:
-            if wake == CHANNEL_WAKE_USER:
+            if mention_only and not directly_targeted:
+                should_wake = False
+            elif wake == CHANNEL_WAKE_USER:
                 should_wake = False
             elif wake == CHANNEL_WAKE_MENTIONS:
                 should_wake = directly_targeted
@@ -596,6 +599,14 @@ class MqttIngressMixin:
                     active.overlay_files[entry.seq] = path
             active.user_message_event.set()
             await self._refresh_channel_transcript()
+            return
+        if mention_only and not from_agent and not directly_targeted:
+            LOGGER.info(
+                "channel broadcast ignored by mention-only profile seq=%s",
+                entry.seq,
+            )
+            if busy:
+                await self._refresh_channel_transcript()
             return
         if not from_agent and not mentions:
             waiting_ids = self._channel_waiting_user_ids()

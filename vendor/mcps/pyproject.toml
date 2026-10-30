@@ -1,0 +1,30 @@
+[project]
+name = "mcps"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "rootacite", email = "1498045907@qq.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp>=3.4.7",
+    "httpx>=0.28",
+    "openai>=3.3.1",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+mcps = "mcps:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

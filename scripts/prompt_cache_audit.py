@@ -581,7 +581,7 @@ def _stabilize_rollback(profiles: Sequence[str], manifest: Mapping[str, Any], ru
 
 async def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--profiles", nargs="+", default=["aki", "fuyu", "haru"])
+    parser.add_argument("--profiles", nargs="+", default=["aki", "fuyu", "haru", "natsu"])
     parser.add_argument("--turns", type=int, default=3)
     parser.add_argument("--run-id", default=uuid.uuid4().hex[:8])
     parser.add_argument("--out", type=Path, default=Path("/tmp/aki-prompt-audit"))

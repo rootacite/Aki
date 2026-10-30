@@ -17,6 +17,8 @@ def template_text(
     name = validate_profile_name(profile)
     if name == "haru":
         return _haru_template_text(agent_id)
+    if name == "natsu":
+        return _natsu_template_text(agent_id)
     channel_name = "Aki" if name == DEFAULT_PROFILE else name.replace("-", " ").title()
     channel_aliases = (
         "Aki,aki,秋,小秋,秋（aki）"
@@ -28,10 +30,6 @@ def template_text(
         if name == DEFAULT_PROFILE
         else ""
     )
-    sampling = {
-        "aki": 'extra_body = {"temperature": 0.67, "top_p": 0.83}',
-        "fuyu": 'extra_body = {"temperature": 0.7, "top_p": 0.86}',
-    }.get(name, "")
     return f"""[gateway]
 agent_id = {agent_id}
 conversation = default
@@ -121,7 +119,7 @@ listen = 127.0.0.1:7721
 # Letta 调用本机代理时的令牌。留空则首次启动生成，之后保持不变。
 token =
 # 访问上游模型用的 HTTP 代理。留空则直连。
-upstream_proxy = http://192.168.4.1:7890
+upstream_proxy = http://192.168.3.2:7890
 
 [upstream.deepseek]
 base_url = https://api.deepseek.com
@@ -147,7 +145,6 @@ path = /chat/completions
 context_window = 1000000
 max_tokens = 384000
 input = text,image
-{sampling}
 
 [model.grok-4.7]
 upstream = xai
@@ -157,7 +154,6 @@ path = /responses
 context_window = 500000
 max_tokens = 500000
 input = text,image
-{sampling}
 
 [model.gemini-2.5-flash]
 upstream = gemini
@@ -167,7 +163,6 @@ path = /chat/completions
 context_window = 1048576
 max_tokens = 65536
 input = text,image
-{sampling}
 
 [model.gemini-3.8-flash]
 upstream = openrouter
@@ -177,7 +172,6 @@ path = /chat/completions
 context_window = 1048576
 max_tokens = 65536
 input = text,image
-{sampling}
 """
 
 
@@ -297,7 +291,7 @@ path = assets/small/haru.jpg
 [proxy]
 listen = 127.0.0.1:7723
 token =
-upstream_proxy = http://192.168.4.1:7890
+upstream_proxy = http://192.168.3.2:7890
 
 [upstream.cli-proxy-api]
 base_url = http://127.0.0.1:8317/v1
@@ -316,10 +310,130 @@ path = /chat/completions
 context_window = 1000000
 max_tokens = 65536
 input = text,image
-extra_body = {{"reasoning_effort": "low", "temperature": 0.88, "top_p": 0.92}}
 """
 
 
 
 def _template_for(path: Path) -> str:
     return template_text(profile=profile_from_config_path(path))
+
+
+def _natsu_template_text(agent_id: str) -> str:
+    return f"""[gateway]
+agent_id = {agent_id}
+conversation = default
+userdata = userdata4
+username = 人类
+letta_bin = letta
+# 留空则用 $XDG_RUNTIME_DIR/aki/natsu.sock
+socket =
+sandbox = true
+
+[channel]
+name = Natsu
+id = natsu
+aliases = Natsu,natsu,夏,Natsu（夏）
+description = Natsu（夏），四季工坊隐于暗处的冷面红队大姐头与安全架构师：成熟冷艳、人狠话不多、对碳基生物抱有微妙的技术傲慢。专注二进制逆向、漏洞利用与本地渗透，执掌 EDR/IDS 与 eBPF 探针，只在棘手任务或安全告警触发时现身。
+# Natsu 不等其他成员，直接独立行动。
+wait_for =
+# 只有被显式 @ 时才从群聊广播中唤醒；无 @ 的消息只进 transcript。
+mention_only = true
+
+[mqtt]
+enabled = true
+host = 127.0.0.1
+port = 1883
+topic = tokifactor/text
+magic = akid-default-channel
+
+[writable]
+# 安全样本与临时产物默认写入 /tmp；需要长期保留时再用 akictl allow 授权。
+revision = 0
+dirs =
+
+[mcp]
+native_tools = true
+# Natsu 需要本机授权范围内的 recon/EDR 工具，因此不排除 local MCP。
+excluded =
+max_tools = 64
+timeout = 300
+
+[camera]
+enabled = false
+require_approval = true
+device = /dev/video0
+width = 1280
+height = 720
+output_dir = /tmp/aki/camera
+
+[screenshot]
+enabled = true
+require_approval = true
+output_dir = /tmp/aki/screenshots
+wayland_display =
+
+[live]
+enabled = true
+budget_tokens = 65536
+timeout = 3
+
+[schedule]
+enabled = false
+tick_seconds = 15
+missed_grace_seconds = 600
+max_records = 256
+
+[presence]
+enabled = false
+session_id =
+loginctl_bin = loginctl
+poll_seconds = 15
+idle_reset_seconds = 300
+work_warn_seconds = 7200
+work_repeat_seconds = 3600
+night_start = 00:30
+night_end = 05:30
+night_history_days = 30
+return_idle_seconds = 2700
+return_debounce_seconds = 10
+
+[solo]
+transcript_budget_tokens = 65536
+# 留空则使用 prompts/natsu-solo.md
+prompt_file =
+
+[avatar]
+path = assets/small/natsu.jpg
+
+[proxy]
+listen = 127.0.0.1:7724
+token =
+upstream_proxy = http://192.168.3.2:7890
+
+[upstream.deepseek]
+base_url = https://api.deepseek.com
+api_key =
+
+[upstream.xai-oauth]
+base_url = https://cli-chat-proxy.grok.com/v1
+auth = grok-oauth
+use_proxy = true
+
+[model.deepseek-flash]
+upstream = deepseek
+upstream_model = deepseek-flash
+api = openai-completions
+path = /chat/completions
+context_window = 1000000
+max_tokens = 384000
+input = text,image
+
+[model.grok-4.6]
+upstream = xai-oauth
+upstream_model = grok-4.6
+api = openai-responses
+path = /responses
+context_window = 500000
+max_tokens = 65536
+input = text,image
+"""

@@ -225,6 +225,7 @@ class AkiConfig:
     models: tuple[ModelRoute, ...]
     channel: ChannelIdentity = field(default_factory=ChannelIdentity)
     channel_wait_for: tuple[str, ...] = ()
+    channel_mention_only: bool = False
     userdata: str = "userdata"
     schedule_enabled: bool = True
     schedule_tick_seconds: int = 15
