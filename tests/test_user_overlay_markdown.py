@@ -118,6 +118,8 @@ class UserOverlayMarkdownTests(unittest.TestCase):
         self.assertTrue(guard.startswith("# format-guard (STRICT ENFORCEMENT)\n\n"))
         self.assertIn("LENGTH MIRRORING (CRITICAL)", guard)
         self.assertIn("ZERO MARKDOWN BLOAT", guard)
+        self.assertIn("PARAGRAPH SPLITTING", guard)
+        self.assertIn("`'\\n\\n'` (two newlines)", guard)
         self.assertIn("Master", guard)
         match = _FORMAT_GUARD_RE.search(guard)
         self.assertIsNotNone(match)

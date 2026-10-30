@@ -337,6 +337,8 @@ def render_user_format_guard(user_name: str) -> str:
             f"3. **WAKE TAG CHECK**: In group chat, if your reply is meant for {name} "
             f"alone, ensure `@{name} ` (with a trailing space) is present in your reply "
             "so you do NOT accidentally wake every other agent in the room.",
+            "4. **PARAGRAPH SPLITTING**: Use `'\\n\\n'` (two newlines) to separate "
+            "paragraphs; each paragraph will be sent as a separate message in one batch.",
         ]
     )
 

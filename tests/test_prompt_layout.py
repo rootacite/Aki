@@ -23,6 +23,11 @@ class PromptLayoutTests(unittest.TestCase):
                 "By default, do NOT use Markdown headings, bold tags, tables",
                 text,
             )
+            self.assertIn(
+                "Use `'\\n\\n'` (two newlines) to separate paragraphs; each "
+                "paragraph will be sent as a separate message in one batch.",
+                text,
+            )
             self.assertIn(user_name, text)
             self.assertIn(
                 "Do NOT launch into a lengthy, detailed analysis", text
