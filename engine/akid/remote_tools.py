@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 from pathlib import Path
 from engine.image_generation import (
     ASPECT_RATIOS,
@@ -49,20 +50,16 @@ class RemoteToolsMixin:
     async def _call_mcp_tool(
         self, tool_name: str, arguments: Mapping[str, Any]
     ) -> tuple[str, bool]:
-        if self._aki_bridge_available():
-            payload = await self.backend.mcp_call(
-                tool_name,
-                arguments,
-                agent_id=self.config.agent_id,
-                timeout=self.config.mcp_tool_timeout,
-            )
-            result = payload.get("result")
-            return _normalize_mcp_result(
-                json.dumps(result if result is not None else {}, ensure_ascii=False)
-            )
+        # Do not route this through backend.mcp_call while an external tool is
+        # running. The backend is blocked waiting for our external_tool_result,
+        # so a re-entrant control request is deferred until the turn ends and
+        # deadlocks until the timeout. A separate Letta process can load the
+        # same agent MCP catalog without touching the active turn.
         payload = json.dumps(dict(arguments), ensure_ascii=False)
         command = [
             self.config.letta_bin,
+            "--backend",
+            "local",
             "mcp",
             "call",
             tool_name,
@@ -73,9 +70,15 @@ class RemoteToolsMixin:
         ]
         proc: asyncio.subprocess.Process | None = None
         try:
+            env = dict(os.environ)
+            env["LETTA_LOCAL_BACKEND_DIR"] = str(self.config.backend_dir)
+            writable = getattr(self, "writable", None)
+            if writable is not None:
+                env["LETTA_HOME"] = str(writable.letta_home)
             proc = await asyncio.create_subprocess_exec(
                 *command,
                 cwd=str(self.config.cwd),
+                env=env,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
