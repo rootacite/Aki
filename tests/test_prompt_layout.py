@@ -20,18 +20,16 @@ class PromptLayoutTests(unittest.TestCase):
             )
             self.assertIn("# Format Guard", text)
             self.assertIn(
-                "By default, do NOT use Markdown headings, bold tags, tables",
+                "CONVERSATIONAL BREVITY (CRITICAL)",
                 text,
             )
             self.assertIn(
-                "Use `'\\n\\n'` (two newlines) to separate paragraphs; each "
-                "paragraph will be sent as a separate message in one batch.",
+                "IM BUBBLE SPLITTING",
                 text,
             )
+            self.assertIn("ZERO MARKDOWN BLOAT", text)
+            self.assertIn("`'\\n\\n'` (two newlines)", text)
             self.assertIn(user_name, text)
-            self.assertIn(
-                "Do NOT launch into a lengthy, detailed analysis", text
-            )
 
     def test_turn_control_contains_control_fields_but_no_message_copy(self) -> None:
         member = ChannelMember(id="aki", name="Aki", is_self=True)

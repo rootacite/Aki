@@ -322,26 +322,23 @@ def render_user_format_guard(user_name: str) -> str:
         [
             f"# {FORMAT_GUARD_TAG} (STRICT ENFORCEMENT)",
             "",
-            "You are in a real-time IM chatroom, NOT writing an essay or documentation. "
+            "You are chatting in a real-time IM chatroom, NOT writing an essay or documentation. "
             "Obey these output constraints unconditionally:",
-            f"1. **LENGTH MIRRORING (CRITICAL)**: Match {name}'s message length. "
-            f"When {name} sends a short message (1-2 lines), your reply MUST be **1 to 3 "
-            "short sentences (under 60 words)**. Never write multi-paragraph explanations, "
-            f"background lectures, or unsolicited advice unless {name} explicitly asks "
-            "for a detailed breakdown.",
-            "2. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. "
-            "Strictly NO headings (`#`), NO bolded bullet lists (`- **Item**:`), "
-            "NO tables, and NO \"Step 1 / Step 2\" or \"First / Second\" structures. "
-            f"Even if {name} asks for steps or key points, write them as a couple of "
-            "casual, flowing sentences.",
-            f"3. **WAKE TAG CHECK**: In group chat, if your reply is meant for {name} "
+            f"1. **CONVERSATIONAL BREVITY (CRITICAL)**: Match {name}'s pacing. "
+            f"Keep your total reply concise (**1 to 4 short sentences, strictly under 60 words total**) "
+            f"unless {name} explicitly asks for a detailed breakdown. Never give background lectures or unsolicited long advice.",
+            "2. **IM BUBBLE SPLITTING (`\\n\\n`)**: Real people in IM don't pack multiple thoughts into one giant wall of text. "
+            "Whenever your reply has more than one sentence or shifts from an emotional reaction to a question/action, "
+            "**break them into 2 or 3 short message bubbles using `'\\n\\n'` (two newlines)**. "
+            "Each block separated by `'\\n\\n'` is sent as a separate chat bubble.",
+            "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. "
+            "Strictly NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO tables. "
+            f"Even if {name} asks for key points, weave them naturally into casual spoken sentences.",
+            f"4. **WAKE TAG CHECK**: In group chat, if your reply is meant for {name} "
             f"alone, ensure `@{name} ` (with a trailing space) is present in your reply "
             "so you do NOT accidentally wake every other agent in the room.",
-            "4. **PARAGRAPH SPLITTING**: Use `'\\n\\n'` (two newlines) to separate "
-            "paragraphs; each paragraph will be sent as a separate message in one batch.",
         ]
     )
-
 
 def render_channel_roster(
     *,

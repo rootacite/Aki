@@ -116,9 +116,10 @@ class UserOverlayMarkdownTests(unittest.TestCase):
 
         guard = render_user_format_guard("Master")
         self.assertTrue(guard.startswith("# format-guard (STRICT ENFORCEMENT)\n\n"))
-        self.assertIn("LENGTH MIRRORING (CRITICAL)", guard)
+        self.assertIn("CONVERSATIONAL BREVITY (CRITICAL)", guard)
+        self.assertIn("IM BUBBLE SPLITTING", guard)
         self.assertIn("ZERO MARKDOWN BLOAT", guard)
-        self.assertIn("PARAGRAPH SPLITTING", guard)
+        self.assertIn("WAKE TAG CHECK", guard)
         self.assertIn("`'\\n\\n'` (two newlines)", guard)
         self.assertIn("Master", guard)
         match = _FORMAT_GUARD_RE.search(guard)

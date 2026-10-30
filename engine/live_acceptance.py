@@ -192,7 +192,8 @@ def _validate_block(name: str, block: str, errors: list[str]) -> None:
             errors.append("turn-control has malformed <wait-other> boundaries")
     elif name == "format-guard":
         if (
-            "LENGTH MIRRORING (CRITICAL)" not in block
+            "CONVERSATIONAL BREVITY (CRITICAL)" not in block
+            or "IM BUBBLE SPLITTING" not in block
             or "ZERO MARKDOWN BLOAT" not in block
         ):
             errors.append("format-guard body is missing")
