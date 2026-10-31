@@ -308,10 +308,6 @@ QoS 1 文本事件（`kind=wait_user`）即时广播；该事件不进入频道�
 长消息是加密的 `TextChunk` 分片。实现位于 `engine/tokifactor.py`、
 `engine/mqtt_client.py` 和 `engine/channel/`。
 
-最终 turn 文本进入 MQTT 前会做一次纯投递层格式化：中文句号 `。` 后面不是换行时，
-插入两个换行，让客户端把相邻段落显示为同批多条消息；围栏代码块和行内代码不处理。
-该格式化只作用于发送的 payload，不写回频道历史、transcript 或模型上下文。
-
 akid 使用基于 `sender_id + broker + topic + magic` 的稳定 MQTT client id 和非 clean
 session，因此 broker 会在 akid 离线时保留 text/picture/file 的 QoS 1 消息；control 和 avatar
 仍使用 QoS 0。文本 envelope 和分片携带 `messageId` 与毫秒级 `sentAt`，已处理的消息 ID

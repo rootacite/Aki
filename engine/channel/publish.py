@@ -28,16 +28,6 @@ from engine.tokifactor import (
     sha256_file,
 )
 from .constants import ChannelUnavailable
-from .text import insert_chinese_period_breaks
-
-
-def _is_final_turn(metadata: Mapping[str, Any] | None) -> bool:
-    if not metadata:
-        return False
-    return (
-        str(metadata.get("kind") or "") == "turn"
-        and str(metadata.get("phase") or "") == "final"
-    )
 
 class PublishMixin:
 
@@ -78,8 +68,6 @@ class PublishMixin:
         client = self._client
         if client is None or not self._connected:
             raise ChannelUnavailable("channel is not connected")
-        if _is_final_turn(metadata):
-            text = insert_chinese_period_breaks(text)
         payloads = encode_text_payloads(
             text,
             self.magic,

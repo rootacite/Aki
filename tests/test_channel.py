@@ -165,39 +165,6 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(health["replies_sent"], 1)
         self.assertTrue(health["connected"])
 
-    async def test_final_turn_adds_chinese_period_breaks_on_delivery(self) -> None:
-        await self.channel.start()
-        await wait_until(lambda: self.channel.connected)
-
-        self.peer = MqttClient(
-            "127.0.0.1",
-            self.broker.port,
-            client_id="peer-chinese-period-test",
-            on_message=self._peer_message,
-        )
-        await self.peer.connect()
-        await self.peer.subscribe(TOPIC, qos=1)
-
-        await self.channel.publish_text(
-            "第一句。第二句。",
-            {"schema": "akid.v1", "kind": "turn", "phase": "final"},
-        )
-        await wait_until(
-            lambda: any(
-                item[2] == "第一句。\n\n第二句。" for item in self.peer_messages
-            )
-        )
-
-        await self.channel.publish_text(
-            "第一句。第二句。",
-            {"schema": "akid.v1", "kind": "turn", "phase": "progress"},
-        )
-        await wait_until(
-            lambda: any(
-                item[2] == "第一句。第二句。" for item in self.peer_messages
-            )
-        )
-
     async def test_persistent_session_delivers_offline_and_dedups_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             self.channel.dedup_path = Path(tempdir) / "dedup.json"
