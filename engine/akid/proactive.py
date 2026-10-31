@@ -190,53 +190,57 @@ class ProactiveMixin:
 
     async def _maybe_enqueue_proactive_turn(self) -> None:
         async with self._proactive_lock:
-            if not self._proactive_pending:
-                return
-            if self.active is not None and self.active.origin == "proactive":
-                return
-            if any(turn.origin == "proactive" for turn in self.queue):
-                return
-            if len(self.queue) >= self.config.queue_max:
-                LOGGER.warning("proactive trigger deferred: queue is full")
-                return
-            if self._solo_session is not None:
-                return
-            pending = self._proactive_pending
-            self._proactive_pending = {}
-            message = self._build_proactive_message(pending)
-            turn = Turn(
-                turn_id=f"turn-{uuid.uuid4().hex}",
-                conn=self.proactive_conn,
-                message=message,
-                include_reasoning=False,
-                client_message_id=None,
-                origin="proactive",
-                lock_authorized=True,
-                lock_authorization="exclusive-owner",
-                trigger_kind="+".join(sorted(pending)),
-                trigger_facts={key: dict(value) for key, value in pending.items()},
-                proactive_id=f"proactive-{uuid.uuid4().hex}",
-            )
-            self._last_proactive_at = now_iso()
-            LOGGER.info(
-                "proactive turn enqueued kind=%s id=%s",
-                turn.trigger_kind,
-                turn.proactive_id,
-            )
-            if (
-                self.active is None
-                and not self.queue
-                and not self._compacting
-                and not self._external_tools_pending
-                and bool(getattr(self.backend, "ready", False))
-            ):
-                self.active = turn
-                turn.state = "running"
-                self._spawn_turn(turn)
-                return
-            turn.state = "queued"
-            self.queue.append(turn)
-            self._schedule_status_refresh()
+            async with self._solo_lock:
+                await self._maybe_enqueue_proactive_turn_locked()
+
+
+    async def _maybe_enqueue_proactive_turn_locked(self) -> None:
+        if not self._proactive_pending:
+            return
+        if self.active is not None and self.active.origin == "proactive":
+            return
+        if any(turn.origin == "proactive" for turn in self.queue):
+            return
+        if len(self.queue) >= self.config.queue_max:
+            LOGGER.warning("proactive trigger deferred: queue is full")
+            return
+        pending = self._proactive_pending
+        self._proactive_pending = {}
+        message = self._build_proactive_message(pending)
+        turn = Turn(
+            turn_id=f"turn-{uuid.uuid4().hex}",
+            conn=self.proactive_conn,
+            message=message,
+            include_reasoning=False,
+            client_message_id=None,
+            origin="proactive",
+            lock_authorized=True,
+            lock_authorization="exclusive-owner",
+            trigger_kind="+".join(sorted(pending)),
+            trigger_facts={key: dict(value) for key, value in pending.items()},
+            proactive_id=f"proactive-{uuid.uuid4().hex}",
+        )
+        self._last_proactive_at = now_iso()
+        LOGGER.info(
+            "proactive turn enqueued kind=%s id=%s solo=%s",
+            turn.trigger_kind,
+            turn.proactive_id,
+            self._solo_session is not None,
+        )
+        if (
+            self.active is None
+            and not self.queue
+            and not self._compacting
+            and not self._external_tools_pending
+            and bool(getattr(self.backend, "ready", False))
+        ):
+            self.active = turn
+            turn.state = "running"
+            self._spawn_turn(turn)
+            return
+        turn.state = "queued"
+        self.queue.append(turn)
+        self._schedule_status_refresh()
 
 
     def _enqueue_solo_notice(self, target_names: str) -> None:

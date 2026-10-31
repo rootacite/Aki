@@ -399,7 +399,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   正常运行。目标成员的群 transcript 在独处期间冻结，作为稳定 system overlay
   注入独处请求，估算最多 16K token，不写入 `solo` conversation。独处回复强制 `wake=user`、移除成员 `@`、禁用
   `wait_other`。目标成员自己的独处历史写入 `<profile>.solo.jsonl`；退出后不广播、
-  不混入群 transcript。切换时同时切换后端 conversation。
+  不混入群 transcript。切换时同时切换后端 conversation。presence/schedule 主动触发器在
+  独处期间直接投递到当前 solo 私聊，不写入群聊；夜话仍跳过 solo 目标。
 - 独处记忆：退出独处时把本次 `aki.solo.jsonl` 中的最终消息保存到
   `~/.aki/solo-memory/<profile>.json`（0600，原子写）。摘要通过该 profile 的
   loopback LLM proxy 生成，超时 200 秒。正文为空时用和频道 turn 相同的规则从

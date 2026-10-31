@@ -638,7 +638,10 @@ class HealthMixin:
     def _solo_wait_user_block(self, turn: Turn) -> str:
         return render_solo_wait_user(
             user_name=self.config.username or "Master",
-            from_agent=bool(turn.origin_is_agent or turn.origin == "nighttalk"),
+            from_agent=bool(
+                turn.origin_is_agent
+                or turn.origin in ("nighttalk", "proactive", "solo_notice")
+            ),
         )
 
 

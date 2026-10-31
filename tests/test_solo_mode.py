@@ -72,6 +72,7 @@ class FakeChannel:
         self.connected = True
         self.magic = "group-magic"
         self.controls: list[dict[str, str]] = []
+        self.published: list[tuple[str, dict[str, str]]] = []
 
     def set_active_magic(self, magic: str) -> None:
         self.magic = magic
@@ -81,6 +82,15 @@ class FakeChannel:
 
     async def publish_control(self, _text, metadata, **kwargs) -> None:
         self.controls.append(dict(metadata))
+
+    async def publish_text(
+        self,
+        text: str,
+        metadata: dict[str, str] | None = None,
+        *,
+        message_id: str | None = None,
+    ) -> None:
+        self.published.append((text, dict(metadata or {})))
 
     async def publish_file(self, path, *, name="", source_path="", message_id=""):
         return {
@@ -672,7 +682,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("这是独处里说的秘密", group_text)
             self.assertNotIn("独处里的私密回复", group_text)
 
-    async def test_proactive_turn_waits_until_solo_exits(self) -> None:
+    async def test_proactive_turn_queues_in_active_solo(self) -> None:
         from engine.solo_mode import SoloSession
 
         self.server._solo_session = SoloSession(
@@ -686,13 +696,44 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.server.backend.ready = False
         self.server._queue_proactive("schedule", {"schedules": [{"id": "later"}]})
         await self.server._maybe_enqueue_proactive_turn()
-        self.assertEqual(self.server.queue, [])
-        self.assertIsNone(self.server.active)
-        self.assertIn("schedule", self.server._proactive_pending)
-        self.server._solo_session = None
-        await self.server._maybe_enqueue_proactive_turn()
         self.assertEqual(len(self.server.queue), 1)
-        self.assertEqual(self.server.queue[0].origin, "proactive")
+        self.assertIsNone(self.server.active)
+        self.assertEqual(self.server._proactive_pending, {})
+        turn = self.server.queue[0]
+        self.assertEqual(turn.origin, "proactive")
+        self.assertEqual(turn.trigger_kind, "schedule")
+        stable, mid = await self.server._build_turn_overlay(turn)
+        overlay = "\n\n".join([*stable, *mid])
+        self.assertIn("# solo-mode", overlay)
+        self.assertIn('<wait-user allowed="false"', overlay)
+        self.assertNotIn("# channel-wake-routing", overlay)
+
+    async def test_proactive_text_is_recorded_in_solo_history(self) -> None:
+        from engine.solo_mode import SoloSession
+
+        self.server._solo_session = SoloSession(
+            session_id="solo-proactive-publish",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-31T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.server.channel_history_path = self.server.solo_channel_history_path
+        turn = Turn(
+            turn_id="turn-proactive-publish",
+            conn=NullConnection(),
+            message="trigger",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="proactive",
+            trigger_kind="presence",
+        )
+        await self.server._publish_proactive_text(turn, "已经很晚了，该休息了。")
+        self.assertEqual(self.channel.published[-1][0], "已经很晚了，该休息了。")
+        solo_text = self.server.solo_channel_history_path.read_text(encoding="utf-8")
+        self.assertIn("已经很晚了，该休息了。", solo_text)
+        self.assertFalse(self.server.group_channel_history_path.exists())
 
     async def test_bridge_keeps_solo_rules_and_memories_in_system_prompt(self) -> None:
         from engine.solo_memory import SoloMemoryEntry, SoloMemorySession

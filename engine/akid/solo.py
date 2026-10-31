@@ -69,6 +69,12 @@ class SoloMixin:
 
 
     async def _activate_solo(self, session: SoloSession) -> None:
+        async with self._solo_lock:
+            await self._activate_solo_locked(session)
+        await self._maybe_enqueue_proactive_turn()
+
+
+    async def _activate_solo_locked(self, session: SoloSession) -> None:
         if session.target_id != self._channel_self_key():
             return
         if self._solo_session is not None:
@@ -167,6 +173,12 @@ class SoloMixin:
 
 
     async def _deactivate_solo(self, *, session_id: str = "") -> None:
+        async with self._solo_lock:
+            await self._deactivate_solo_locked(session_id=session_id)
+        await self._maybe_enqueue_proactive_turn()
+
+
+    async def _deactivate_solo_locked(self, *, session_id: str = "") -> None:
         session = self._solo_session
         if session is None:
             return
@@ -229,7 +241,6 @@ class SoloMixin:
         )
         LOGGER.info("solo channel exited session=%s", session.session_id)
         await self._publish_channel_status()
-        await self._maybe_enqueue_proactive_turn()
 
 
     async def _switch_backend_conversation(self, conversation_id: str) -> bool:
