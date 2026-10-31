@@ -402,15 +402,17 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不混入群 transcript。切换时同时切换后端 conversation。
 - 独处记忆：退出独处时把本次 `aki.solo.jsonl` 中的最终消息保存到
   `~/.aki/solo-memory/<profile>.json`（0600，原子写）。摘要通过该 profile 的
-  loopback LLM proxy 生成，超时 200 秒；失败时写入确定性 fallback 并在下次启动重试。
+  loopback LLM proxy 生成，超时 200 秒；失败时写入确定性 fallback，并在下次 solo
+  backend 启动时重试。
   历史独处会话以 `<solo-memories budget_tokens="65536">` 只注入本 Agent；超预算时由
   独立人格 API 批量选择淘汰，原文归档到 MemFS `solo/<session_id>.md` 并提交 git。
   API/JSON/ID 校验失败或淘汰后仍超预算时，不修改 active 存储，当前 prompt 只渲染预算内
   最新内容。`<solo-memories>` 同时注入独处和群聊请求；最近一次结束的会话
-  标 `just_ended`。摘要走 `[solo] model`，不回退到群聊模型。新的独处消息写入
+  标 `just_ended`。摘要走 solo 的运行时模型；未配置 solo 启动脚本时使用群聊模型。
+  新的独处消息写入
   `solo` conversation，不进入群聊 `default` conversation。频道状态在独处期间
   发布独处模型，reasoning effort 固定为 `medium`。loopback proxy 对
-  `[solo] model` 的请求写入 `reasoning_effort=medium` 和
+  solo 动态路由的请求写入 `reasoning_effort=medium` 和
   `reasoning_budget_tokens=1536`，盖过群聊 agent 上的 effort 和该路由的
   extra_body。摘要走同一条模型，因此同样带上这个预算。群聊请求保持原样。
   未写入 agent record 的群聊 reasoning effort 仍按默认 `low` 发布。
@@ -432,9 +434,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `conversation:<id>`，四个 profile 共用一个后端），进入和退出时通过
   `aki_switch_conversation` 热切换，不重启
   Letta，也不改 agent 上的群聊模型。MemFS 和基础 system prompt 仍然共用。
-  `[solo] model` 留空时独处请求落到群聊模型；写了则必须是本文件已启用的模型，
-  记在 `solo` conversation 上。本机四个 profile 的独处模型是
-  `qwen3.6-35b-a3b`，上游 `http://127.0.0.1:10000/v1`。
+  `[solo] startup_script` 为空时独处请求落到群聊模型。配置启动脚本后，首条独处消息
+  才拉起本地 OpenAI 兼容服务；模型名、上下文长度和输出上限实时读取
+  `/v1/models` 与 `/props`，写入 `solo` conversation。最后一次请求或 turn 结束后
+  `idle_timeout`（默认 900 秒）无活动则关闭进程，下一条消息重新拉起。状态文件在
+  `~/.aki/solo/<profile>.backend.json`，代理据此发布动态路由。旧 `[solo] model`
+  已移除，配置中残留会直接报错；`[solo] endpoint` 可显式指定，留空则从启动脚本的
+  `--host/--port` 推导。端点已被非 akid 进程占用时拒绝启动。
   唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。

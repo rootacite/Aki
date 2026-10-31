@@ -5,6 +5,8 @@ from __future__ import annotations
 import configparser
 import json
 import os
+import re
+import shlex
 import tempfile
 from urllib.parse import urlsplit
 from engine.member_profile import truncate_member_description
@@ -16,6 +18,7 @@ from .models import (
     DEFAULT_AGENT_ID,
     ImageGeneration,
     ModelRoute,
+    SoloBackend,
     ToolPolicy,
     Upstream,
     _APIS,
@@ -154,19 +157,102 @@ def _float_or(
 
 
 
-def _solo_model_id(
-    parser: configparser.ConfigParser, models: list[ModelRoute]
-) -> str:
-    model_id = parser.get("solo", "model", fallback="").strip()
-    if not model_id:
-        return ""
-    enabled = {route.model_id for route in models if route.enabled}
-    if model_id not in enabled:
-        known = ", ".join(sorted(enabled)) or "(none)"
+def split_startup_script(script: str) -> list[str]:
+    text = re.sub(r"\\\r?\n", " ", script)
+    return shlex.split(text)
+
+
+def _endpoint_from_script(script: str) -> str:
+    try:
+        argv = split_startup_script(script)
+    except ValueError as exc:
+        raise ConfigError(f"[solo] startup_script cannot be parsed: {exc}") from exc
+    host = "127.0.0.1"
+    port = ""
+    for index, token in enumerate(argv):
+        if token in ("--host", "--port"):
+            value = argv[index + 1] if index + 1 < len(argv) else ""
+        elif token.startswith("--host="):
+            value = token.split("=", 1)[1]
+            token = "--host"
+        elif token.startswith("--port="):
+            value = token.split("=", 1)[1]
+            token = "--port"
+        else:
+            continue
+        if not value:
+            raise ConfigError(f"[solo] {token} requires a value")
+        if token == "--host":
+            host = value.split(",", 1)[0].strip()
+        else:
+            port = value.strip()
+    if not port:
         raise ConfigError(
-            f"[solo] model must be an enabled model in this file: {known}"
+            "[solo] endpoint is required when startup_script has no --port"
         )
-    return model_id
+    try:
+        port_number = int(port)
+    except ValueError as exc:
+        raise ConfigError("[solo] startup_script --port must be an integer") from exc
+    if not 1 <= port_number <= 65535:
+        raise ConfigError("[solo] startup_script --port is out of range")
+    if host.startswith("/"):
+        raise ConfigError("[solo] endpoint cannot be a Unix socket")
+    if host in ("0.0.0.0", "::", "[::]", "*"):
+        host = "127.0.0.1"
+    netloc = f"[{host}]" if ":" in host else host
+    return f"http://{netloc}:{port_number}/v1"
+
+
+def _solo_endpoint(parser: configparser.ConfigParser) -> str:
+    raw = parser.get("solo", "endpoint", fallback="").strip()
+    script = parser.get("solo", "startup_script", fallback="").strip()
+    if not raw:
+        if not script:
+            return ""
+        raw = _endpoint_from_script(script)
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ConfigError("[solo] endpoint must be an http(s) URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ConfigError("[solo] endpoint must not include credentials, query, or fragment")
+    host = parsed.hostname
+    if host in ("0.0.0.0", "::"):
+        host = "127.0.0.1"
+    path = parsed.path.rstrip("/")
+    if path in ("", "/"):
+        path = "/v1"
+    if path != "/v1":
+        raise ConfigError("[solo] endpoint path must be /v1")
+    netloc = f"[{host}]" if ":" in host else host
+    if parsed.port is not None:
+        netloc = f"{netloc}:{parsed.port}"
+    return f"{parsed.scheme}://{netloc}{path}"
+
+
+def _solo_backend(parser: configparser.ConfigParser) -> SoloBackend:
+    if parser.has_option("solo", "model"):
+        raise ConfigError(
+            "[solo] model is no longer supported; remove it and configure "
+            "startup_script/endpoint instead"
+        )
+    script = parser.get("solo", "startup_script", fallback="").strip()
+    endpoint = _solo_endpoint(parser)
+    if endpoint and not script:
+        raise ConfigError("[solo] endpoint requires startup_script")
+    return SoloBackend(
+        startup_script=script,
+        endpoint=endpoint,
+        startup_timeout=_float_or(
+            parser, "solo", "startup_timeout", 300.0, minimum=0.0, maximum=3600.0
+        ),
+        shutdown_timeout=_float_or(
+            parser, "solo", "shutdown_timeout", 15.0, minimum=0.0, maximum=300.0
+        ),
+        idle_timeout=_float_or(
+            parser, "solo", "idle_timeout", 900.0, minimum=0.0, maximum=86400.0
+        ),
+    )
 
 
 
@@ -592,10 +678,10 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             parser, "solo", "transcript_budget_tokens", 64 * 1024, minimum=1024
         ),
         solo_prompt_file=parser.get("solo", "prompt_file", fallback="").strip(),
-        solo_model_id=_solo_model_id(parser, models),
         solo_compaction_ratio=_float_or(
             parser, "solo", "compaction_ratio", 0.85, minimum=0.0, maximum=1.0
         ),
+        solo_backend=_solo_backend(parser),
         tool_policy=tool_policy,
         image=image,
         comfyui=comfyui,

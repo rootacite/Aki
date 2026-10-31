@@ -18,6 +18,7 @@ if __package__ in (None, ""):
 
 from engine.aki_config import ConfigError, ensure_proxy_token, load_config, resolve_config_path
 from engine.llm_proxy import LlmProxy
+from engine.solo_backend import default_activity_path, default_state_path
 
 LOGGER = logging.getLogger("akid.proxy")
 RELOAD_INTERVAL_S = 2.0
@@ -44,7 +45,8 @@ def _build(config, debug_socket: str = "") -> LlmProxy:
         upstream_proxy=config.upstream_proxy,
         profile=config.profile,
         debug_socket=debug_socket,
-        solo_model_id=config.solo_model_id,
+        solo_runtime_path=default_state_path(config.profile),
+        solo_activity_path=default_activity_path(config.profile),
     )
 
 
@@ -110,9 +112,11 @@ async def _reload_loop(
             or config.proxy_token != proxy.token
         ):
             LOGGER.warning("proxy listen/token changed; restart akid-proxy@%s", profile)
-        proxy.routes = {route.model_id: route for route in config.enabled_models}
-        proxy.solo_model_id = config.solo_model_id
+        proxy.set_configured_routes(config.enabled_models)
         proxy.upstream_proxy = config.upstream_proxy
+        proxy.solo_runtime_path = default_state_path(config.profile)
+        proxy.solo_activity_path = default_activity_path(config.profile)
+        proxy._refresh_solo_route(force=True)
         LOGGER.info("proxy routes reloaded profile=%s models=%s", profile, sorted(proxy.routes))
 
 

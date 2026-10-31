@@ -46,6 +46,35 @@ def render_provider_mod(config: AkiConfig) -> str:
     baseUrl: {base},
     authHeader: true,
     connect: false,
+    async listModels(connection) {{
+      const baseUrl = String(connection.baseUrl || "").replace(/\\/$/, "");
+      const headers = {{ Authorization: `Bearer ${{connection.apiKey || ""}}` }};
+      Object.assign(headers, connection.headers || {{}});
+      const response = await fetch(`${{baseUrl}}/models`, {{ headers }});
+      if (!response.ok) throw new Error(`Aki model list failed: ${{response.status}}`);
+      const payload = await response.json();
+      const entries = Array.isArray(payload && payload.data) ? payload.data : [];
+      return entries.map((model) => ({{
+        id: String(model.id || ""),
+        name: String(model.name || model.id || ""),
+        api: typeof model.api === "string" ? model.api : "openai-completions",
+        reasoning: true,
+        input: Array.isArray(model.input) ? model.input : ["text"],
+        cost: {{ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }},
+        contextWindow: Number(model.context_window),
+        maxTokens: Number(model.max_tokens),
+        ...(model.compat && typeof model.compat === "object"
+          ? {{ compat: model.compat }}
+          : {{}}),
+      }})).filter((model) =>
+        model.id &&
+        !model.id.includes("/") &&
+        Number.isFinite(model.contextWindow) &&
+        model.contextWindow > 0 &&
+        Number.isFinite(model.maxTokens) &&
+        model.maxTokens > 0
+      );
+    }},
     models: [
 {body}
     ],
@@ -95,7 +124,11 @@ def _compat(route: ModelRoute) -> dict[str, object] | None:
             "thinkingFormat": "openrouter",
             "supportsStrictMode": True,
         }
-    if route.upstream_name in ("local-llama", "local-gemma") and route.api == "openai-completions":
+    if route.upstream_name in (
+        "local-llama",
+        "local-gemma",
+        "solo-local",
+    ) and route.api == "openai-completions":
         return {
             "supportsStore": False,
             "supportsDeveloperRole": False,

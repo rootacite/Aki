@@ -171,6 +171,7 @@ def ensure_solo_conversation(
     provider_type: str = "",
     context_window: int | None = None,
     max_tokens: int | None = None,
+    update_model: bool = True,
 ) -> Path:
     """Create the persistent solo conversation and set or clear its model."""
     conversation_id = solo_conversation_id(agent_id)
@@ -215,7 +216,9 @@ def ensure_solo_conversation(
         }
     record["id"] = conversation_id
     record["agent_id"] = agent_id
-    if model:
+    if not update_model:
+        pass
+    elif model:
         record["model"] = model
         settings = record.get("model_settings")
         if not isinstance(settings, dict):

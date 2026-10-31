@@ -51,6 +51,7 @@ class SoloMixin:
             "group_transcript_frozen": session is not None,
             "solo_history_path": str(self.solo_channel_history_path),
             "memory": self.solo_memory.status(),
+            "backend": self.solo_backend.status(),
         }
 
 

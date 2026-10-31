@@ -12,6 +12,7 @@ from engine.letta_llm import (
     _compat,
     prepare_letta,
     render_execution_lock_mod,
+    render_provider_mod,
     supported_reasoning_efforts,
 )
 
@@ -152,6 +153,15 @@ class LettaProviderMigrationTests(unittest.TestCase):
         backups = list((self.letta_home / "backups").glob("llm-proxy-*/auth.json"))
         self.assertEqual(len(backups), 1)
         self.assertIn("deepseek-secret", backups[0].read_text(encoding="utf-8"))
+
+    def test_provider_mod_lists_models_dynamically(self) -> None:
+        set_key(self.conf, "upstream.deepseek", "api_key", "secret")
+        text = render_provider_mod(load_config(self.conf))
+        self.assertIn("async listModels(connection)", text)
+        self.assertIn('`${baseUrl}/models`', text)
+        self.assertIn("contextWindow: Number(model.context_window)", text)
+        self.assertIn("maxTokens: Number(model.max_tokens)", text)
+        self.assertIn("!model.id.includes(\"/\")", text)
 
 
     def test_two_profiles_keep_separate_providers_and_agents(self) -> None:

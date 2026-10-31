@@ -17,6 +17,7 @@ from .load import (
     load_config,
     parse_listen,
     parse_upstream_proxy,
+    split_startup_script,
 )
 from .models import (
     AkiConfig,
@@ -28,6 +29,7 @@ from .models import (
     ImageGeneration,
     ModelRoute,
     PROFILE_PATTERN,
+    SoloBackend,
     ToolPolicy,
     Upstream,
     _APIS,

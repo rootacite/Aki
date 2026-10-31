@@ -24,6 +24,8 @@ class TurnFinishMixin:
         if turn.end_sent:
             return
         turn.end_sent = True
+        if self._solo_session is not None and self.solo_backend.configured:
+            self.solo_backend.mark_activity()
         self._release_turn_lock(turn)
         turn.finished_at = time.time()
         turn.state = "finished"

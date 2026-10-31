@@ -29,6 +29,7 @@ from engine.solo_memory import (
     SoloMemoryManager,
     default_solo_memory_path,
 )
+from engine.solo_backend import SoloBackendManager
 from engine.solo_mode import (
     default_solo_state_path,
     derive_solo_magic,
@@ -315,6 +316,15 @@ class ServerMixin:
         )
         self.life_ledger = LifeLedger(self.ledger_state)
         self.comfyui = ComfyUIManager(config.comfyui, profile=config.profile)
+        self.solo_backend = SoloBackendManager(
+            config.solo_backend,
+            profile=config.profile,
+            state_path=config.solo_backend_state,
+            activity_path=config.solo_backend_activity,
+            log_path=config.solo_backend_log,
+            busy_check=lambda: self._solo_session is not None
+            and self.active is not None,
+        )
         self.presence_monitor = PresenceMonitor(
             self.presence_state,
             provider=LogindActivityProvider(
@@ -416,32 +426,33 @@ class ServerMixin:
 
     def _prepare_solo_conversation(self) -> None:
         aki = self.config.aki
-        model = ""
-        provider_type = ""
-        context_window: int | None = None
-        max_tokens: int | None = None
-        if aki is not None and aki.solo_model_id:
-            route = next(
-                (
-                    item
-                    for item in aki.enabled_models
-                    if item.model_id == aki.solo_model_id
-                ),
-                None,
+        if aki is None:
+            return
+        route = self.solo_backend.last_route()
+        if not self.solo_backend.configured:
+            ensure_solo_conversation(
+                backend_dir=self.config.backend_dir,
+                agent_id=self.config.agent_id,
+                cwd=self.config.cwd,
+                model="",
             )
-            if route is not None:
-                model = f"{aki.provider_id}/{route.model_id}"
-                provider_type = aki.provider_id
-                context_window = route.context_window
-                max_tokens = route.max_tokens
+            return
+        if route is None:
+            ensure_solo_conversation(
+                backend_dir=self.config.backend_dir,
+                agent_id=self.config.agent_id,
+                cwd=self.config.cwd,
+                update_model=False,
+            )
+            return
         ensure_solo_conversation(
             backend_dir=self.config.backend_dir,
             agent_id=self.config.agent_id,
             cwd=self.config.cwd,
-            model=model,
-            provider_type=provider_type,
-            context_window=context_window,
-            max_tokens=max_tokens,
+            model=f"{aki.provider_id}/{route.model_id}",
+            provider_type=aki.provider_id,
+            context_window=route.context_window,
+            max_tokens=route.max_tokens,
         )
 
 

@@ -127,6 +127,21 @@ class ComfyUI:
         return bool(self.startup_script.strip())
 
 
+@dataclass(frozen=True)
+class SoloBackend:
+    """Optional managed local OpenAI-compatible backend for solo mode."""
+
+    startup_script: str = ""
+    endpoint: str = ""
+    startup_timeout: float = 300.0
+    shutdown_timeout: float = 15.0
+    idle_timeout: float = 900.0
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.startup_script.strip())
+
+
 
 @dataclass(frozen=True)
 class ChannelIdentity:
@@ -154,6 +169,7 @@ class ModelRoute:
     use_proxy: bool = True
     auth: str = ""
     extra_body: dict[str, object] = field(default_factory=dict)
+    solo: bool = False
 
     @property
     def enabled(self) -> bool:
@@ -245,8 +261,8 @@ class AkiConfig:
     presence_return_debounce_seconds: int = 10
     solo_transcript_budget_tokens: int = 64 * 1024
     solo_prompt_file: str = ""
-    solo_model_id: str = ""
     solo_compaction_ratio: float = 0.85
+    solo_backend: SoloBackend = field(default_factory=SoloBackend)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     image: ImageGeneration | None = None
     comfyui: ComfyUI | None = None

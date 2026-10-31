@@ -226,6 +226,8 @@ class LifecycleMixin:
         with contextlib.suppress(Exception):
             await self.comfyui.close()
         with contextlib.suppress(Exception):
+            await self.solo_backend.close()
+        with contextlib.suppress(Exception):
             await self.backend.stop()
         self.execution_lock.close()
         with contextlib.suppress(FileNotFoundError):

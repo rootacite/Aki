@@ -760,6 +760,25 @@ system prompt 额外包含 `<solo-mode>` 与 `<solo-transcript>`，后者使用
 `@` 会被移除。其他成员如果在此期间 `@` 独处目标，不会产生目标 turn；发起方会收到
 一次临时系统提示 turn。
 
+独处可以配置独立本地模型，不再复用群聊模型路由：
+
+```ini
+[solo]
+startup_script = ~/llama-bin/llama-server --host 127.0.0.1 --port 10000 \
+  -m /opt/models/language/model.gguf --jinja
+endpoint = http://127.0.0.1:10000/v1
+startup_timeout = 300
+shutdown_timeout = 15
+idle_timeout = 900
+```
+
+`endpoint` 留空时从启动脚本的 `--host/--port` 推导，`0.0.0.0` 会映射到 `127.0.0.1`。
+首条独处消息才启动进程；模型 id、上下文长度和输出上限实时读取服务的
+`/v1/models` 与 `/props`，不在配置中写死。最后一次请求或 turn 结束后的
+`idle_timeout` 秒内没有活动，akid 会向进程组发送 SIGINT 并关闭服务；下一条消息
+重新拉起。端点已由非 akid 进程占用时会报错，不会接管。未配置 `startup_script`
+时独处继续使用群聊模型。旧 `[solo] model` 已移除，残留会报配置错误。
+
 独处模式下，目标成员不需要用户先用 `@` 指派执行者，就可以直接获取整机执行锁；
 网关会把该 turn 的授权来源标记为 `solo-mode`，`<solo-mode>` 与独处 turn guidance
 也会明确告诉模型这一例外。其他安全边界、审批和工具权限不变。

@@ -161,15 +161,13 @@ class ChannelStatusMixin:
         """
         model, reasoning, limit = self._agent_info()
         aki = self.config.aki
-        if (
-            self._solo_session is not None
-            and aki is not None
-            and aki.solo_model_id
-        ):
-            handle = f"{self._provider_id()}/{aki.solo_model_id}"
-            route = self._active_model_route(handle)
-            window = route.context_window if route is not None else limit
-            return handle, SOLO_REASONING_EFFORT, window
+        if self._solo_session is not None and aki is not None:
+            if self.solo_backend.configured:
+                route = self.solo_backend.last_route()
+                if route is None:
+                    return "", SOLO_REASONING_EFFORT, None
+                handle = f"{self._provider_id()}/{route.model_id}"
+                return handle, SOLO_REASONING_EFFORT, route.context_window
         return (
             model or "",
             reasoning or DEFAULT_REASONING_EFFORT,

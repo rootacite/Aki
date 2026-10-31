@@ -9,6 +9,7 @@ from pathlib import Path
 
 from engine import akictl
 from engine.akid import GatewayConfig, GatewayServer, NullConnection, Turn
+from engine.aki_config import atomic_write, load_config, set_key, template_text
 from engine.live_context import (
     ChannelMember,
     ChannelTranscriptEntry,
@@ -25,9 +26,11 @@ from engine.solo_mode import (
     SOLO_ACTIVE,
     SOLO_END,
     SOLO_START,
+    SoloSession,
     derive_solo_magic,
     load_solo_scene,
 )
+from engine.solo_backend import SoloRoute
 from engine.tokifactor import TextEnvelope
 
 
@@ -36,6 +39,7 @@ class DummyBackend:
 
     def __init__(self) -> None:
         self.switched: list[str] = []
+        self.reloaded: list[str] = []
         self.switch_error: str | None = None
 
     def start(self) -> None:
@@ -51,6 +55,11 @@ class DummyBackend:
         if self.switch_error:
             raise RuntimeError(self.switch_error)
         self.switched.append(conversation_id)
+        return {"ok": True, "conversation_id": conversation_id}
+
+    async def reload_conversation(self, **kwargs) -> dict[str, object]:
+        conversation_id = str(kwargs.get("conversation_id") or "")
+        self.reloaded.append(conversation_id)
         return {"ok": True, "conversation_id": conversation_id}
 
 
@@ -729,6 +738,70 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<solo-memories", system)
         self.assertIn("旧独处秘密", overlay)
         self.assertNotIn("solo-active", overlay.split("# solo-memories", 1)[1])
+
+    async def test_first_solo_turn_installs_discovered_model(self) -> None:
+        conf = self.root / "aki.conf"
+        atomic_write(conf, template_text())
+        set_key(conf, "proxy", "token", "loopback-token")
+        set_key(conf, "upstream.deepseek", "api_key", "secret")
+        set_key(
+            conf,
+            "solo",
+            "startup_script",
+            "llama-server --host 127.0.0.1 --port 10000 -m /tmp/model.gguf",
+        )
+        self.config.aki = load_config(conf)
+        route = SoloRoute(
+            model_id="Discovered.Model",
+            upstream_model="/tmp/model.gguf",
+            context_window=150000,
+            max_tokens=8192,
+            inputs=("text",),
+            endpoint="http://127.0.0.1:10000/v1",
+        )
+
+        class FakeSoloBackend:
+            configured = True
+
+            def __init__(self) -> None:
+                self.started = 0
+                self.activity = 0
+
+            async def start(self, **_kwargs):
+                self.started += 1
+                return route
+
+            def mark_activity(self) -> None:
+                self.activity += 1
+
+        fake = FakeSoloBackend()
+        self.server.solo_backend = fake
+        self.server._solo_session = SoloSession(
+            session_id="solo-model",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-31T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.server._backend_conversation_id = "solo-agent-aki"
+        await self.server._prepare_managed_solo_turn()
+        self.assertEqual(fake.started, 1)
+        self.assertEqual(self.server.backend.reloaded, ["solo-agent-aki"])
+        records = list(
+            (self.config.backend_dir / "conversations").glob(
+                "*/conversation.json"
+            )
+        )
+        solo = next(
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in records
+            if json.loads(path.read_text(encoding="utf-8")).get("id")
+            == "solo-agent-aki"
+        )
+        self.assertEqual(solo["model"], "aki/Discovered.Model")
+        self.assertEqual(solo["context_window_limit"], 150000)
+        self.assertEqual(solo["model_settings"]["max_tokens"], 8192)
 
 
 if __name__ == "__main__":

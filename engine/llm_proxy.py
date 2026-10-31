@@ -11,11 +11,13 @@ import os
 import ssl
 import time
 import uuid
+from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
 
 from engine.aki_config import ModelRoute, parse_upstream_proxy
 from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
+from engine.letta_llm import _compat
 from engine.proxy_debug import DebugResponse, ProxyDebugStream, resolve_debug_socket
 from engine.solo_mode import SOLO_REASONING_BUDGET_TOKENS, SOLO_REASONING_EFFORT
 
@@ -25,6 +27,7 @@ MAX_BODY_BYTES = 32 * 1024 * 1024
 MAX_HEADER_BYTES = 64 * 1024
 UPSTREAM_CONNECT_ATTEMPTS = 5
 UPSTREAM_RETRY_DELAYS = (0.2, 0.4, 0.8, 1.2)
+SOLO_ACTIVITY_HEARTBEAT_SECONDS = 60.0
 _HOP_BY_HOP = {
     "host",
     "authorization",
@@ -64,12 +67,6 @@ def _status_json(status: int, message: str, error_type: str = "proxy") -> bytes:
     return head + body
 
 
-def _is_solo_model(model_id: str, solo_model_id: str) -> bool:
-    """True when Letta asked for this profile's solo model id."""
-    solo = solo_model_id.strip()
-    return bool(solo) and model_id == solo
-
-
 def _authorized(headers: Mapping[str, str], token: str) -> bool:
     presented = headers.get("authorization", "")
     prefix = "bearer "
@@ -91,26 +88,143 @@ class LlmProxy:
         grok_oauth: GrokOAuthProvider | None = None,
         profile: str = "",
         debug_socket: str | os.PathLike[str] | None = None,
-        solo_model_id: str = "",
+        solo_runtime_path: str | os.PathLike[str] | None = None,
+        solo_activity_path: str | os.PathLike[str] | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
         self.host = host
         self.port = port
         self.token = token
-        self.routes = {route.model_id: route for route in routes if route.enabled}
+        self._configured_routes: dict[str, ModelRoute] = {}
+        self.routes: dict[str, ModelRoute] = {}
+        self.profile = profile
+        self.solo_runtime_path = (
+            Path(solo_runtime_path).expanduser()
+            if solo_runtime_path is not None
+            else None
+        )
+        self.solo_activity_path = (
+            Path(solo_activity_path).expanduser()
+            if solo_activity_path is not None
+            else None
+        )
+        self._solo_signature: tuple[int, int] | None = None
+        self._solo_route_id = ""
+        self.set_configured_routes(routes)
         self.upstream_proxy = parse_upstream_proxy(upstream_proxy)
         self.ssl_context = ssl_context
         needs_grok_oauth = any(route.auth == "grok-oauth" for route in self.routes.values())
         self.grok_oauth = grok_oauth
         if needs_grok_oauth and self.grok_oauth is None:
             self.grok_oauth = GrokOAuthProvider(upstream_proxy=self.upstream_proxy)
-        self.profile = profile
-        self.solo_model_id = solo_model_id.strip()
         configured_debug = debug_socket or os.environ.get("AKI_PROXY_DEBUG_SOCKET", "")
         self.debug_socket = resolve_debug_socket(configured_debug, profile)
         self.debug: ProxyDebugStream | None = None
         self._server: asyncio.Server | None = None
+
+    def set_configured_routes(
+        self, routes: tuple[ModelRoute, ...] | list[ModelRoute]
+    ) -> None:
+        self._configured_routes = {
+            route.model_id: route for route in routes if route.enabled
+        }
+        self._rebuild_routes()
+
+    def _rebuild_routes(self) -> None:
+        self.routes = dict(self._configured_routes)
+        self._solo_route_id = ""
+        self._solo_signature = None
+        self._refresh_solo_route(force=True)
+
+    def _remove_solo_route(self) -> None:
+        model_id = self._solo_route_id
+        if not model_id:
+            return
+        configured = self._configured_routes.get(model_id)
+        if configured is not None:
+            self.routes[model_id] = configured
+        else:
+            self.routes.pop(model_id, None)
+        self._solo_route_id = ""
+
+    def _refresh_solo_route(self, *, force: bool = False) -> None:
+        path = self.solo_runtime_path
+        if path is None:
+            return
+        try:
+            stat = path.stat()
+            signature: tuple[int, int] | None = (stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            signature = None
+        if not force and signature == self._solo_signature:
+            return
+        self._solo_signature = signature
+        self._remove_solo_route()
+        if signature is None:
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        route_data = payload.get("route") if isinstance(payload, dict) else None
+        if payload.get("running") is not True or not isinstance(route_data, dict):
+            return
+        try:
+            model_id = str(route_data["model_id"])
+            upstream_model = str(route_data["upstream_model"])
+            endpoint = str(route_data["endpoint"]).rstrip("/")
+            context_window = int(route_data["context_window"])
+            max_tokens = int(route_data["max_tokens"])
+            inputs = tuple(str(item) for item in route_data.get("inputs", ["text"]))
+            api = str(route_data.get("api") or "openai-completions")
+            route_path = str(route_data.get("path") or "/chat/completions")
+        except (KeyError, TypeError, ValueError):
+            return
+        if (
+            not model_id
+            or "/" in model_id
+            or not upstream_model
+            or not endpoint
+            or context_window <= 0
+            or max_tokens <= 0
+            or api != "openai-completions"
+            or route_path != "/chat/completions"
+        ):
+            return
+        self.routes[model_id] = ModelRoute(
+            model_id=model_id,
+            upstream_name="solo-local",
+            upstream_model=upstream_model,
+            api=api,
+            path=route_path,
+            context_window=context_window,
+            max_tokens=max_tokens,
+            inputs=inputs,
+            url=endpoint + route_path,
+            api_key="local",
+            use_proxy=False,
+            solo=True,
+        )
+        self._solo_route_id = model_id
+
+    def _touch_solo_activity(self) -> None:
+        path = self.solo_activity_path
+        if path is None:
+            return
+        now = time.time()
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            path.touch(exist_ok=True)
+            os.utime(path, (now, now))
+
+    async def _solo_activity_heartbeat(self) -> None:
+        try:
+            while True:
+                await asyncio.sleep(SOLO_ACTIVITY_HEARTBEAT_SECONDS)
+                self._touch_solo_activity()
+        except asyncio.CancelledError:
+            raise
 
     async def start(self) -> None:
         if self.debug_socket is not None:
@@ -200,6 +314,7 @@ class LlmProxy:
         if not _authorized(headers, self.token):
             writer.write(_status_json(401, "unauthorized"))
             return 401, "-", "-"
+        self._refresh_solo_route()
         if method == "GET" and path == "/v1/models":
             writer.write(_models_response(self.routes))
             return 200, "-", "-"
@@ -244,7 +359,7 @@ class LlmProxy:
         payload["model"] = route.upstream_model
         if route.extra_body:
             payload.update(route.extra_body)
-        if _is_solo_model(model_id, self.solo_model_id):
+        if route.solo:
             payload["reasoning_effort"] = SOLO_REASONING_EFFORT
             payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
         forwarded = json.dumps(payload).encode("utf-8")
@@ -278,6 +393,12 @@ class LlmProxy:
                 return 502, model_id, upstream_host
             api_key = credentials.access_token
             extra_headers = credentials.extra_headers()
+        activity_task: asyncio.Task[None] | None = None
+        if route.solo:
+            self._touch_solo_activity()
+            activity_task = asyncio.create_task(
+                self._solo_activity_heartbeat(), name="solo-proxy-activity"
+            )
         try:
             status = await _forward(
                 parsed,
@@ -303,6 +424,12 @@ class LlmProxy:
                 self.debug.publish_error(request_id, status=502, error="upstream unavailable")
             writer.write(_status_json(502, "upstream unavailable"))
             return 502, model_id, upstream_host
+        finally:
+            if activity_task is not None:
+                activity_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await activity_task
+                self._touch_solo_activity()
         return status, model_id, upstream_host
 
 
@@ -337,13 +464,28 @@ def _parse_head(head: bytes) -> tuple[str, str, dict[str, str]]:
 
 
 def _models_response(routes: dict[str, ModelRoute]) -> bytes:
+    entries: list[dict[str, object]] = []
+    for model_id in sorted(routes):
+        route = routes[model_id]
+        entry: dict[str, object] = {
+            "id": model_id,
+            "object": "model",
+            "owned_by": "aki",
+            "name": model_id,
+            "api": route.api,
+            "context_window": route.context_window,
+            "max_tokens": route.max_tokens,
+            "input": list(route.inputs),
+            "solo": route.solo,
+        }
+        compat = _compat(route)
+        if compat is not None:
+            entry["compat"] = compat
+        entries.append(entry)
     body = json.dumps(
         {
             "object": "list",
-            "data": [
-                {"id": model_id, "object": "model", "owned_by": "aki"}
-                for model_id in sorted(routes)
-            ],
+            "data": entries,
         }
     ).encode("utf-8")
     head = (

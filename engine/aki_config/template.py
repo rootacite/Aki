@@ -110,8 +110,14 @@ return_debounce_seconds = 10
 transcript_budget_tokens = 65536
 # 留空则使用 prompts/<profile>-solo.md
 prompt_file =
-# 留空则与群聊使用同一个模型；上下文仍然分开
-model =
+# 可选：solo 独立本地 OpenAI 兼容服务。留空则沿用群聊模型。
+# startup_script = ~/llama-bin/llama-server --host 127.0.0.1 --port 10000 -m /path/model.gguf
+startup_script =
+# 留空则从 startup_script 的 --host/--port 推导
+endpoint =
+startup_timeout = 300
+shutdown_timeout = 15
+idle_timeout = 900
 compaction_ratio = 0.85
 
 [avatar]
@@ -287,8 +293,14 @@ return_debounce_seconds = 10
 [solo]
 transcript_budget_tokens = 65536
 prompt_file =
-# 留空则与群聊使用同一个模型；上下文仍然分开
-model =
+# 可选：solo 独立本地 OpenAI 兼容服务。留空则沿用群聊模型。
+# startup_script = ~/llama-bin/llama-server --host 127.0.0.1 --port 10000 -m /path/model.gguf
+startup_script =
+# 留空则从 startup_script 的 --host/--port 推导
+endpoint =
+startup_timeout = 300
+shutdown_timeout = 15
+idle_timeout = 900
 compaction_ratio = 0.85
 
 [avatar]
@@ -407,8 +419,14 @@ return_debounce_seconds = 10
 transcript_budget_tokens = 65536
 # 留空则使用 prompts/natsu-solo.md
 prompt_file =
-# 留空则与群聊使用同一个模型；上下文仍然分开
-model =
+# 可选：solo 独立本地 OpenAI 兼容服务。留空则沿用群聊模型。
+# startup_script = ~/llama-bin/llama-server --host 127.0.0.1 --port 10000 -m /path/model.gguf
+startup_script =
+# 留空则从 startup_script 的 --host/--port 推导
+endpoint =
+startup_timeout = 300
+shutdown_timeout = 15
+idle_timeout = 900
 compaction_ratio = 0.85
 
 [avatar]

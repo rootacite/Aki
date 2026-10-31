@@ -211,24 +211,32 @@ class ModelMixin:
         aki = self.config.aki
         if aki is None or not aki.proxy_token:
             return None
-        agent_model, _reasoning, _limit = self._agent_info()
-        chosen = agent_model
-        if aki.solo_model_id:
-            chosen = f"{self._provider_id()}/{aki.solo_model_id}"
-        route = self._active_model_route(chosen)
-        if route is None:
+        if self.solo_backend.configured:
+            if not self.solo_backend.status().get("running"):
+                return None
+            solo_route = self.solo_backend.last_route()
+            if solo_route is None:
+                return None
+            model_id = solo_route.model_id
+            api = solo_route.api
+            route_path = solo_route.path
+        else:
+            agent_model, _reasoning, _limit = self._agent_info()
             route = self._active_model_route(agent_model)
-        if route is None:
-            route = next(iter(aki.enabled_models), None)
-        if route is None:
-            return None
+            if route is None:
+                route = next(iter(aki.enabled_models), None)
+            if route is None:
+                return None
+            model_id = route.model_id
+            api = route.api
+            route_path = route.path
         return {
             "base_prompt": self._compiled_persona_prompt(),
             "proxy_base_url": aki.proxy_base_url,
             "proxy_token": aki.proxy_token,
-            "model": route.model_id,
-            "api": route.api,
-            "route_path": route.path,
+            "model": model_id,
+            "api": api,
+            "route_path": route_path,
         }
 
 
@@ -255,6 +263,21 @@ class ModelMixin:
             summary_status=FALLBACK_SUMMARY_STATUS,
             entries=entries,
         )
+        if self.solo_backend.configured:
+            try:
+                aki = self.config.aki
+                await self.solo_backend.start(
+                    reserved_model_ids={
+                        route.model_id for route in aki.enabled_models
+                    }
+                    if aki is not None
+                    else set()
+                )
+            except Exception:
+                LOGGER.exception(
+                    "cannot start solo backend for session summary session=%s",
+                    session.session_id,
+                )
         config = self._solo_memory_llm_config()
         if config is not None:
             await self.solo_memory.summarize(

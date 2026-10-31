@@ -9,6 +9,8 @@ from pathlib import Path
 from engine.letta_process import BackendUnavailable
 from engine.live_context import render_channel_roster, render_user_format_guard
 from engine.nighttalk import render_nighttalk_overlay
+from engine.solo_backend import SoloBackendError
+from engine.solo_mode import ensure_solo_conversation, solo_conversation_id
 from engine.tokifactor import (
     MAX_IMAGE_BYTES,
     detect_image_mime,
@@ -109,6 +111,25 @@ class TurnsMixin:
                 )
                 await self._finish_turn(turn, "bridge_unavailable")
                 return
+            if self._solo_session is not None and self.solo_backend.configured:
+                try:
+                    await self._prepare_managed_solo_turn()
+                except SoloBackendError as exc:
+                    LOGGER.warning(
+                        "solo backend unavailable turn=%s error=%s",
+                        turn.turn_id,
+                        exc,
+                    )
+                    await self._emit(
+                        turn,
+                        "error",
+                        {
+                            "code": "SOLO_BACKEND_UNAVAILABLE",
+                            "message": str(exc),
+                        },
+                    )
+                    await self._finish_turn(turn, "solo_backend_unavailable")
+                    return
             stable_parts, mid_parts = await self._build_turn_overlay(turn)
             turn_context = self._turn_context_payload(stable_parts, mid_parts)
             overlay = {"turn_context": turn_context} if turn_context else {}
@@ -140,6 +161,38 @@ class TurnsMixin:
         finally:
             if not turn.end_sent:
                 await self._finish_turn(turn, "error")
+
+    async def _prepare_managed_solo_turn(self) -> None:
+        aki = self.config.aki
+        if aki is None:
+            raise SoloBackendError("profile config is unavailable")
+        expected = solo_conversation_id(self.config.agent_id)
+        if self._active_conversation_id() != expected:
+            raise SoloBackendError(
+                "solo conversation is not active; refusing to start the local backend"
+            )
+        route = await self.solo_backend.start(
+            reserved_model_ids={item.model_id for item in aki.enabled_models}
+        )
+        ensure_solo_conversation(
+            backend_dir=self.config.backend_dir,
+            agent_id=self.config.agent_id,
+            cwd=self.config.cwd,
+            model=f"{aki.provider_id}/{route.model_id}",
+            provider_type=aki.provider_id,
+            context_window=route.context_window,
+            max_tokens=route.max_tokens,
+        )
+        try:
+            await self.backend.reload_conversation(
+                conversation_id=expected,
+                agent_id=self.config.agent_id,
+            )
+        except Exception as exc:
+            raise SoloBackendError(
+                f"cannot reload solo conversation for discovered model: {exc}"
+            ) from exc
+        self.solo_backend.mark_activity()
 
 
     async def _build_turn_overlay(self, turn: Turn) -> tuple[list[str], list[str]]:

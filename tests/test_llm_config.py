@@ -26,20 +26,36 @@ class AkiConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def test_solo_model_defaults_and_must_be_enabled(self) -> None:
+    def test_solo_backend_defaults_and_validation(self) -> None:
         atomic_write(self.path, template_text())
         set_key(self.path, "proxy", "token", "loopback-token")
         config = load_config(self.path)
-        self.assertEqual(config.solo_model_id, "")
+        self.assertFalse(config.solo_backend.configured)
+        self.assertEqual(config.solo_backend.endpoint, "")
+        self.assertEqual(config.solo_backend.startup_timeout, 300)
+        self.assertEqual(config.solo_backend.idle_timeout, 900)
         self.assertEqual(config.solo_compaction_ratio, 0.85)
-        set_key(self.path, "upstream.deepseek", "api_key", "deepseek-secret")
-        set_key(self.path, "solo", "model", "deepseek-flash")
-        self.assertEqual(load_config(self.path).solo_model_id, "deepseek-flash")
-        set_key(self.path, "solo", "model", "not-a-model")
+        set_key(
+            self.path,
+            "solo",
+            "startup_script",
+            "llama-server --host 0.0.0.0 --port 10000 -m /tmp/model.gguf",
+        )
+        config = load_config(self.path)
+        self.assertTrue(config.solo_backend.configured)
+        self.assertEqual(
+            config.solo_backend.endpoint, "http://127.0.0.1:10000/v1"
+        )
+        set_key(self.path, "solo", "endpoint", "http://127.0.0.1:10001/v1")
+        self.assertEqual(
+            load_config(self.path).solo_backend.endpoint,
+            "http://127.0.0.1:10001/v1",
+        )
+        set_key(self.path, "solo", "compaction_ratio", "1.5")
         with self.assertRaises(ConfigError):
             load_config(self.path)
+        set_key(self.path, "solo", "compaction_ratio", "0.85")
         set_key(self.path, "solo", "model", "deepseek-flash")
-        set_key(self.path, "solo", "compaction_ratio", "1.5")
         with self.assertRaises(ConfigError):
             load_config(self.path)
 

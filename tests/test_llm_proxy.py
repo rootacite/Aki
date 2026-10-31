@@ -481,6 +481,7 @@ class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
             url=url,
             api_key="local",
             extra_body={"reasoning_effort": "high", "reasoning_budget_tokens": 8192},
+            solo=True,
         )
         group = ModelRoute(
             model_id="gemini-3.8-flash",
@@ -499,7 +500,6 @@ class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
             0,
             "loopback-token",
             (solo, group),
-            solo_model_id="qwen3.6-35b-a3b",
         )
         await self.proxy.start()
 
@@ -549,6 +549,151 @@ class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured["reasoning_effort"], "low")
         self.assertNotIn("reasoning_budget_tokens", captured)
+
+
+class DynamicSoloRouteProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.root = Path(self.tempdir.name)
+        self.state_path = self.root / "solo.backend.json"
+        self.activity_path = self.root / "solo.activity"
+        self.captured: dict[str, object] = {}
+
+        async def upstream(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            self.captured["body"] = json.loads(rest[:length])
+            payload = b'{"choices":[{"message":{"content":"OK"}}]}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + payload
+            )
+            await writer.drain()
+            writer.close()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = self.upstream.sockets[0].getsockname()[1]
+        self.upstream_url = f"http://127.0.0.1:{port}/chat/completions"
+        group = ModelRoute(
+            model_id="gemini-3.8-flash",
+            upstream_name="cloud",
+            upstream_model="gemini-3.8-flash",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=1000000,
+            max_tokens=65536,
+            inputs=("text",),
+            url=self.upstream_url,
+            api_key="local",
+        )
+        self.proxy = LlmProxy(
+            "127.0.0.1",
+            0,
+            "loopback-token",
+            (group,),
+            solo_runtime_path=self.state_path,
+            solo_activity_path=self.activity_path,
+        )
+        await self.proxy.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+        self.tempdir.cleanup()
+
+    def _write_state(self, *, running: bool) -> None:
+        self.state_path.write_text(
+            json.dumps(
+                {
+                    "running": running,
+                    "route": {
+                        "model_id": "Qwen-Test-IQ4_XS",
+                        "upstream_model": "/models/Qwen-Test-IQ4_XS.gguf",
+                        "context_window": 150000,
+                        "max_tokens": 32768,
+                        "inputs": ["text", "image"],
+                        "endpoint": self.upstream_url.removesuffix(
+                            "/chat/completions"
+                        ),
+                        "api": "openai-completions",
+                        "path": "/chat/completions",
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    async def _request(self, method: str, path: str, body: dict | None = None) -> bytes:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        raw = json.dumps(body).encode() if body is not None else b""
+        writer.write(
+            (
+                f"{method} {path} HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                + (f"Content-Length: {len(raw)}\r\n" if body is not None else "")
+                + "\r\n"
+            ).encode()
+            + raw
+        )
+        await writer.drain()
+        payload = await asyncio.wait_for(reader.read(65536), timeout=2)
+        writer.close()
+        return payload
+
+    async def test_runtime_route_is_published_and_used(self) -> None:
+        self._write_state(running=True)
+        head, body = (await self._request("GET", "/v1/models")).split(
+            b"\r\n\r\n", 1
+        )
+        self.assertIn(b"200 OK", head)
+        models = json.loads(body)["data"]
+        solo = next(item for item in models if item["id"] == "Qwen-Test-IQ4_XS")
+        self.assertEqual(solo["context_window"], 150000)
+        self.assertEqual(solo["max_tokens"], 32768)
+        self.assertEqual(solo["input"], ["text", "image"])
+        self.assertTrue(solo["solo"])
+
+        response = await self._request(
+            "POST",
+            "/v1/chat/completions",
+            {
+                "model": "Qwen-Test-IQ4_XS",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "low",
+            },
+        )
+        self.assertIn(b"200 OK", response)
+        self.assertEqual(
+            self.captured["body"]["model"], "/models/Qwen-Test-IQ4_XS.gguf"
+        )
+        self.assertEqual(self.captured["body"]["reasoning_effort"], "medium")
+        self.assertTrue(self.activity_path.is_file())
+
+        self._write_state(running=False)
+        _head, body = (await self._request("GET", "/v1/models")).split(
+            b"\r\n\r\n", 1
+        )
+        ids = {item["id"] for item in json.loads(body)["data"]}
+        self.assertNotIn("Qwen-Test-IQ4_XS", ids)
 
 
 class GrokOAuthProxyTests(unittest.IsolatedAsyncioTestCase):
