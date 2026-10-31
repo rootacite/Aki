@@ -266,6 +266,14 @@ def _message_content(value: Any) -> str:
     return ""
 
 
+def _message_reasoning(message: Mapping[str, Any]) -> str:
+    for key in ("reasoning_content", "reasoning"):
+        value = message.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
 def _extract_json_payload(response: Mapping[str, Any]) -> dict[str, Any]:
     text = ""
     choices = response.get("choices")
@@ -274,7 +282,17 @@ def _extract_json_payload(response: Mapping[str, Any]) -> dict[str, Any]:
         if isinstance(first, dict):
             message = first.get("message")
             if isinstance(message, dict):
-                text = _message_content(message.get("content"))
+                text = _message_content(message.get("content")).strip()
+                if not text:
+                    from engine.akid.reasoning_reply import recover_visible_reply
+
+                    recovered = recover_visible_reply(_message_reasoning(message))
+                    if recovered is not None:
+                        text = recovered[1]
+                        logging.getLogger("akid.solo-memory").info(
+                            "recovered solo summary JSON from reasoning chars=%s",
+                            len(text),
+                        )
             if not text:
                 text = str(first.get("text") or "")
     if not text:

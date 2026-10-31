@@ -17,6 +17,7 @@ from .constants import (
 from .history import _content_text
 from .no_reply import contains_no_reply_marker
 from .paths import now_iso
+from .reasoning_reply import recover_visible_reply, rewrite_recovered_assistant
 
 class TurnFinishMixin:
 
@@ -30,6 +31,20 @@ class TurnFinishMixin:
         turn.finished_at = time.time()
         turn.state = "finished"
         assistant_text = "".join(turn.assistant_parts)
+        if (
+            reason == "completed"
+            and not assistant_text.strip()
+            and not turn.tool_calls_seen
+            and turn.conversation_snapshot is None
+            and turn.bridge_snapshot_id is None
+        ):
+            reasoning = "".join(turn.reasoning_parts)
+            recovered = recover_visible_reply(reasoning)
+            if recovered is not None:
+                plan, reply = recovered
+                assistant_text = reply
+                turn.assistant_parts = [reply]
+                await self._repair_reasoning_context(turn, reasoning, plan, reply)
         guard_targets: list[tuple[str, str, str]] = []
         if (
             reason == "completed"
@@ -246,6 +261,63 @@ class TurnFinishMixin:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(temporary)
             raise
+
+
+    async def _repair_reasoning_context(
+        self, turn: Turn, reasoning: str, plan: str, reply: str
+    ) -> None:
+        """Move a recovered reply out of the stored thinking block.
+
+        The channel publish uses ``reply`` even when this write fails. The
+        stored message is what the next turn sends back as reasoning_content,
+        so leaving the answer in thinking would repeat the same miss.
+        """
+        path = self._conversation_dir() / "messages.jsonl"
+        try:
+            original = path.read_bytes()
+        except OSError as exc:
+            LOGGER.warning(
+                "reasoning reply recovery skipped; conversation unreadable id=%s error=%s",
+                turn.turn_id,
+                exc,
+            )
+            return
+        try:
+            lines = original.splitlines(keepends=True)
+            updated = rewrite_recovered_assistant(
+                lines, reasoning=reasoning, plan=plan, reply=reply
+            )
+        except ValueError as exc:
+            LOGGER.warning(
+                "reasoning reply recovery skipped id=%s error=%s",
+                turn.turn_id,
+                exc,
+            )
+            return
+        try:
+            self._replace_messages_file(path, b"".join(updated))
+            await self.backend.reload_conversation(
+                conversation_id=self._active_conversation_id(),
+                agent_id=self.config.agent_id,
+            )
+        except Exception as exc:
+            LOGGER.warning(
+                "reasoning reply recovery rolled back id=%s error=%s",
+                turn.turn_id,
+                exc,
+            )
+            with contextlib.suppress(Exception):
+                self._replace_messages_file(path, original)
+                await self.backend.reload_conversation(
+                    conversation_id=self._active_conversation_id(),
+                    agent_id=self.config.agent_id,
+                )
+            return
+        LOGGER.info(
+            "recovered visible reply from reasoning id=%s reply_chars=%s",
+            turn.turn_id,
+            len(reply),
+        )
 
 
     async def _merge_consumed_user_messages(

@@ -133,10 +133,22 @@ def _endpoint_reachable(endpoint: str, *, timeout: float = 1.0) -> bool:
     return isinstance(payload, dict)
 
 
+# The previous static Qwen route used this output cap. llama-server reports
+# n_predict=-1 when generation is unlimited; that must not become max_tokens.
+SOLO_OUTPUT_CAP = 32768
+
+
 def _positive_int(value: Any) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
+
+
+def _solo_output_cap(predicted: int | None, context_window: int) -> int:
+    """Keep a real server cap. Never publish the whole context as max_tokens."""
+    if predicted is None or predicted >= context_window:
+        return min(SOLO_OUTPUT_CAP, context_window)
+    return predicted
 
 
 def _sanitize_model_id(value: str) -> str:
@@ -204,7 +216,7 @@ def discover_solo_route(endpoint: str, *, timeout: float = HTTP_TIMEOUT) -> Solo
     params = settings.get("params")
     params = params if isinstance(params, Mapping) else {}
     predicted = _positive_int(params.get("n_predict"))
-    max_tokens = min(predicted, context_window) if predicted else context_window
+    max_tokens = _solo_output_cap(predicted, context_window)
 
     model_path = props.get("model_path") or props.get("model_alias") or upstream_model
     if not isinstance(model_path, str) or not model_path.strip():
@@ -234,11 +246,16 @@ def _route_from_mapping(value: Any) -> SoloRoute | None:
             isinstance(item, str) for item in inputs
         ):
             return None
+        context_window = int(value["context_window"])
+        stored_max = int(value["max_tokens"])
         route = SoloRoute(
             model_id=str(value["model_id"]),
             upstream_model=str(value["upstream_model"]),
-            context_window=int(value["context_window"]),
-            max_tokens=int(value["max_tokens"]),
+            context_window=context_window,
+            max_tokens=_solo_output_cap(
+                stored_max if stored_max < context_window else None,
+                context_window,
+            ),
             inputs=tuple(inputs),
             endpoint=str(value["endpoint"]),
             api=str(value.get("api") or "openai-completions"),

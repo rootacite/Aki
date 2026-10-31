@@ -15,6 +15,7 @@ from engine.aki_config import SoloBackend
 from engine.solo_backend import (
     SoloBackendError,
     SoloBackendManager,
+    _route_from_mapping,
     discover_solo_route,
 )
 
@@ -29,6 +30,8 @@ def free_port() -> int:
 
 
 class _MetadataHandler(BaseHTTPRequestHandler):
+    n_predict = 32768
+
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/v1/models":
             payload = {
@@ -46,7 +49,7 @@ class _MetadataHandler(BaseHTTPRequestHandler):
             payload = {
                 "default_generation_settings": {
                     "n_ctx": 150000,
-                    "params": {"n_predict": 32768},
+                    "params": {"n_predict": type(self).n_predict},
                 },
                 "modalities": {"vision": True},
                 "model_path": MODEL_PATH,
@@ -83,6 +86,39 @@ class DiscoverSoloRouteTests(unittest.TestCase):
         )
         self.assertEqual(route.upstream_model, MODEL_PATH)
         self.assertEqual(route.context_window, 150000)
+        self.assertEqual(route.max_tokens, 32768)
+        self.assertEqual(route.inputs, ("text", "image"))
+
+    def test_unlimited_predict_stays_at_output_cap(self) -> None:
+        class Handler(_MetadataHandler):
+            n_predict = -1
+
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            route = discover_solo_route(f"http://127.0.0.1:{port}/v1")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
+        self.assertEqual(route.context_window, 150000)
+        self.assertEqual(route.max_tokens, 32768)
+        self.assertEqual(route.inputs, ("text", "image"))
+
+    def test_saved_route_does_not_keep_a_full_window_cap(self) -> None:
+        route = _route_from_mapping(
+            {
+                "model_id": "Qwen-Test",
+                "upstream_model": MODEL_PATH,
+                "context_window": 150016,
+                "max_tokens": 150016,
+                "inputs": ["text", "image"],
+                "endpoint": "http://127.0.0.1:10000/v1",
+            }
+        )
+        assert route is not None
         self.assertEqual(route.max_tokens, 32768)
         self.assertEqual(route.inputs, ("text", "image"))
 

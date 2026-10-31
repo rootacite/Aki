@@ -402,7 +402,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   不混入群 transcript。切换时同时切换后端 conversation。
 - 独处记忆：退出独处时把本次 `aki.solo.jsonl` 中的最终消息保存到
   `~/.aki/solo-memory/<profile>.json`（0600，原子写）。摘要通过该 profile 的
-  loopback LLM proxy 生成，超时 200 秒；失败时写入确定性 fallback，并在下次 solo
+  loopback LLM proxy 生成，超时 200 秒。正文为空时用和频道 turn 相同的规则从
+  reasoning 里抽出回复再解析 JSON；仍然失败才写入确定性 fallback，并在下次 solo
   backend 启动时重试。
   历史独处会话以 `<solo-memories budget_tokens="65536">` 只注入本 Agent；超预算时由
   独立人格 API 批量选择淘汰，原文归档到 MemFS `solo/<session_id>.md` 并提交 git。
@@ -435,8 +436,13 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `aki_switch_conversation` 热切换，不重启
   Letta，也不改 agent 上的群聊模型。MemFS 和基础 system prompt 仍然共用。
   `[solo] startup_script` 为空时独处请求落到群聊模型。配置启动脚本后，首条独处消息
-  才拉起本地 OpenAI 兼容服务；模型名、上下文长度和输出上限实时读取
-  `/v1/models` 与 `/props`，写入 `solo` conversation。最后一次请求或 turn 结束后
+  才拉起本地 OpenAI 兼容服务；模型名和上下文长度实时读取
+  `/v1/models` 与 `/props`。输出上限沿用服务器给出的正数 `n_predict`；该值缺失、
+  为负或不小于上下文窗口时固定为 32768，不再把 `max_tokens` 写成整个窗口。
+  服务器报告视觉能力时 input 仍是 `text,image`。本地模型若把可见回复只写进
+  reasoning 且正文为空，akid 在 turn 结束时把回复从 reasoning 里分离出来发布，
+  并写回这条 assistant 消息。这是兜底，不改变模型把正文写进思考的原因。
+  最后一次请求或 turn 结束后
   `idle_timeout`（默认 900 秒）无活动则关闭进程，下一条消息重新拉起。状态文件在
   `~/.aki/solo/<profile>.backend.json`，代理据此发布动态路由。旧 `[solo] model`
   已移除，配置中残留会直接报错；`[solo] endpoint` 可显式指定，留空则从启动脚本的

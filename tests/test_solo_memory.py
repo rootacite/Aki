@@ -289,6 +289,28 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<tool-ownership>", system)
         self.assertNotIn("<live-context>", system)
 
+    async def test_summary_recovers_json_left_in_reasoning(self) -> None:
+        payload = json.dumps({"summary": "安静的一段独处"}, ensure_ascii=False)
+        reasoning = (
+            "我应该只输出 JSON。\n\n"
+            + payload
+            + "\n"
+            + payload
+        )
+        self.api.responses = [
+            {"choices": [{"message": {"content": "", "reasoning_content": reasoning}}]}
+        ]
+        manager = self.manager()
+        session = SoloMemorySession(
+            session_id="s1",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            entries=[entry(1, "我今天有点累")],
+        )
+        await manager.summarize(session, **self.api_kwargs())
+        self.assertEqual(session.summary, "安静的一段独处")
+        self.assertEqual(session.summary_status, "ready")
+
     async def test_summary_failure_uses_deterministic_fallback(self) -> None:
         self.api.responses = [{"choices": [{"message": {"content": "not json"}}]}]
         manager = self.manager()
