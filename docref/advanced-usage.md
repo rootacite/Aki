@@ -54,6 +54,26 @@ python3 install-daemon.py --restart
 python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/历史
 ```
 
+### 一键部署
+
+`deploy.sh` 按 `AGENT.md` 的部署要求串成一条命令：默认运行
+`python3 install-daemon.py` 校验或构建 vendored Letta runtime 并刷新 systemd unit，
+调用 `scripts/sync-personas.py` 同步人格，用 `aki-safectl.py` 重启运行中的 profile，
+再核对各 unit 的启动时间、最近 journal 告警和 health/status。
+
+```bash
+./deploy.sh --dry-run                         # 预览完整流程，不写入、不重启
+./deploy.sh                                   # 部署全部 profile
+./deploy.sh --profile aki --profile fuyu      # 只部署指定 profile
+./deploy.sh --start                           # 额外启动当前已停止的 profile
+./deploy.sh --pull                            # 先 git pull --ff-only（要求工作区干净）
+./deploy.sh --no-sync --no-restart            # 只做安装准备和 health/status 检查
+./deploy.sh --no-install                      # 跳过安装器，只校验运行时
+```
+
+默认会运行安装器并校验重启后的启动时间与日志；但不会启动原本已停止的 profile，也不会
+执行 `git pull`，避免改变现有运行状态。
+
 安装时会把 `akictl` 链接到 `~/.local/bin/akictl`（指向本仓库的 `bin/akictl`）。
 如果该路径已存在且不是本仓库的链接，安装会报错而不会覆盖；`--uninstall`
 只会移除指向本仓库的链接。

@@ -115,6 +115,10 @@ python3 scripts/build-letta.py --build --install # 构建 vendored Letta 运行�
 python3 install-daemon.py --dry-run   # 预览安装内容
 python3 install-daemon.py             # 安装 akid@.service / akid-proxy@.service
 python3 install-daemon.py --status    # 查看服务状态
+
+./deploy.sh --dry-run                 # 预览同步、重启和健康检查
+./deploy.sh                           # 全自动部署：安装、同步人格、重启并验证
+./deploy.sh --start                   # 同时启动已停止的 profile
 ```
 
 安装后 `akictl` 会链接到 `~/.local/bin/akictl`。生产服务使用
