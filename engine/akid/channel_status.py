@@ -8,6 +8,8 @@ import random
 import time
 import uuid
 from typing import Mapping
+from engine.letta_llm import DEFAULT_REASONING_EFFORT
+from engine.solo_mode import SOLO_REASONING_EFFORT
 from engine.member_profile import (
     MEMBER_KIND_AGENT,
     truncate_member_description,
@@ -151,8 +153,32 @@ class ChannelStatusMixin:
         }
 
 
+    def _displayed_model_state(self) -> tuple[str, str, int | None]:
+        """Model label, reasoning effort, and context window shown to clients.
+
+        Solo uses the profile's solo route and the fixed solo effort. An unset
+        group effort is the runtime default so the card still has a value.
+        """
+        model, reasoning, limit = self._agent_info()
+        aki = self.config.aki
+        if (
+            self._solo_session is not None
+            and aki is not None
+            and aki.solo_model_id
+        ):
+            handle = f"{self._provider_id()}/{aki.solo_model_id}"
+            route = self._active_model_route(handle)
+            window = route.context_window if route is not None else limit
+            return handle, SOLO_REASONING_EFFORT, window
+        return (
+            model or "",
+            reasoning or DEFAULT_REASONING_EFFORT,
+            limit,
+        )
+
+
     def _channel_live_metadata(self) -> dict[str, str]:
-        model, reasoning, _context_limit = self._agent_info()
+        model, reasoning, _context_limit = self._displayed_model_state()
         channel = self.channel
         channel_ready = bool(channel is not None and channel.connected)
         metadata = self._channel_identity_metadata()
@@ -174,7 +200,7 @@ class ChannelStatusMixin:
 
 
     def _channel_control_metadata(self) -> dict[str, str]:
-        model, reasoning, context_limit = self._agent_info()
+        _model, _reasoning, context_limit = self._displayed_model_state()
         usage = self.last_usage if isinstance(self.last_usage, dict) else {}
         context_tokens = self._token_count(
             usage.get("context_tokens") or usage.get("prompt_tokens")

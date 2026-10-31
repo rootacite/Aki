@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from engine.aki_config import ModelRoute, parse_upstream_proxy
 from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
 from engine.proxy_debug import DebugResponse, ProxyDebugStream, resolve_debug_socket
+from engine.solo_mode import SOLO_REASONING_BUDGET_TOKENS, SOLO_REASONING_EFFORT
 
 LOGGER = logging.getLogger("akid.llm_proxy")
 
@@ -63,6 +64,12 @@ def _status_json(status: int, message: str, error_type: str = "proxy") -> bytes:
     return head + body
 
 
+def _is_solo_model(model_id: str, solo_model_id: str) -> bool:
+    """True when Letta asked for this profile's solo model id."""
+    solo = solo_model_id.strip()
+    return bool(solo) and model_id == solo
+
+
 def _authorized(headers: Mapping[str, str], token: str) -> bool:
     presented = headers.get("authorization", "")
     prefix = "bearer "
@@ -84,6 +91,7 @@ class LlmProxy:
         grok_oauth: GrokOAuthProvider | None = None,
         profile: str = "",
         debug_socket: str | os.PathLike[str] | None = None,
+        solo_model_id: str = "",
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -98,6 +106,7 @@ class LlmProxy:
         if needs_grok_oauth and self.grok_oauth is None:
             self.grok_oauth = GrokOAuthProvider(upstream_proxy=self.upstream_proxy)
         self.profile = profile
+        self.solo_model_id = solo_model_id.strip()
         configured_debug = debug_socket or os.environ.get("AKI_PROXY_DEBUG_SOCKET", "")
         self.debug_socket = resolve_debug_socket(configured_debug, profile)
         self.debug: ProxyDebugStream | None = None
@@ -235,6 +244,9 @@ class LlmProxy:
         payload["model"] = route.upstream_model
         if route.extra_body:
             payload.update(route.extra_body)
+        if _is_solo_model(model_id, self.solo_model_id):
+            payload["reasoning_effort"] = SOLO_REASONING_EFFORT
+            payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
         forwarded = json.dumps(payload).encode("utf-8")
         if self.debug is not None:
             self.debug.publish_request(

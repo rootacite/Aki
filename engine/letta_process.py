@@ -396,6 +396,15 @@ class LettaProcess:
             request["after"] = after
         return await self.control_request("list_messages", request, timeout=timeout)
 
+    async def switch_conversation(
+        self, conversation_id: str, *, timeout: float = 30.0
+    ) -> dict[str, Any]:
+        return await self.control_request(
+            "aki_switch_conversation",
+            {"conversation_id": conversation_id},
+            timeout=timeout,
+        )
+
     async def begin_aki_turn(
         self, turn_id: str, overlay: Mapping[str, Any], *, timeout: float = 10.0
     ) -> dict[str, Any]:

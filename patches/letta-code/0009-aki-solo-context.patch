@@ -1,0 +1,170 @@
+--- a/src/backend/dev/provider-turn-executor.ts
++++ b/src/backend/dev/provider-turn-executor.ts
+@@ -32,6 +32,27 @@
+ import { normalizeLocalProviderError } from "./local-provider-errors";
+ 
+ const DEFAULT_AKI_COMPACTION_RATIO = 0.5;
++const DEFAULT_AKI_SOLO_COMPACTION_RATIO = 0.85;
++
++function isAkiSoloConversation(conversationId?: string): boolean {
++  return (
++    conversationId === "solo" ||
++    (typeof conversationId === "string" && conversationId.startsWith("solo-"))
++  );
++}
++
++function akiCompactionRatio(conversationId?: string): number {
++  const solo = isAkiSoloConversation(conversationId);
++  const configured = Number(
++    process.env[solo ? "AKI_SOLO_COMPACTION_RATIO" : "AKI_COMPACTION_RATIO"],
++  );
++  const fallback = solo
++    ? DEFAULT_AKI_SOLO_COMPACTION_RATIO
++    : DEFAULT_AKI_COMPACTION_RATIO;
++  return Number.isFinite(configured) && configured > 0 && configured <= 1
++    ? configured
++    : fallback;
++}
+ 
+ export interface ProviderTurnInput {
+   conversationId: string;
+@@ -241,6 +262,7 @@
+  */
+ export function contextCompactionThreshold(
+   contextWindow: number | undefined,
++  conversationId?: string,
+ ): number | undefined {
+   if (
+     typeof contextWindow !== "number" ||
+@@ -250,19 +272,21 @@
+     return undefined;
+   }
+ 
+-  const configured = Number(process.env.AKI_COMPACTION_RATIO);
+-  const ratio =
+-    Number.isFinite(configured) && configured > 0 && configured <= 1
+-      ? configured
+-      : DEFAULT_AKI_COMPACTION_RATIO;
+-  return Math.max(0, Math.floor(contextWindow * ratio));
++  return Math.max(
++    0,
++    Math.floor(contextWindow * akiCompactionRatio(conversationId)),
++  );
+ }
+ 
+ export function shouldCompactForContextPressure(input: {
+   contextTokens: number | undefined;
+   contextWindow: number | undefined;
++  conversationId?: string;
+ }): boolean {
+-  const threshold = contextCompactionThreshold(input.contextWindow);
++  const threshold = contextCompactionThreshold(
++    input.contextWindow,
++    input.conversationId,
++  );
+   return (
+     input.contextTokens !== undefined &&
+     threshold !== undefined &&
+--- a/src/backend/dev/pi-stream-adapter.ts
++++ b/src/backend/dev/pi-stream-adapter.ts
+@@ -568,7 +568,13 @@
+       },
+     );
+     const contextWindow = resolved.model.contextWindow;
+-    if (!shouldCompactForContextPressure({ contextTokens, contextWindow })) {
++    if (
++      !shouldCompactForContextPressure({
++        contextTokens,
++        contextWindow,
++        conversationId: input.conversationId,
++      })
++    ) {
+       return null;
+     }
+ 
+@@ -784,7 +790,11 @@
+           });
+         const contextWindow = resolved.model.contextWindow;
+         const compaction =
+-          shouldCompactForContextPressure({ contextTokens, contextWindow }) &&
++          shouldCompactForContextPressure({
++            contextTokens,
++            contextWindow,
++            conversationId: input.conversationId,
++          }) &&
+           contextTokens !== undefined
+             ? await this.onContextPressure(input, {
+                 contextTokens,
+--- a/src/backend/provider-turn-executor.test.ts
++++ b/src/backend/provider-turn-executor.test.ts
+@@ -94,6 +94,18 @@
+     delete process.env.AKI_COMPACTION_RATIO;
+   });
+ 
++  test("uses 0.85 for the solo conversation without changing the group ratio", () => {
++    delete process.env.AKI_SOLO_COMPACTION_RATIO;
++    process.env.AKI_COMPACTION_RATIO = "0.9";
++    expect(contextCompactionThreshold(128_000, "solo")).toBe(108_800);
++    expect(contextCompactionThreshold(128_000, "solo-agent-aki")).toBe(108_800);
++    expect(contextCompactionThreshold(128_000, "default")).toBe(115_200);
++    process.env.AKI_SOLO_COMPACTION_RATIO = "0.5";
++    expect(contextCompactionThreshold(128_000, "solo")).toBe(64_000);
++    delete process.env.AKI_COMPACTION_RATIO;
++    delete process.env.AKI_SOLO_COMPACTION_RATIO;
++  });
++
+   test("scales the threshold for small local context windows", () => {
+     delete process.env.AKI_COMPACTION_RATIO;
+     expect(contextCompactionThreshold(10_000)).toBe(5_000);
+--- a/src/headless.ts
++++ b/src/headless.ts
+@@ -3972,6 +3972,49 @@
+           uuid: randomUUID(),
+         };
+         writeWireMessage(interruptResponse);
++      } else if (subtype === "aki_switch_conversation") {
++        const request = message.request as unknown as Record<string, unknown>;
++        const nextId = String(request.conversation_id ?? "").trim();
++        try {
++          if (!nextId) {
++            throw new Error("conversation_id is required");
++          }
++          if (
++            turnInProgress ||
++            turnStarting ||
++            currentAbortController !== null
++          ) {
++            throw new Error(
++              "conversation switch refused while a turn is active",
++            );
++          }
++          if (nextId !== "default") {
++            await backend.retrieveConversation(nextId);
++          }
++          conversationId = nextId;
++          setConversationId(nextId);
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "success",
++              request_id: requestId ?? "",
++              response: { ok: true, conversation_id: nextId },
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        } catch (error) {
++          writeWireMessage({
++            type: "control_response",
++            response: {
++              subtype: "error",
++              request_id: requestId ?? "",
++              error: error instanceof Error ? error.message : String(error),
++            },
++            session_id: sessionId,
++            uuid: randomUUID(),
++          });
++        }
+       } else if (
+         subtype === "aki_begin_turn" ||
+         subtype === "aki_update_turn" ||

@@ -27,11 +27,12 @@ BLOCK_ORDER = (
     "context",
     "turn-control",
     "format-guard",
+    "wait-user",
 )
 
 _BLOCK_RE = re.compile(
     r"(?m)^# (solo-mode|solo-memories|channel-transcript|solo-transcript|"
-    r"live-context|runtime-context|turn-control|format-guard)\b[^\n]*$"
+    r"live-context|runtime-context|turn-control|format-guard|wait-user)\b[^\n]*$"
 )
 _SEQ_RE = re.compile(r"(?m)^seq:[ \t]*(\d+)[ \t]*$")
 _SOURCE_RE = re.compile(r"(?m)^source:[ \t]*(user|agent)[ \t]*$")
@@ -226,12 +227,36 @@ def analyze_request(
         errors.append(f"overlay block order is invalid: {names}")
     if names.count("context") != 1:
         errors.append("live-context/runtime-context must appear exactly once")
-    if "turn-control" not in names:
-        errors.append("turn-control is missing")
-    if not names or names[-1] != "format-guard":
-        errors.append("format-guard must be the last overlay block")
-    if len(names) < 2 or names[-2] != "turn-control":
-        errors.append("turn-control must be the second-last overlay block")
+    all_text = "\n".join(content_text(message.get("content")) for message in messages)
+    solo = "<solo-policy" in all_text
+    if solo:
+        if "turn-control" in names or "format-guard" in names:
+            errors.append("solo overlay still has group turn-control or format-guard")
+        if "solo-transcript" in names:
+            errors.append("solo overlay duplicates the solo conversation")
+        if "# channel-transcript" not in all_text:
+            errors.append("solo overlay is missing the frozen group transcript")
+        if not names or names[-1] != "wait-user":
+            errors.append("wait-user must be the last solo overlay block")
+        if "<channel-context>" in all_text:
+            errors.append("solo overlay still has channel-context")
+        if "<channel-wake-routing" in all_text:
+            errors.append("solo overlay still has channel-wake-routing")
+        if "<channel-policy" in all_text:
+            errors.append("solo overlay still has channel-policy")
+        if "#[name:desc]" not in all_text:
+            errors.append("solo overlay is missing emoji tag rules")
+        if "#[/absolute/path/to/image]" not in all_text:
+            errors.append("solo overlay is missing image send rules")
+        if "acquire_execution_lock" not in all_text:
+            errors.append("solo overlay is missing the execution lock rule")
+    else:
+        if "turn-control" not in names:
+            errors.append("turn-control is missing")
+        if not names or names[-1] != "format-guard":
+            errors.append("format-guard must be the last overlay block")
+        if len(names) < 2 or names[-2] != "turn-control":
+            errors.append("turn-control must be the second-last overlay block")
     if prompt.count(CHANNEL_HEADER) != 1:
         errors.append("actual user message must appear exactly once")
     if _OLD_ATTR_RE.search(prefix):
@@ -241,7 +266,6 @@ def analyze_request(
         errors.append(f"overlay contains legacy XML envelope {envelope.group(0)!r}")
     for name, block in blocks:
         _validate_block(name, block, errors)
-    all_text = "\n".join(content_text(message.get("content")) for message in messages)
     for marker in SUPPRESSED_REMINDER_MARKERS:
         if marker in all_text:
             errors.append(f"suppressed Letta reminder is present: {marker}")

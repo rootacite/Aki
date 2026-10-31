@@ -1535,6 +1535,27 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             text="history only",
             from_agent=False,
         )
+        from engine.solo_memory import SoloMemoryEntry, SoloMemorySession
+
+        server.solo_memory.add_session(
+            SoloMemorySession(
+                session_id="solo-cached",
+                started_at="2026-10-31T00:00:00Z",
+                ended_at="2026-10-31T00:10:00Z",
+                summary="已结束的独处",
+                entries=[
+                    SoloMemoryEntry(
+                        id="sme_cached",
+                        seq=1,
+                        role="user",
+                        sender="哥哥",
+                        timestamp="2026-10-31T00:01:00Z",
+                        text="只属于这次独处的句子",
+                        tokens=8,
+                    )
+                ],
+            )
+        )
         turn = Turn(
             turn_id="turn-stable-mid-split",
             conn=server.channel_conn,
@@ -1578,11 +1599,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "# turn-control",
             "# channel-transcript",
             "# solo-mode",
-            "# solo-memories",
             "# solo-transcript",
             "# live-context",
         ):
             self.assertNotIn(opening, stable_text)
+        self.assertIn("# solo-memories", stable_text)
+        self.assertNotIn("# solo-memories", mid_text)
+        self.assertLess(
+            stable_text.index("<channel-wake-routing"),
+            stable_text.index("# solo-memories"),
+        )
         self.assertIn("# turn-control", mid_text)
         self.assertIn("# channel-transcript", mid_text)
         self.assertIn("# format-guard", mid_text)

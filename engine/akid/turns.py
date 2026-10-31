@@ -144,21 +144,28 @@ class TurnsMixin:
 
     async def _build_turn_overlay(self, turn: Turn) -> tuple[list[str], list[str]]:
         """Build the complete runtime system overlay for this turn."""
-        # 1. Stable parts (system_append): 身份与花名册在前，权限与唤醒路由规则殿后
-        stable_parts: list[str] = [
-            self._channel_identity_block(),
-            render_channel_roster(
-                self_member=self._channel_self_member(),
-                members=self._channel_member_views(),
-            ),
-            self._tool_ownership_block(),
-            self._channel_policy_block(),
-            self._channel_wake_routing_block(),
-        ]
+        solo = self._solo_session is not None
+        if solo:
+            stable_parts = [
+                self._channel_identity_block(),
+                self._tool_ownership_block(solo=True),
+                self._solo_policy_block(),
+            ]
+        else:
+            # 身份与花名册在前，权限与唤醒路由规则殿后
+            stable_parts = [
+                self._channel_identity_block(),
+                render_channel_roster(
+                    self_member=self._channel_self_member(),
+                    members=self._channel_member_views(),
+                ),
+                self._tool_ownership_block(),
+                self._channel_policy_block(),
+                self._channel_wake_routing_block(),
+            ]
         if turn.nighttalk:
             stable_parts.append(render_nighttalk_overlay())
 
-        # 2. Mid parts (user_message_prefix): 历史与环境在前，回合控制与格式守卫紧贴用户输入
         mid_parts: list[str] = []
         exclude_seq = (
             turn.channel_message_seq
@@ -172,14 +179,18 @@ class TurnsMixin:
             solo_memories_block,
         ) = await self._render_transcript_blocks(exclude_seq=exclude_seq)
 
-        # 记忆与历史对话（背景信息层）
+        if solo and solo_mode_block:
+            stable_parts.append(solo_mode_block)
+        # Archived solo sessions change only when a solo ends, so both modes
+        # keep them on the system side. The group transcript still changes
+        # every turn and stays on the user prefix.
         if solo_memories_block:
-            mid_parts.append(solo_memories_block)
-        if group_block:
+            stable_parts.append(solo_memories_block)
+        if solo and group_block:
+            stable_parts.append(group_block)
+        if not solo and group_block:
             mid_parts.append(group_block)
-        if solo_mode_block:
-            mid_parts.append(solo_mode_block)
-        if solo_block:
+        if not solo and solo_block:
             mid_parts.append(solo_block)
 
         if turn.origin == "solo_notice":
@@ -189,16 +200,17 @@ class TurnsMixin:
         ):
             await self._snapshot_turn_conversation(turn)
 
-        # 实时动态上下文（状态感知层）
         live_block = await self._refresh_live_context()
         if live_block:
             mid_parts.append(live_block)
 
-        # 强约束指令层（紧贴在用户真实 message 之前，最大化 Recency Bias）
-        turn_control = await self._refresh_turn_control(turn)
-        if turn_control:
-            mid_parts.append(turn_control)
-        mid_parts.append(render_user_format_guard(self.config.username))
+        if solo:
+            mid_parts.append(self._solo_wait_user_block(turn))
+        else:
+            turn_control = await self._refresh_turn_control(turn)
+            if turn_control:
+                mid_parts.append(turn_control)
+            mid_parts.append(render_user_format_guard(self.config.username))
 
         return stable_parts, mid_parts
 

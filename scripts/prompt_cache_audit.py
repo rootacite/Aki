@@ -36,7 +36,6 @@ DYNAMIC_TAGS = (
     "# turn-control",
     "# channel-transcript",
     "# solo-mode",
-    "# solo-memories",
     "# solo-transcript",
     "# live-context",
     "# runtime-context",
@@ -50,6 +49,7 @@ STABLE_TAGS = (
     "<channel-wake-routing",
     "<channel-identity",
     "<channel-context>",
+    "# solo-memories",
     "# Format Guard",
 )
 

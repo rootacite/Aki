@@ -34,6 +34,10 @@ from engine.tokifactor import TextEnvelope
 class DummyBackend:
     ready = True
 
+    def __init__(self) -> None:
+        self.switched: list[str] = []
+        self.switch_error: str | None = None
+
     def start(self) -> None:
         return
 
@@ -42,6 +46,12 @@ class DummyBackend:
 
     async def wait_ready(self, timeout: float) -> bool:
         return True
+
+    async def switch_conversation(self, conversation_id: str) -> dict[str, object]:
+        if self.switch_error:
+            raise RuntimeError(self.switch_error)
+        self.switched.append(conversation_id)
+        return {"ok": True, "conversation_id": conversation_id}
 
 
 def backend_factory(_on_message, _on_ready, _on_exit):
@@ -95,6 +105,80 @@ class SoloModeTests(unittest.TestCase):
         self.assertIn("封闭控制台", load_solo_scene("fuyu", username="Master"))
         self.assertIn("秘密画室", load_solo_scene("haru", username="哥哥"))
         self.assertIn("深夜暗房", load_solo_scene("natsu", username="Master"))
+
+    def test_solo_channel_transcript_stays_within_16k_tokens(self) -> None:
+        from engine.live_context import (
+            SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+            estimate_tokens,
+            render_channel_transcript,
+        )
+
+        entries = [
+            ChannelTranscriptEntry(
+                seq=index,
+                sender="Master",
+                sender_id="master",
+                text="群聊里的一长段话。" * 40,
+            )
+            for index in range(1, 81)
+        ]
+        rendered = render_channel_transcript(
+            entries,
+            budget_tokens=SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+            frozen=True,
+        )
+        self.assertLessEqual(
+            estimate_tokens(rendered), SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS
+        )
+        self.assertIn("seq=80):", rendered)
+        self.assertNotIn("seq=1):", rendered)
+
+    def test_latest_solo_memory_is_marked_just_ended(self) -> None:
+        from engine.live_context import latest_solo_session_id, render_solo_memories
+        from engine.solo_memory import SoloMemoryEntry, SoloMemorySession
+
+        older = SoloMemorySession(
+            session_id="old",
+            started_at="2026-10-27T00:00:00Z",
+            ended_at="2026-10-27T00:10:00Z",
+            summary="更早的一次",
+            entries=[
+                SoloMemoryEntry(
+                    id="e1",
+                    seq=1,
+                    role="user",
+                    sender="Master",
+                    timestamp="2026-10-27T00:01:00Z",
+                    text="旧内容",
+                    tokens=2,
+                )
+            ],
+        )
+        newer = SoloMemorySession(
+            session_id="new",
+            started_at="2026-10-31T12:36:00Z",
+            ended_at="2026-10-31T12:43:00Z",
+            summary="刚才的一次",
+            entries=[
+                SoloMemoryEntry(
+                    id="e2",
+                    seq=1,
+                    role="user",
+                    sender="Master",
+                    timestamp="2026-10-31T12:36:00Z",
+                    text="刚才的秘密",
+                    tokens=2,
+                )
+            ],
+        )
+        rendered = render_solo_memories(
+            [older, newer],
+            just_ended_session_id=latest_solo_session_id([older, newer]),
+        )
+        self.assertEqual(latest_solo_session_id([older, newer]), "new")
+        self.assertEqual(rendered.count('just_ended="true"'), 1)
+        self.assertIn("刚才的秘密", rendered)
+        self.assertLess(rendered.index("旧内容"), rendered.index("刚才的秘密"))
 
     def test_group_and_solo_transcripts_are_separate_blocks(self) -> None:
         group = [ChannelTranscriptEntry(1, "Master", "master", "群聊旧消息")]
@@ -328,13 +412,23 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("当下你正在与Master独处", overlay)
         self.assertIn("group old", overlay)
         self.assertIn("frozen when solo mode began", overlay)
-        self.assertIn("# solo-transcript", overlay)
+        self.assertIn("<solo-policy", overlay)
+        self.assertIn("#[name:desc]", overlay)
+        self.assertIn("#[/absolute/path/to/image]", overlay)
+        self.assertIn("# wait-user", overlay)
+        self.assertNotIn("# solo-transcript", overlay)
+        self.assertNotIn("<channel-context>", overlay)
+        self.assertNotIn("<channel-wake-routing", overlay)
+        self.assertNotIn("<channel-policy", overlay)
+        self.assertNotIn("# turn-control", overlay)
+        self.assertNotIn("# format-guard", overlay)
         self.assertLess(
-            overlay.index("# channel-transcript"), overlay.index("# solo-mode")
+            overlay.index("# solo-mode"), overlay.index("# channel-transcript")
         )
         self.assertLess(
-            overlay.index("# solo-mode"), overlay.index("# solo-transcript")
+            overlay.index("# channel-transcript"), overlay.index("# wait-user")
         )
+        self.assertEqual(self.server.backend.switched, ["solo-agent-aki"])
 
         await self.server._on_channel_control(
             TextEnvelope(
@@ -559,6 +653,8 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<solo-mode", system)
         overlay = await self.overlay_text(self.server)
         self.assertIn("# solo-memories", overlay)
+        self.assertIn('just_ended="true"', overlay)
+        self.assertIn("刚刚结束", overlay)
         self.assertIn("这是独处里说的秘密", overlay)
         self.assertIn("独处里的私密回复", overlay)
         group_path = self.server.group_channel_history_path
@@ -566,6 +662,28 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             group_text = group_path.read_text(encoding="utf-8")
             self.assertNotIn("这是独处里说的秘密", group_text)
             self.assertNotIn("独处里的私密回复", group_text)
+
+    async def test_proactive_turn_waits_until_solo_exits(self) -> None:
+        from engine.solo_mode import SoloSession
+
+        self.server._solo_session = SoloSession(
+            session_id="solo-proactive",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-31T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.server.backend.ready = False
+        self.server._queue_proactive("schedule", {"schedules": [{"id": "later"}]})
+        await self.server._maybe_enqueue_proactive_turn()
+        self.assertEqual(self.server.queue, [])
+        self.assertIsNone(self.server.active)
+        self.assertIn("schedule", self.server._proactive_pending)
+        self.server._solo_session = None
+        await self.server._maybe_enqueue_proactive_turn()
+        self.assertEqual(len(self.server.queue), 1)
+        self.assertEqual(self.server.queue[0].origin, "proactive")
 
     async def test_bridge_keeps_solo_rules_and_memories_in_system_prompt(self) -> None:
         from engine.solo_memory import SoloMemoryEntry, SoloMemorySession
@@ -604,7 +722,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("# solo-mode", overlay)
         self.assertIn("# solo-memories", overlay)
         self.assertLess(
-            overlay.index("# solo-memories"), overlay.index("# solo-mode")
+            overlay.index("# solo-mode"), overlay.index("# solo-memories")
         )
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertNotIn("<solo-mode", system)

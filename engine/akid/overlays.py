@@ -89,7 +89,7 @@ class OverlaysMixin:
             return
         try:
             payload = await self.backend.snapshot_conversation(
-                conversation_id=self.config.conversation_id,
+                conversation_id=self._active_conversation_id(),
                 agent_id=self.config.agent_id,
             )
         except Exception as exc:

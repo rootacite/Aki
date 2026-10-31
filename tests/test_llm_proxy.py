@@ -436,6 +436,121 @@ class ExtraBodyProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.captured["authorization"], "Bearer upstream-secret")
 
 
+class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.captured: dict[str, object] = {}
+
+        async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            self.captured["body"] = json.loads(rest[:length])
+            payload = b'{"choices":[{"message":{"content":"OK"}}]}'
+            writer.write(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                + payload
+            )
+            await writer.drain()
+            writer.close()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = self.upstream.sockets[0].getsockname()[1]
+        url = f"http://127.0.0.1:{port}/chat/completions"
+        solo = ModelRoute(
+            model_id="qwen3.6-35b-a3b",
+            upstream_name="qwen-local",
+            upstream_model="qwen.gguf",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=128000,
+            max_tokens=32768,
+            inputs=("text",),
+            url=url,
+            api_key="local",
+            extra_body={"reasoning_effort": "high", "reasoning_budget_tokens": 8192},
+        )
+        group = ModelRoute(
+            model_id="gemini-3.8-flash",
+            upstream_name="cloud",
+            upstream_model="gemini-3.8-flash",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=1000000,
+            max_tokens=65536,
+            inputs=("text",),
+            url=url,
+            api_key="local",
+        )
+        self.proxy = LlmProxy(
+            "127.0.0.1",
+            0,
+            "loopback-token",
+            (solo, group),
+            solo_model_id="qwen3.6-35b-a3b",
+        )
+        await self.proxy.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+
+    async def _post(self, body: dict) -> dict:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        raw = json.dumps(body).encode()
+        writer.write(
+            (
+                "POST /v1/chat/completions HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(raw)}\r\n\r\n"
+            ).encode()
+            + raw
+        )
+        await writer.drain()
+        payload = await asyncio.wait_for(reader.read(4096), timeout=2)
+        writer.close()
+        self.assertIn(b"200 OK", payload)
+        return self.captured["body"]
+
+    async def test_solo_model_forces_medium_and_1536(self) -> None:
+        captured = await self._post(
+            {
+                "model": "qwen3.6-35b-a3b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "low",
+            }
+        )
+        self.assertEqual(captured["model"], "qwen.gguf")
+        self.assertEqual(captured["reasoning_effort"], "medium")
+        self.assertEqual(captured["reasoning_budget_tokens"], 1536)
+
+    async def test_group_model_keeps_its_own_effort(self) -> None:
+        captured = await self._post(
+            {
+                "model": "gemini-3.8-flash",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "low",
+            }
+        )
+        self.assertEqual(captured["reasoning_effort"], "low")
+        self.assertNotIn("reasoning_budget_tokens", captured)
+
+
 class GrokOAuthProxyTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
         self.captured: dict[str, object] = {}

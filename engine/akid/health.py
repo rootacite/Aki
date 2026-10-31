@@ -19,12 +19,15 @@ from engine.live_context import (
     render_channel_identity,
     render_channel_policy,
     render_channel_wake_routing,
+    render_solo_policy,
+    render_solo_wait_user,
 )
 from engine.tool_ownership import (
     EXCLUSIVE_TOOL_NAMES,
     render_tool_ownership_prompt,
     tools_for_profile,
 )
+from engine.solo_mode import solo_conversation_id
 from engine.protocol import (
     PROTOCOL_VERSION,
     SERVER_VERSION,
@@ -189,7 +192,7 @@ class HealthMixin:
             "server_version": SERVER_VERSION,
             "protocol_version": PROTOCOL_VERSION,
             "agent_id": self.config.agent_id,
-            "conversation_id": self.config.conversation_id,
+            "conversation_id": self._active_conversation_id(),
             "capabilities": capabilities,
         }
 
@@ -555,7 +558,9 @@ class HealthMixin:
             "socket": str(self.config.socket_path),
             "agent_id": self.config.agent_id,
             "profile": self.config.profile,
-            "conversation_id": self.config.conversation_id,
+            "conversation_id": self._active_conversation_id(),
+            "group_conversation_id": self.config.conversation_id,
+            "solo_conversation_id": solo_conversation_id(self.config.agent_id),
             "channel_identity": {
                 "id": self._channel_self_key(),
                 "channel_id": self.config.channel_id,
@@ -613,12 +618,27 @@ class HealthMixin:
         return None
 
 
-    def _tool_ownership_block(self) -> str:
+    def _tool_ownership_block(self, *, solo: bool = False) -> str:
         online = set(discover_profiles())
         online.add(self.config.profile)
         return render_tool_ownership_prompt(
             self.config.profile,
             online_profiles=online,
+            solo=solo,
+        )
+
+
+    def _solo_policy_block(self) -> str:
+        return render_solo_policy(
+            user_name=self.config.username or "Master",
+            emoji_entries=self._emoji_entries(),
+        )
+
+
+    def _solo_wait_user_block(self, turn: Turn) -> str:
+        return render_solo_wait_user(
+            user_name=self.config.username or "Master",
+            from_agent=bool(turn.origin_is_agent or turn.origin == "nighttalk"),
         )
 
 

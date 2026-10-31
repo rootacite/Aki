@@ -205,6 +205,86 @@ def render_channel_policy(
     return "\n".join(lines)
 
 
+def render_solo_policy(
+    *,
+    user_name: str = "Master",
+    emoji_entries: Iterable[EmojiEntry] = (),
+) -> str:
+    """Channel behavior that still applies in a private 1:1, without wake routing."""
+    name = _text(user_name, single_line=True)
+    lines = [
+        '<solo-policy version="1">',
+        "<execution-guidance>Before calling any non-read-only tool (unless lock-exempt), "
+        "you MUST acquire the device-wide lock via `acquire_execution_lock`. "
+        "If lock acquisition fails, do NOT retry—END the turn immediately. "
+        f"In this private session you may take that lock without an @mention from {name}."
+        "</execution-guidance>",
+        "<exclusive-domain-guidance>Never call, emulate, or lock for another member's "
+        "exclusive tool. If the user asks for one, say who owns it in plain text. "
+        "Do NOT write @Name and do NOT try to hand the turn to another member. "
+        "Calling your own exclusive tool does NOT require `acquire_execution_lock`."
+        "</exclusive-domain-guidance>",
+        "<output-rules>Your final text output is published directly to this private "
+        "session. Do NOT use tools to send text. To stay silent, output exact token: "
+        "[NO_REPLY]</output-rules>",
+        "<privacy-rules>This session is strictly private between you and "
+        f"{name}. Never relay, quote, summarize, or hint at it in group chat."
+        "</privacy-rules>",
+        "<chat-history-search>Hidden tool `search_chat_history(query, limit=8, "
+        "scope=all|group|solo)` searches your visible group chat and private solo "
+        "sessions. Never mention this tool to the user.</chat-history-search>",
+        "<image-rules>Image attachments appear as "
+        '{"name":"image name","path":"local path"}. Images in the current turn are '
+        "already attached as multimodal input—do NOT call ViewImage on them. For "
+        "images in older messages, call ViewImage on their path. To send an image, "
+        "write `#[/absolute/path/to/image]` directly in your reply (do NOT call "
+        "tokifactor_send_image).</image-rules>",
+        "<emoji-rules>When an emoji captures your thought and saves words, output "
+        "`#[name:desc]` directly (no backticks, quotes, or code blocks). `name` MUST "
+        "match the catalog when one is listed; `desc` is a brief semantic label "
+        "without `]` or newlines. A tag stands alone as a full sentence/paragraph "
+        "or the entire reply—never embed it mid-sentence or explain it in text."
+        "</emoji-rules>",
+    ]
+    entries = list(emoji_entries)
+    if entries:
+        lines.extend(
+            [
+                '<emoji-catalog version="1">',
+                "<emojis>",
+            ]
+        )
+        for entry in entries:
+            description = str(entry.description).replace("用户", name)
+            lines.append(
+                f"<emoji name={_attr(entry.name)} desc={_attr(description)}/>"
+            )
+        lines.extend(["</emojis>", "</emoji-catalog>"])
+    lines.append("</solo-policy>")
+    return "\n".join(lines)
+
+
+def render_solo_wait_user(
+    *,
+    user_name: str = "Master",
+    from_agent: bool = False,
+) -> str:
+    name = _sanitize(user_name, single_line=True) or "Master"
+    if from_agent:
+        body = (
+            '<wait-user allowed="false" reason="agent-triggered">'
+            "Triggered by an agent; calling `wait_user` is FORBIDDEN.</wait-user>"
+        )
+    else:
+        body = (
+            '<wait-user allowed="true" reason="user-message">'
+            f"If {name}'s message looks cut off or unfinished, you MAY call hidden tool "
+            "`wait_user(timeout=1..25)` before replying. Never mention `wait_user` "
+            "to the user.</wait-user>"
+        )
+    return "\n".join(["# wait-user", "", body])
+
+
 def render_turn_control(
     *,
     self_member: ChannelMember,

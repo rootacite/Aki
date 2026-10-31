@@ -387,7 +387,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   带原始路径且本机文件的大小和 SHA-256 与传输一致，历史记录原始路径，否则记录本地落盘路径。
   文件记录不会作为多模态输入，需要内容时再由 Agent 读取记录的路径。
 - 内联表情：每个 profile 可从 `assets/emoji/<profile>/index.json` 获得自己的表情目录。
-  akid 只把经过校验的 `name`/`desc` 注入 `<channel-policy>` 内的 `<emoji-catalog>`，
+  akid 只把经过校验的 `name`/`desc` 注入群聊 `<channel-policy>` 或独处
+  `<solo-policy>` 内的 `<emoji-catalog>`，
   不把图片、路径或 base64 放进 prompt。对模型公开的唯一规范格式是
   `#[name:desc]`；标签随普通正文进入频道历史、transcript 和独处记录，不触发工具、
   执行锁或多模态输入。Tokifactor 用 `scripts/sync-emoji-assets.py` 把素材缩放到最长边
@@ -395,17 +396,24 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   或错误 desc 的容错。前端在标签处切段，表情单独渲染为无气泡透明消息。
 - 独处模式：`akictl solo <成员>` 通过群 control 握手。目标成员切换到由群 magic 与
   memberId 派生的 solo magic，但保持 MQTT session/client id 与订阅不变；其他成员继续
-  正常运行。目标成员的群 transcript 在独处期间冻结保留，独处 transcript 单独注入
-  `<solo-transcript>`，使用 `[solo] transcript_budget_tokens`。独处回复强制
-  `wake=user`、移除成员 `@`、禁用 `wait_other`。目标成员自己的独处历史写入
-  `<profile>.solo.jsonl`；退出后不广播、不混入群 transcript。
+  正常运行。目标成员的群 transcript 在独处期间冻结，作为稳定 system overlay
+  注入独处请求，估算最多 16K token，不写入 `solo` conversation。独处回复强制 `wake=user`、移除成员 `@`、禁用
+  `wait_other`。目标成员自己的独处历史写入 `<profile>.solo.jsonl`；退出后不广播、
+  不混入群 transcript。切换时同时切换后端 conversation。
 - 独处记忆：退出独处时把本次 `aki.solo.jsonl` 中的最终消息保存到
   `~/.aki/solo-memory/<profile>.json`（0600，原子写）。摘要通过该 profile 的
   loopback LLM proxy 生成，超时 200 秒；失败时写入确定性 fallback 并在下次启动重试。
   历史独处会话以 `<solo-memories budget_tokens="65536">` 只注入本 Agent；超预算时由
   独立人格 API 批量选择淘汰，原文归档到 MemFS `solo/<session_id>.md` 并提交 git。
   API/JSON/ID 校验失败或淘汰后仍超预算时，不修改 active 存储，当前 prompt 只渲染预算内
-  最新内容。独处消息仍留在本 Agent 普通 conversation，不进入群 transcript。
+  最新内容。`<solo-memories>` 同时注入独处和群聊请求；最近一次结束的会话
+  标 `just_ended`。摘要走 `[solo] model`，不回退到群聊模型。新的独处消息写入
+  `solo` conversation，不进入群聊 `default` conversation。频道状态在独处期间
+  发布独处模型，reasoning effort 固定为 `medium`。loopback proxy 对
+  `[solo] model` 的请求写入 `reasoning_effort=medium` 和
+  `reasoning_budget_tokens=1536`，盖过群聊 agent 上的 effort 和该路由的
+  extra_body。摘要走同一条模型，因此同样带上这个预算。群聊请求保持原样。
+  未写入 agent record 的群聊 reasoning effort 仍按默认 `low` 发布。
 - 服务：`akid@<profile>.service` 管网关，`akid-proxy@<profile>.service` 管独立
   loopback LLM proxy；akid 进程本身不监听模型端口。启动时必须等待 backend ready 并确认
   `system/init.aki_bridge`；不是本项目定制的 Letta（未广告 `aki_bridge`）会直接报错退出，
@@ -417,8 +425,17 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 称呼：每个 profile 独立保存在 `<profile>.conf` 的 `[gateway] username` 键。
 - 上下文预算：Aki 为 192,000 tokens；达到 90%（172,800 tokens）触发 compaction。
   该覆盖由 `akid@aki.service.d/compaction.conf` 的 `AKI_COMPACTION_RATIO=0.9` 提供，
-  其他 profile 仍使用默认 0.5。
-- 会话模型：单会话，固定使用 `default` conversation。唯一对话入口是 MQTT 频道；
+  其他 profile 仍使用默认 0.5。独处 conversation 单独使用
+  `[solo] compaction_ratio`，默认 0.85，经 `AKI_SOLO_COMPACTION_RATIO` 生效。
+- 会话模型：每个智能体有两条持久 conversation。群聊固定使用 `default`；
+  独处使用 `solo-<agent_id>`（Letta 的非 default 目录键是全局的
+  `conversation:<id>`，四个 profile 共用一个后端），进入和退出时通过
+  `aki_switch_conversation` 热切换，不重启
+  Letta，也不改 agent 上的群聊模型。MemFS 和基础 system prompt 仍然共用。
+  `[solo] model` 留空时独处请求落到群聊模型；写了则必须是本文件已启用的模型，
+  记在 `solo` conversation 上。本机四个 profile 的独处模型是
+  `qwen3.6-35b-a3b`，上游 `http://127.0.0.1:10000/v1`。
+  唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
 - 记忆整理：`reflectionTrigger = step-count`，阈值 25；累计 25 个未反思 step 后由 reflection 将稳定信息写入 MemFS。backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式生效。
@@ -429,14 +446,20 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - Prompt 分层原则：**规则性、记忆性信息进 system prompt；时效性信息进当前 user-role /
   turn overlay。**
   - 持久 system prompt 只包含静态 base、core memory 和 MemFS memory 索引。
-  - stable system overlay：`<channel-identity> → <channel-context roster> →
-    <tool-ownership> → <channel-policy> → <channel-wake-routing>`。
-  - `# format-guard` 在 base prompt 中保留静态规则，并在每个 turn 的 user-role
-    overlay 末尾完整重复一次。
-  - per-turn user prefix 固定为：`# solo-memories → # channel-transcript →
-    # solo-mode → # solo-transcript → # live-context / # runtime-context →
-    # turn-control → # format-guard`，临时拼在当前 user role 消息开头，不写回持久消息。
-    `# format-guard` 永远最后；`# turn-control` 仅在原本适用的 turn 类型出现。
+  - 群聊 stable system overlay：`<channel-identity> → <channel-context roster> →
+    <tool-ownership> → <channel-policy> → <channel-wake-routing> → # solo-memories`。
+    最近一次结束的独处标 `just_ended`。`# solo-memories` 只在一次独处结束时变化。
+  - 独处 stable system overlay：`<channel-identity> → <tool-ownership> →
+    <solo-policy> → # solo-mode → # solo-memories → 冻结的 # channel-transcript`。
+    `solo-policy` 保留表情、发图、执行锁、隐私和历史搜索；不包含花名册、唤醒路由和
+    `@` 交接。冻结群聊记录最多 16K token。
+  - `# format-guard` 在 base prompt 中保留静态规则，并在每个群聊 turn 的 user-role
+    overlay 末尾完整重复一次。独处不再重复这份 user-role format-guard。
+  - 群聊 user prefix：`# channel-transcript →
+    # live-context / # runtime-context → # turn-control → # format-guard`。
+    独处 user prefix 只留会变的
+    `# live-context / # runtime-context → # wait-user`。当前独处原文在 `solo`
+    conversation 里，不再另贴 `# solo-transcript`。
   - environment、agent-info、MCP、permission-mode 四类 Letta reminder 不再生成；
     Bridge 只兜底剥离这四类旧 `<system-reminder>`，agent-message、memory maintenance、
     task、empty-response 等功能性 reminder 保留。

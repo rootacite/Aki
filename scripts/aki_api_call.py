@@ -15,7 +15,7 @@ The dynamic prefix is assembled in the same order as
 Clock values are pinned to 22:00 local time so repeated runs are comparable.
 By default the turn starts from the real Letta conversation and the real group
 channel transcript. Pass ``--fresh`` for a clean, in-memory-only conversation.
-Qwen thinking is enabled by default with a 1536-token reasoning budget;
+Qwen thinking is enabled by default with a 512-token reasoning budget;
 pass ``--no-thinking`` to disable it. ``--deep-think`` adds a separate
 minimal-prompt analysis pass when the single-pass reply is too shallow.
 """
@@ -57,9 +57,11 @@ from engine.live_context import (  # noqa: E402
     render_channel_transcript,
     render_channel_wake_routing,
     render_live_context,
+    latest_solo_session_id,
     render_solo_memories,
     render_solo_mode,
-    render_solo_transcript,
+    render_solo_policy,
+    render_solo_wait_user,
     render_turn_control,
     render_user_format_guard,
     estimate_tokens,
@@ -87,7 +89,8 @@ FIXED_MINUTE = 0
 DEFAULT_BASE_URL = "http://127.0.0.1:10000/v1"
 DEFAULT_MAX_TOKENS = 8192
 # Mirrors the reasoning fields used in ~/.aki/aki.conf extra_body.
-DEFAULT_REASONING_BUDGET_TOKENS = 1536
+MAX_REASONING_BUDGET_TOKENS = 512
+DEFAULT_REASONING_BUDGET_TOKENS = MAX_REASONING_BUDGET_TOKENS
 DEFAULT_REASONING_BUDGET_MESSAGE = (
     "Reasoning budget exhausted. Stop thinking and answer the user directly now."
 )
@@ -105,6 +108,7 @@ Use this analysis to answer correctly. Do not quote it, summarize it, or mention
 {analysis}
 </analysis>"""
 CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 32 * 1024
+SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 16 * 1024
 LIVE_CONTEXT_BUDGET_TOKENS = 64 * 1024
 MAX_ANALYSIS_CHARS = 6000
 
@@ -712,53 +716,61 @@ def build_overlay(
         ROOT / "assets" / "emoji", runtime.profile
     )
 
-    stable_parts = [
-        render_channel_identity(self_view),
-        render_channel_roster(self_member=self_view, members=members),
-        render_tool_ownership_prompt(runtime.profile),
-        render_channel_policy(
-            user_name=username,
-            emoji_entries=emoji_entries,
-        ),
-        render_channel_wake_routing(username),
-    ]
-    system_append = "\n\n".join(part for part in stable_parts if part.strip())
-
-    mid_parts: list[str] = []
-    solo_memories_block = render_solo_memories(
-        solo_sessions,
-        budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
-    )
-    if solo_memories_block:
-        mid_parts.append(solo_memories_block)
-
-    group_block = render_channel_transcript(
-        group_entries,
-        budget_tokens=CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
-    )
-    if group_block:
-        mid_parts.append(group_block)
-
     if mode == "solo":
         scene = load_solo_scene(
             runtime.profile,
             username=username,
             repo_root=ROOT,
         )
-        mid_parts.append(
+        stable_parts = [
+            render_channel_identity(self_view),
+            render_tool_ownership_prompt(runtime.profile, solo=True),
+            render_solo_policy(user_name=username, emoji_entries=emoji_entries),
             render_solo_mode(
                 member_name=runtime.channel_name,
                 user_name=username,
                 session_id=session_id,
                 scene=scene,
-            )
+            ),
+        ]
+        memories = render_solo_memories(solo_sessions)
+        if memories:
+            stable_parts.append(memories)
+        frozen = render_channel_transcript(
+            group_entries,
+            budget_tokens=SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+            frozen=True,
         )
-        solo_block = render_solo_transcript(
-            solo_entries,
+        if frozen:
+            stable_parts.append(frozen)
+    else:
+        stable_parts = [
+            render_channel_identity(self_view),
+            render_channel_roster(self_member=self_view, members=members),
+            render_tool_ownership_prompt(runtime.profile),
+            render_channel_policy(
+                user_name=username,
+                emoji_entries=emoji_entries,
+            ),
+            render_channel_wake_routing(username),
+        ]
+        memories = render_solo_memories(
+            solo_sessions,
             budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
+            just_ended_session_id=latest_solo_session_id(solo_sessions),
         )
-        if solo_block:
-            mid_parts.append(solo_block)
+        if memories:
+            stable_parts.append(memories)
+    system_append = "\n\n".join(part for part in stable_parts if part.strip())
+
+    mid_parts: list[str] = []
+    if mode != "solo":
+        group_block = render_channel_transcript(
+            group_entries,
+            budget_tokens=CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+        )
+        if group_block:
+            mid_parts.append(group_block)
 
     mid_parts.append(
         render_live_context(
@@ -772,20 +784,23 @@ def build_overlay(
         )
     )
 
-    mid_parts.append(
-        render_turn_control(
-            self_member=self_view,
-            members=members,
-            message=message,
-            initiation_remaining=3,
-            initiation_limit=3,
-            from_agent=False,
-            user_name=username,
-            wait_labels=(),
-            solo=mode == "solo",
+    if mode == "solo":
+        mid_parts.append(render_solo_wait_user(user_name=username))
+    else:
+        mid_parts.append(
+            render_turn_control(
+                self_member=self_view,
+                members=members,
+                message=message,
+                initiation_remaining=3,
+                initiation_limit=3,
+                from_agent=False,
+                user_name=username,
+                wait_labels=(),
+                solo=False,
+            )
         )
-    )
-    mid_parts.append(render_user_format_guard(username))
+        mid_parts.append(render_user_format_guard(username))
     user_prefix = "\n\n".join(part for part in mid_parts if part.strip())
     return system_append, user_prefix
 
@@ -878,7 +893,10 @@ def build_turn(
         "chat_template_kwargs": {"enable_thinking": bool(thinking)},
     }
     if thinking:
-        payload["reasoning_budget_tokens"] = max(0, int(reasoning_budget_tokens))
+        payload["reasoning_budget_tokens"] = min(
+            max(0, int(reasoning_budget_tokens)),
+            MAX_REASONING_BUDGET_TOKENS,
+        )
         payload["reasoning_budget_message"] = reasoning_budget_message
     if stream:
         payload["stream_options"] = {"include_usage": True}
@@ -1218,7 +1236,10 @@ def run_analysis_pass(
         "chat_template_kwargs": {"enable_thinking": bool(thinking)},
     }
     if thinking:
-        payload["reasoning_budget_tokens"] = max(0, int(reasoning_budget_tokens))
+        payload["reasoning_budget_tokens"] = min(
+            max(0, int(reasoning_budget_tokens)),
+            MAX_REASONING_BUDGET_TOKENS,
+        )
         payload["reasoning_budget_message"] = reasoning_budget_message
     result = non_stream_chat(
         api_url(base_url, "chat/completions"),
@@ -1326,13 +1347,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--no-thinking",
         action="store_true",
-        help="Disable Qwen thinking; default is on with a 1536-token budget",
+        help="Disable Qwen thinking; default is on with a 512-token budget",
     )
     parser.add_argument(
         "--reasoning-budget-tokens",
         type=int,
         default=DEFAULT_REASONING_BUDGET_TOKENS,
-        help="Thinking budget passed as reasoning_budget_tokens",
+        help="Thinking budget passed as reasoning_budget_tokens (hard cap: 512)",
     )
     parser.add_argument(
         "--reasoning-budget-message",
@@ -1366,6 +1387,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = parse_args(argv)
+    args.reasoning_budget_tokens = max(
+        0, min(args.reasoning_budget_tokens, MAX_REASONING_BUDGET_TOKENS)
+    )
     runtime = load_config(args.profile, args.config)
     try:
         model = resolve_model(args.base_url, args.model, min(args.timeout, 10.0))

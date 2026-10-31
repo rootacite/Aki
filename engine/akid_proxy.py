@@ -44,6 +44,7 @@ def _build(config, debug_socket: str = "") -> LlmProxy:
         upstream_proxy=config.upstream_proxy,
         profile=config.profile,
         debug_socket=debug_socket,
+        solo_model_id=config.solo_model_id,
     )
 
 
@@ -110,6 +111,7 @@ async def _reload_loop(
         ):
             LOGGER.warning("proxy listen/token changed; restart akid-proxy@%s", profile)
         proxy.routes = {route.model_id: route for route in config.enabled_models}
+        proxy.solo_model_id = config.solo_model_id
         proxy.upstream_proxy = config.upstream_proxy
         LOGGER.info("proxy routes reloaded profile=%s models=%s", profile, sorted(proxy.routes))
 

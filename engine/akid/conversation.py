@@ -14,6 +14,7 @@ from datetime import (
 )
 from typing import Mapping
 from engine.letta_compact import run_letta_compact
+from engine.solo_mode import conversation_directory
 from engine.protocol import (
     ErrorCode,
     RpcError,
@@ -22,10 +23,7 @@ from engine.protocol import (
     require_int,
 )
 from .constants import LOGGER
-from .paths import (
-    _b64url,
-    now_iso,
-)
+from .paths import now_iso
 
 class ConversationMixin:
 
@@ -54,7 +52,7 @@ class ConversationMixin:
             )
         try:
             result = await self.backend.recompile_conversation(
-                conversation_id=self.config.conversation_id,
+                conversation_id=self._active_conversation_id(),
                 agent_id=self.config.agent_id,
                 timeout=60.0,
             )
@@ -80,7 +78,7 @@ class ConversationMixin:
         )
         return {
             "recompiled": True,
-            "conversation_id": self.config.conversation_id,
+            "conversation_id": self._active_conversation_id(),
             "memfs_revision": revision or None,
             "compiled_at": compiled_at or None,
             "backend_ready": bool(getattr(self.backend, "ready", False)),
@@ -136,7 +134,7 @@ class ConversationMixin:
                         raise RpcError(
                             ErrorCode.COMPACT_FAILED,
                             str(exc),
-                            {"conversation_id": self.config.conversation_id},
+                            {"conversation_id": self._active_conversation_id()},
                         ) from exc
                     LOGGER.info(
                         "conversation compacted via bridge mode=%s reflection=%s "
@@ -155,7 +153,7 @@ class ConversationMixin:
                             run_letta_compact,
                             letta_bin=self.config.letta_bin,
                             agent_id=self.config.agent_id,
-                            conversation_id=self.config.conversation_id,
+                            conversation_id=self._active_conversation_id(),
                             cwd=self.config.cwd,
                             mode=mode,
                             timeout=float(timeout),
@@ -182,7 +180,7 @@ class ConversationMixin:
                             ErrorCode.COMPACT_FAILED,
                             str(failure),
                             {
-                                "conversation_id": self.config.conversation_id,
+                                "conversation_id": self._active_conversation_id(),
                                 "backend_ready": ready,
                                 "backend_error": getattr(self.backend, "last_error", None),
                             },
@@ -222,7 +220,7 @@ class ConversationMixin:
                     }
                 return {
                     **result,
-                    "conversation_id": self.config.conversation_id,
+                    "conversation_id": self._active_conversation_id(),
                     "backend_ready": True,
                 }
             finally:
@@ -235,11 +233,11 @@ class ConversationMixin:
         self, mode: str | None, timeout: float
     ) -> dict[str, Any]:
         before = await self.backend.reflection_status(
-            conversation_id=self.config.conversation_id,
+            conversation_id=self._active_conversation_id(),
             agent_id=self.config.agent_id,
         )
         compacted = await self.backend.compact_conversation(
-            conversation_id=self.config.conversation_id,
+            conversation_id=self._active_conversation_id(),
             agent_id=self.config.agent_id,
             mode=mode,
             timeout=timeout,
@@ -247,7 +245,7 @@ class ConversationMixin:
         reflection = "not_launched"
         try:
             launched = await self.backend.reflect_conversation(
-                conversation_id=self.config.conversation_id,
+                conversation_id=self._active_conversation_id(),
                 agent_id=self.config.agent_id,
             )
             if not launched.get("launched"):
@@ -278,7 +276,7 @@ class ConversationMixin:
             await asyncio.sleep(1.0)
             try:
                 state = await self.backend.reflection_status(
-                    conversation_id=self.config.conversation_id,
+                    conversation_id=self._active_conversation_id(),
                     agent_id=self.config.agent_id,
                 )
             except Exception:
@@ -383,7 +381,7 @@ class ConversationMixin:
         try:
             self._replace_messages_file(path, b"".join(output))
             await self.backend.reload_conversation(
-                conversation_id=self.config.conversation_id,
+                conversation_id=self._active_conversation_id(),
                 agent_id=self.config.agent_id,
             )
         except Exception as exc:
@@ -391,7 +389,7 @@ class ConversationMixin:
             try:
                 self._replace_messages_file(path, original)
                 await self.backend.reload_conversation(
-                    conversation_id=self.config.conversation_id,
+                    conversation_id=self._active_conversation_id(),
                     agent_id=self.config.agent_id,
                 )
             except Exception as restore_exc:
@@ -426,9 +424,19 @@ class ConversationMixin:
 
 
     # ------------------------------------------------------------- conversation
+    def _active_conversation_id(self) -> str:
+        active = getattr(self, "_backend_conversation_id", "")
+        if isinstance(active, str) and active:
+            return active
+        return self.config.conversation_id
+
+
     def _conversation_dir(self) -> Path:
-        key = _b64url(f"{self.config.conversation_id}:{self.config.agent_id}")
-        return self.config.backend_dir / "conversations" / key
+        return conversation_directory(
+            self.config.backend_dir,
+            self._active_conversation_id(),
+            self.config.agent_id,
+        )
 
 
     def _conversation_backup_root(self) -> Path:
@@ -443,7 +451,7 @@ class ConversationMixin:
         with contextlib.suppress(OSError):
             os.chmod(root, 0o700)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        name = f"aki-{self.config.conversation_id}-{suffix}-{stamp}"
+        name = f"aki-{self._active_conversation_id()}-{suffix}-{stamp}"
         candidate = root / name
         counter = 1
         while candidate.exists():
@@ -504,7 +512,7 @@ class ConversationMixin:
                         ErrorCode.RESET_FAILED,
                         "conversation directory not found",
                         {
-                            "conversation_id": self.config.conversation_id,
+                            "conversation_id": self._active_conversation_id(),
                             "agent_id": self.config.agent_id,
                             "path": str(conversation_dir),
                         },
@@ -574,12 +582,12 @@ class ConversationMixin:
                     )
                 LOGGER.info(
                     "conversation reset id=%s backup=%s cleared_bytes=%s",
-                    self.config.conversation_id,
+                    self._active_conversation_id(),
                     backup_path,
                     cleared_bytes,
                 )
                 return {
-                    "conversation_id": self.config.conversation_id,
+                    "conversation_id": self._active_conversation_id(),
                     "agent_id": self.config.agent_id,
                     "backup_path": str(backup_path),
                     "cleared_messages_bytes": cleared_bytes,

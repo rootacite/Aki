@@ -134,6 +134,42 @@ def _int_or(
 
 
 
+def _float_or(
+    parser: configparser.ConfigParser,
+    section: str,
+    key: str,
+    default: float,
+    *,
+    minimum: float,
+    maximum: float,
+) -> float:
+    raw = parser.get(section, key, fallback=str(default)).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"[{section}] {key} must be a number") from exc
+    if value <= minimum or value > maximum:
+        raise ConfigError(f"[{section}] {key} is out of range")
+    return value
+
+
+
+def _solo_model_id(
+    parser: configparser.ConfigParser, models: list[ModelRoute]
+) -> str:
+    model_id = parser.get("solo", "model", fallback="").strip()
+    if not model_id:
+        return ""
+    enabled = {route.model_id for route in models if route.enabled}
+    if model_id not in enabled:
+        known = ", ".join(sorted(enabled)) or "(none)"
+        raise ConfigError(
+            f"[solo] model must be an enabled model in this file: {known}"
+        )
+    return model_id
+
+
+
 def _list(raw: str) -> tuple[str, ...]:
     items: list[str] = []
     for line in raw.splitlines() or [raw]:
@@ -556,6 +592,10 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             parser, "solo", "transcript_budget_tokens", 64 * 1024, minimum=1024
         ),
         solo_prompt_file=parser.get("solo", "prompt_file", fallback="").strip(),
+        solo_model_id=_solo_model_id(parser, models),
+        solo_compaction_ratio=_float_or(
+            parser, "solo", "compaction_ratio", 0.85, minimum=0.0, maximum=1.0
+        ),
         tool_policy=tool_policy,
         image=image,
         comfyui=comfyui,

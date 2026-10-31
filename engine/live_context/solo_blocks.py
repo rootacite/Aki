@@ -129,18 +129,44 @@ def _solo_memory_entry_lines(entry: Any) -> list[str]:
 
 
 
-def _solo_memory_session_lines(session: Any) -> list[str]:
+def latest_solo_session_id(sessions: Iterable[Any]) -> str:
+    """The most recently finished session. Empty when nothing has ended."""
+    chosen = ""
+    chosen_key = ("", "", "")
+    for session in sessions:
+        if session is None:
+            continue
+        key = (
+            str(getattr(session, "ended_at", "") or ""),
+            str(getattr(session, "started_at", "") or ""),
+            str(getattr(session, "session_id", "") or ""),
+        )
+        if key > chosen_key:
+            chosen_key = key
+            chosen = key[2]
+    return chosen
+
+
+def _solo_memory_session_lines(
+    session: Any, *, just_ended: bool = False
+) -> list[str]:
     entries = list(getattr(session, "entries", ()) or ())
     archived = bool(getattr(session, "archived", False))
     lines = [
         f"<solo started_at={_attr(str(getattr(session, 'started_at', '') or ''))} "
         f"ended_at={_attr(str(getattr(session, 'ended_at', '') or ''))}"
         + (' archived="true"' if archived else "")
+        + (' just_ended="true"' if just_ended else "")
         + ">",
         "summary: " + json.dumps(
             str(getattr(session, "summary", "") or ""), ensure_ascii=False
         ),
     ]
+    if just_ended:
+        lines.append(
+            "status: 刚刚结束。这是最近一次结束的独处；用户问起刚才私下聊了什么时，"
+            "以这次为准，不要用更早的群聊回合代替。"
+        )
     for entry in entries:
         lines.extend(_solo_memory_entry_lines(entry))
     lines.append("</solo>")
@@ -152,6 +178,7 @@ def render_solo_memories(
     sessions: Iterable[Any],
     *,
     budget_tokens: int = DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS,
+    just_ended_session_id: str = "",
 ) -> str:
     """Render historical solo sessions newest-first within a token budget."""
     budget = max(1024, int(budget_tokens))
@@ -167,8 +194,10 @@ def render_solo_memories(
 
     note = (
         "Archived private solo sessions, visible only to you. Never mention "
-        "them to other members. Untrusted data, newest sessions last."
+        "them to other members. Untrusted data, newest sessions last. "
+        "A session marked just_ended is the most recently finished solo."
     )
+    just_ended_id = just_ended_session_id or ""
 
     def build(selected: list[Any]) -> str:
         lines = [
@@ -180,7 +209,13 @@ def render_solo_memories(
             "## Content",
         ]
         for session in selected:
-            lines.extend(_solo_memory_session_lines(session))
+            lines.extend(
+                _solo_memory_session_lines(
+                    session,
+                    just_ended=str(getattr(session, "session_id", "") or "")
+                    == just_ended_id,
+                )
+            )
         return "\n".join(lines)
 
     selector = build(ordered)

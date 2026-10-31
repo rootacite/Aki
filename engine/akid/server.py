@@ -32,6 +32,7 @@ from engine.solo_memory import (
 from engine.solo_mode import (
     default_solo_state_path,
     derive_solo_magic,
+    ensure_solo_conversation,
     load_solo_session,
 )
 from engine.life_ledger import LifeLedger
@@ -184,6 +185,7 @@ class ServerMixin:
             and loaded_solo.profile == config.profile
             else None
         )
+        self._backend_conversation_id = self.config.conversation_id
         self._solo_targets: dict[str, dict[str, str]] = {}
         self._solo_scene = ""
         self._frozen_group_history: list[ChannelTranscriptEntry] = []
@@ -406,6 +408,43 @@ class ServerMixin:
         )
 
 
+    def _solo_compaction_ratio_env(self) -> str:
+        aki = self.config.aki
+        ratio = getattr(aki, "solo_compaction_ratio", 0.85) if aki is not None else 0.85
+        return str(ratio)
+
+
+    def _prepare_solo_conversation(self) -> None:
+        aki = self.config.aki
+        model = ""
+        provider_type = ""
+        context_window: int | None = None
+        max_tokens: int | None = None
+        if aki is not None and aki.solo_model_id:
+            route = next(
+                (
+                    item
+                    for item in aki.enabled_models
+                    if item.model_id == aki.solo_model_id
+                ),
+                None,
+            )
+            if route is not None:
+                model = f"{aki.provider_id}/{route.model_id}"
+                provider_type = aki.provider_id
+                context_window = route.context_window
+                max_tokens = route.max_tokens
+        ensure_solo_conversation(
+            backend_dir=self.config.backend_dir,
+            agent_id=self.config.agent_id,
+            cwd=self.config.cwd,
+            model=model,
+            provider_type=provider_type,
+            context_window=context_window,
+            max_tokens=max_tokens,
+        )
+
+
     def _default_backend_factory(
         self,
         on_message: Callable[[dict[str, Any]], Awaitable[None]],
@@ -418,6 +457,7 @@ class ServerMixin:
         env.update(
             {
                 "AKI_PROFILE": self.config.profile,
+                "AKI_SOLO_COMPACTION_RATIO": self._solo_compaction_ratio_env(),
                 "AKI_TURN_OVERLAY_DIR": str(self._turn_overlay_dir()),
                 "AKI_EXECUTION_LOCK_STATUS": str(
                     self.execution_lock.status_path

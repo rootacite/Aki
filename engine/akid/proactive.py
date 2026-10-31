@@ -199,6 +199,8 @@ class ProactiveMixin:
             if len(self.queue) >= self.config.queue_max:
                 LOGGER.warning("proactive trigger deferred: queue is full")
                 return
+            if self._solo_session is not None:
+                return
             pending = self._proactive_pending
             self._proactive_pending = {}
             message = self._build_proactive_message(pending)

@@ -245,6 +245,8 @@ class AkiConfig:
     presence_return_debounce_seconds: int = 10
     solo_transcript_budget_tokens: int = 64 * 1024
     solo_prompt_file: str = ""
+    solo_model_id: str = ""
+    solo_compaction_ratio: float = 0.85
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     image: ImageGeneration | None = None
     comfyui: ComfyUI | None = None

@@ -9,6 +9,7 @@ import time
 from engine.channel import TokifactorChannel
 from engine.solo_mode import (
     SOLO_ACTIVE,
+    solo_conversation_id,
     SOLO_END,
     SOLO_FAILED,
     SOLO_READY,
@@ -95,6 +96,21 @@ class SoloMixin:
             ),
         )
         await self._cancel_mqtt_turns_for_solo()
+        if self.active is not None or not await self._switch_backend_conversation(
+            solo_conversation_id(self.config.agent_id)
+        ):
+            await self._publish_channel_control(
+                "solo busy",
+                {
+                    **self._channel_identity_metadata(),
+                    "kind": SOLO_FAILED,
+                    "soloId": session.session_id,
+                    "soloTargetId": session.target_id,
+                    "soloError": "cannot switch to the solo conversation",
+                },
+                qos=1,
+            )
+            return
         self._persist_channel_history()
         self._frozen_group_history = list(self._channel_history)
         self._frozen_group_history_seq = self._channel_history_seq
@@ -113,6 +129,7 @@ class SoloMixin:
         self._load_channel_history(self.solo_channel_history_path)
         self._solo_memory_start_seq = int(self._channel_history_seq)
         await self._refresh_channel_transcript()
+        await self._publish_channel_status()
         await self._publish_channel_control(
             f"{self.config.channel_name} solo active",
             {
@@ -155,6 +172,19 @@ class SoloMixin:
         if session_id and session_id != session.session_id:
             return
         solo_history = list(self._channel_history)
+        if not await self._switch_backend_conversation(self.config.conversation_id):
+            await self._publish_channel_control(
+                "solo busy",
+                {
+                    **self._channel_identity_metadata(),
+                    "kind": SOLO_FAILED,
+                    "soloId": session.session_id,
+                    "soloTargetId": session.target_id,
+                    "soloError": "cannot switch back to the group conversation",
+                },
+                qos=1,
+            )
+            return
         await self._publish_channel_control(
             f"{self.config.channel_name} solo end",
             {
@@ -197,6 +227,40 @@ class SoloMixin:
             retain=True,
         )
         LOGGER.info("solo channel exited session=%s", session.session_id)
+        await self._publish_channel_status()
+        await self._maybe_enqueue_proactive_turn()
+
+
+    async def _switch_backend_conversation(self, conversation_id: str) -> bool:
+        if self._active_conversation_id() == conversation_id:
+            self._backend_conversation_id = conversation_id
+            return True
+        if self.active is not None:
+            LOGGER.warning(
+                "refusing conversation switch while turn=%s", self.active.turn_id
+            )
+            return False
+        switch = getattr(self.backend, "switch_conversation", None)
+        if switch is None:
+            LOGGER.warning("backend cannot switch conversations")
+            return False
+        try:
+            payload = await switch(conversation_id)
+        except Exception as exc:
+            LOGGER.warning(
+                "conversation switch failed target=%s error=%s",
+                conversation_id,
+                exc,
+            )
+            return False
+        if isinstance(payload, dict) and payload.get("ok") is False:
+            LOGGER.warning(
+                "conversation switch rejected target=%s", conversation_id
+            )
+            return False
+        self._backend_conversation_id = conversation_id
+        LOGGER.info("backend conversation switched id=%s", conversation_id)
+        return True
 
 
     async def _on_channel_control(self, envelope: TextEnvelope) -> None:

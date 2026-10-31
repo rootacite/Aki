@@ -850,6 +850,34 @@ class FakeLetta:
                         },
                     }
                 )
+            elif subtype == "aki_switch_conversation":
+                target = str(request.get("conversation_id") or "")
+                if not target:
+                    emit(
+                        {
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "error",
+                                "request_id": request_id,
+                                "error": "conversation_id is required",
+                            },
+                        }
+                    )
+                else:
+                    self.conversation_id = target
+                    emit(
+                        {
+                            "type": "control_response",
+                            "response": {
+                                "subtype": "success",
+                                "request_id": request_id,
+                                "response": {
+                                    "ok": True,
+                                    "conversation_id": target,
+                                },
+                            },
+                        }
+                    )
             elif subtype in ("aki_begin_turn", "aki_update_turn", "aki_end_turn"):
                 emit(
                     {

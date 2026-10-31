@@ -304,12 +304,14 @@ wake routing → identity → roster`；易变 per-turn tail 为
    Aki 生活账本，以及 MemFS 绝对路径和 MCP 信息；关闭桌面实况时使用 `# runtime-context`。
 10. `# turn-control`：当前频道 turn 的 guidance、initiation budget、execution responder、
     `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
-11. `# channel-transcript` / `# solo-transcript` / `# solo-memories` / `# solo-mode`：
-    只包含历史消息与独处数据，不包含当前消息和 `new` 标记；全部临时拼在 user-role 前缀。
+11. `# channel-transcript`：群聊时临时拼在 user-role 前缀。独处时冻结后放进
+    system_append，估算最多 16K token。`# solo-memories` 在群聊和独处都放进
+    system_append；群聊给最近一次结束的会话标 `just_ended`。`# solo-mode` 只在独处的
+    system_append 里。当前独处原文在 solo conversation，不再另贴 `# solo-transcript`。
 
-user-role overlay 顺序固定为 `# solo-memories → # channel-transcript → # solo-mode →
-# solo-transcript → # live-context / # runtime-context → # turn-control → # format-guard`，
-`# format-guard` 永远最后，不落盘。
+群聊 user-role overlay 顺序固定为 `# channel-transcript → # live-context / # runtime-context →
+# turn-control → # format-guard`。独处 user-role overlay 只留 `# live-context /
+# runtime-context → # wait-user`。`# format-guard` 只重复在群聊 user 前缀末尾，不落盘。
 
 ### Aki 专属工具与触发器
 

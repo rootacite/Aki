@@ -26,6 +26,23 @@ class AkiConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
+    def test_solo_model_defaults_and_must_be_enabled(self) -> None:
+        atomic_write(self.path, template_text())
+        set_key(self.path, "proxy", "token", "loopback-token")
+        config = load_config(self.path)
+        self.assertEqual(config.solo_model_id, "")
+        self.assertEqual(config.solo_compaction_ratio, 0.85)
+        set_key(self.path, "upstream.deepseek", "api_key", "deepseek-secret")
+        set_key(self.path, "solo", "model", "deepseek-flash")
+        self.assertEqual(load_config(self.path).solo_model_id, "deepseek-flash")
+        set_key(self.path, "solo", "model", "not-a-model")
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+        set_key(self.path, "solo", "model", "deepseek-flash")
+        set_key(self.path, "solo", "compaction_ratio", "1.5")
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
     def test_empty_api_key_disables_model(self) -> None:
         atomic_write(self.path, template_text())
         set_key(self.path, "proxy", "token", "loopback-token")

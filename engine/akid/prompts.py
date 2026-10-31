@@ -9,15 +9,16 @@ from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from engine.live_context import (
+    SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
     LiveContextOptions,
     collect_live_context,
     render_channel_transcript,
     render_live_context,
     render_runtime_context,
     render_turn_control,
+    latest_solo_session_id,
     render_solo_memories,
     render_solo_mode,
-    render_solo_transcript,
     render_user_format_guard,
 )
 from engine.solo_memory import SOLO_MEMORY_BUDGET_TOKENS
@@ -101,21 +102,21 @@ class PromptsMixin:
             group_entries = without_current(group_entries)
             group_block = render_channel_transcript(
                 group_entries,
-                budget_tokens=self.config.channel_transcript_budget_tokens,
+                budget_tokens=min(
+                    self.config.channel_transcript_budget_tokens,
+                    SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+                ),
                 frozen=True,
             )
+            # The solo conversation already holds this session. Do not duplicate
+            # it as an overlay.
             solo_entries = with_attachment_state(
                 list(self._channel_history)
                 if limit is None
                 else self._channel_history[: max(0, limit)]
             )
             solo_entries = without_current(solo_entries)
-            solo_block = render_solo_transcript(
-                solo_entries,
-                budget_tokens=self.config.aki.solo_transcript_budget_tokens
-                if self.config.aki is not None
-                else 64 * 1024,
-            )
+            solo_block = ""
             scene = self._solo_scene or load_solo_scene(
                 self.config.profile,
                 username=self.config.username,
@@ -149,29 +150,42 @@ class PromptsMixin:
             rendered_entries = len(self._channel_history)
             solo_entries_count = 0
 
+        current_session_id = (
+            self._solo_session.session_id if self._solo_session is not None else ""
+        )
+        visible_sessions = [
+            session
+            for session in self.solo_memory.sessions
+            if session.session_id != current_session_id
+        ]
+        just_ended = (
+            ""
+            if current_session_id
+            else latest_solo_session_id(visible_sessions)
+        )
         memory_config = self._solo_memory_llm_config()
         if memory_config is not None:
             solo_memories_block = await self.solo_memory.render_for_prompt(
-                current_session_id=(
-                    self._solo_session.session_id
-                    if self._solo_session is not None
-                    else ""
-                ),
+                current_session_id=current_session_id,
+                just_ended_session_id=just_ended,
                 **memory_config,
             )
         else:
             solo_memories_block = render_solo_memories(
-                [
-                    session
-                    for session in self.solo_memory.sessions
-                    if self._solo_session is None
-                    or session.session_id != self._solo_session.session_id
-                ],
+                visible_sessions,
                 budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
+                just_ended_session_id=just_ended,
             )
         self._channel_transcript_status.update(
             {
-                "budget_tokens": self.config.channel_transcript_budget_tokens,
+                "budget_tokens": (
+                    min(
+                        self.config.channel_transcript_budget_tokens,
+                        SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS,
+                    )
+                    if self._solo_session is not None
+                    else self.config.channel_transcript_budget_tokens
+                ),
                 "entries": len(self._channel_history),
                 "last_seq": self._channel_history_seq,
                 "rendered_seq": exclude_seq,
@@ -381,7 +395,7 @@ class PromptsMixin:
             "socket": str(self.config.socket_path),
             "agent_id": self.config.agent_id,
             "profile": self.config.profile,
-            "conversation_id": self.config.conversation_id,
+            "conversation_id": self._active_conversation_id(),
             "channel_identity": {
                 "id": self._channel_self_key(),
                 "channel_id": self.config.channel_id,

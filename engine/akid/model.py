@@ -211,8 +211,13 @@ class ModelMixin:
         aki = self.config.aki
         if aki is None or not aki.proxy_token:
             return None
-        model, _reasoning, _limit = self._agent_info()
-        route = self._active_model_route(model)
+        agent_model, _reasoning, _limit = self._agent_info()
+        chosen = agent_model
+        if aki.solo_model_id:
+            chosen = f"{self._provider_id()}/{aki.solo_model_id}"
+        route = self._active_model_route(chosen)
+        if route is None:
+            route = self._active_model_route(agent_model)
         if route is None:
             route = next(iter(aki.enabled_models), None)
         if route is None:

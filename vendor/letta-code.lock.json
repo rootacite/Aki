@@ -25,7 +25,8 @@
     "0005-aki-expose-search-tools.patch": "91050c2d1277d5861d41c499e8f4aa319e0a71e610f8752e5b5277075a5ecbeb",
     "0006-aki-provider-abort.patch": "20510eb18452d69a598e616d73b608faa909dbd4ea57a0aa7d77ccc21f789614",
     "0007-aki-user-message-prefix.patch": "9994d1e7f067a90ea9d7245e4126f67d2eebf2ef430c055b2b17a2675fedf03b",
-    "0008-aki-reminder-suppression.patch": "227251db4e69d8739da4a622aa9f501154423465644b9f23bef4070f71b967a0"
+    "0008-aki-reminder-suppression.patch": "227251db4e69d8739da4a622aa9f501154423465644b9f23bef4070f71b967a0",
+    "0009-aki-solo-context.patch": "51a99adeb257b72a235f19a992e4866fd59c6ec4abd8799c68539f12891b7404"
   },
-  "runtime_sha256": "eeb3d8d1f1187e0ebf6189235b4ac28ea38e3521450c45fd6a5b4317210b3870"
+  "runtime_sha256": "11fed1e8a06a1ae135afb840ff48c43d4c54bd76d81cad5635ad512546401dba"
 }

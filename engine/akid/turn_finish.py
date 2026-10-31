@@ -321,14 +321,14 @@ class TurnFinishMixin:
         try:
             self._replace_messages_file(path, b"".join(lines))
             await self.backend.reload_conversation(
-                conversation_id=self.config.conversation_id,
+                conversation_id=self._active_conversation_id(),
                 agent_id=self.config.agent_id,
             )
         except Exception:
             with contextlib.suppress(Exception):
                 self._replace_messages_file(path, original)
                 await self.backend.reload_conversation(
-                    conversation_id=self.config.conversation_id,
+                    conversation_id=self._active_conversation_id(),
                     agent_id=self.config.agent_id,
                 )
             raise

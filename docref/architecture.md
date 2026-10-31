@@ -142,9 +142,9 @@ username 渲染；`^` 排除规则和“没有显式成员点名、只回复用�
 turn 的 guidance、initiation budget、execution responder、`wait_other` 目标和 `wait_user`
 使用提示，临时拼在当前 user role 消息开头，不复制消息正文。bridge 模式下静态 overlay 通过
 `system_append`、易变 tail 通过 `user_message_prefix` 进入实际 API 请求，不写回 agent record
-或 `system-prompt.json`，也不写入持久 user message。user-role overlay 固定为
-`# solo-memories → # channel-transcript → # solo-mode → # solo-transcript →
-# live-context / # runtime-context → # turn-control → # format-guard`，其中 `# format-guard`
+或 `system-prompt.json`，也不写入持久 user message。`# solo-memories` 在群聊和独处都放进
+`system_append`。群聊 user-role overlay 固定为
+`# channel-transcript → # live-context / # runtime-context → # turn-control → # format-guard`，其中 `# format-guard`
 永远最后；关闭桌面实况时仍由 `# runtime-context` 提供 MemFS 与 MCP 信息。akid 只接受带
 `aki_bridge` 的定制 Letta；
 否则启动直接报错退出。bridge 模式下

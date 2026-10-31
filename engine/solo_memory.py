@@ -553,6 +553,7 @@ class SoloMemoryManager:
         model: str,
         api: str,
         route_path: str,
+        just_ended_session_id: str = "",
     ) -> str:
         visible = [
             session
@@ -562,11 +563,16 @@ class SoloMemoryManager:
         if not visible:
             self.last_error = None
             return ""
-        full_rendered = render_solo_memories(visible, budget_tokens=10**9)
+        full_rendered = render_solo_memories(
+            visible,
+            budget_tokens=10**9,
+            just_ended_session_id=just_ended_session_id,
+        )
         if estimate_tokens(full_rendered) <= self.budget_tokens:
             self.last_error = None
             return render_solo_memories(
-                visible, budget_tokens=self.budget_tokens
+                visible, budget_tokens=self.budget_tokens,
+                just_ended_session_id=just_ended_session_id,
             )
 
         # Budget eviction is deterministic: archive the oldest whole sessions
@@ -582,7 +588,9 @@ class SoloMemoryManager:
         evicted: list[SoloMemorySession] = []
         while working:
             current_rendered = render_solo_memories(
-                working, budget_tokens=10**9
+                working,
+                budget_tokens=10**9,
+                just_ended_session_id=just_ended_session_id,
             )
             if estimate_tokens(current_rendered) <= self.budget_tokens:
                 break
@@ -590,7 +598,8 @@ class SoloMemoryManager:
         if not evicted:
             self.last_error = None
             return render_solo_memories(
-                visible, budget_tokens=self.budget_tokens
+                visible, budget_tokens=self.budget_tokens,
+                just_ended_session_id=just_ended_session_id,
             )
 
         pending_archive = {
@@ -607,7 +616,8 @@ class SoloMemoryManager:
             self.last_error = str(exc)
             self.logger.warning("solo memory archive failed: %s", exc)
             return render_solo_memories(
-                visible, budget_tokens=self.budget_tokens
+                visible, budget_tokens=self.budget_tokens,
+                just_ended_session_id=just_ended_session_id,
             )
 
         # Preserve an in-progress session while replacing the older sessions.
@@ -626,7 +636,8 @@ class SoloMemoryManager:
             sum(len(session.entries) for session in evicted),
         )
         return render_solo_memories(
-            working, budget_tokens=self.budget_tokens
+            working, budget_tokens=self.budget_tokens,
+                just_ended_session_id=just_ended_session_id,
         )
 
     def _archive_entries(

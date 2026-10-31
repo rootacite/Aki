@@ -110,6 +110,9 @@ return_debounce_seconds = 10
 transcript_budget_tokens = 65536
 # 留空则使用 prompts/<profile>-solo.md
 prompt_file =
+# 留空则与群聊使用同一个模型；上下文仍然分开
+model =
+compaction_ratio = 0.85
 
 [avatar]
 path =
@@ -284,6 +287,9 @@ return_debounce_seconds = 10
 [solo]
 transcript_budget_tokens = 65536
 prompt_file =
+# 留空则与群聊使用同一个模型；上下文仍然分开
+model =
+compaction_ratio = 0.85
 
 [avatar]
 path = assets/small/haru.jpg
@@ -401,6 +407,9 @@ return_debounce_seconds = 10
 transcript_budget_tokens = 65536
 # 留空则使用 prompts/natsu-solo.md
 prompt_file =
+# 留空则与群聊使用同一个模型；上下文仍然分开
+model =
+compaction_ratio = 0.85
 
 [avatar]
 path = assets/small/natsu.jpg

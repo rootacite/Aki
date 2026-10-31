@@ -20,6 +20,7 @@ from engine.layer_notify import (
     character_for_names,
     character_for_profile,
 )
+from engine.solo_mode import solo_conversation_id
 from engine.solo_memory import (
     FALLBACK_SUMMARY_STATUS,
     SOLO_SUMMARY_TIMEOUT_SECONDS,
@@ -118,6 +119,7 @@ class LifecycleMixin:
                 LOGGER.error("sandbox unavailable; Letta backend blocked: %s", self._sandbox_blocked_reason)
             else:
                 LOGGER.info("sandbox ready backend=bwrap path=%s", bwrap_path)
+        self._prepare_solo_conversation()
         if sandbox_available:
             self.backend.start()
             if not await self._wait_backend_ready(30.0):
@@ -129,6 +131,14 @@ class LifecycleMixin:
                     "Aki requires the customized Letta runtime with aki_bridge; "
                     "the configured backend does not advertise it"
                 )
+            if self._solo_session is not None:
+                switched = await self._switch_backend_conversation(
+                    solo_conversation_id(self.config.agent_id)
+                )
+                if not switched:
+                    await self._abort_startup(
+                        "cannot resume the persisted solo conversation"
+                    )
         if self.channel is not None:
             await self.channel.start()
             self._start_channel_status_loop()
