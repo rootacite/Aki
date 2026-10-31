@@ -294,6 +294,13 @@ class ChannelContextTests(unittest.TestCase):
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)
         self.assertIn("You MUST call hidden tool `wait_other` once", turn)
         self.assertIn("Synthesize their returned replies naturally", turn)
+        self.assertIn(
+            "STRICTLY FORBIDDEN: never proactively describe this tool or the wait "
+            "to Master",
+            turn,
+        )
+        self.assertIn("were not named this turn", turn)
+        self.assertNotIn("${{USERNAME}}", turn)
 
         system = f"BASE\n\n<{CHANNEL_TRANSCRIPT_TAG}>old</{CHANNEL_TRANSCRIPT_TAG}>\n"
         applied = apply_channel_policy(system, policy)

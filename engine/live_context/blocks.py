@@ -295,8 +295,15 @@ def render_turn_control(
                 f"<wait-other targets={_attr(','.join(wait_labels))}>"
                 f"COMPLIANCE REQUIREMENT: You MUST call hidden tool `wait_other` once "
                 f"to wait for [{targets}] before outputting your final answer. "
-                "Synthesize their returned replies naturally without repeating them "
-                "verbatim or mentioning that you waited.</wait-other>",
+                "Call it with no preceding text. Synthesize their returned replies "
+                "naturally without repeating them verbatim. "
+                f"STRICTLY FORBIDDEN: never proactively describe this tool or the wait "
+                f"to {name}. Do not say whom you waited for or whom you "
+                "are about to hear. Do not emit any intermediate or progress text "
+                "before the tool call, such as narrating that you will listen to "
+                "someone first, how you will reply, or that you were not named this "
+                f"turn. Call it silently; {name} must only see your final reply."
+                "</wait-other>",
             ]
         )
 

@@ -24,6 +24,7 @@ from engine.akid import (
     NullConnection,
     Turn,
     WAIT_GUARD_ORIGIN,
+    SEARCH_CHAT_HISTORY_TOOL_NAME,
     WAIT_USER_TOOL,
     _b64url,
     _format_channel_message_time,
@@ -2379,8 +2380,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         server = await self.start_server(
             channel=fake_channel, profile="fuyu", channel_wait_for=("Aki",)
         )
-        names = {str(tool.get("name") or "") for tool in server._external_tools()}
+        tools = server._external_tools()
+        names = {str(tool.get("name") or "") for tool in tools}
         self.assertIn(WAIT_OTHER_TOOL, names)
+        description = next(
+            str(tool.get("description") or "")
+            for tool in tools
+            if tool.get("name") == WAIT_OTHER_TOOL
+        )
+        self.assertIn("the wait to Master", description)
+        self.assertNotIn("or its result", description)
+        self.assertIn("were not named this turn", description)
+        self.assertNotIn("${{USERNAME}}", description)
 
         await server.stop()
         self.server = None
@@ -2598,7 +2609,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(turn.tool_names["call-1"], WAIT_OTHER_TOOL)
         server.active = None
 
-    async def test_hidden_wait_tool_flushes_pre_tool_progress(self) -> None:
+    async def test_hidden_wait_tool_drops_pre_tool_narration(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(
             channel=fake_channel, channel_wait_for=("Aki",)
@@ -2625,12 +2636,6 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             {"text": "秋姐被点名了，我先听她说完再接。"},
         )
         await server._emit_tool_call_once(turn, "wait-hidden", WAIT_OTHER_TOOL, {})
-        await wait_until(
-            lambda: any(
-                event.get("phase") == "progress"
-                for event in fake_channel.events_of("turn")
-            )
-        )
         await server._emit(
             turn,
             "assistant_delta",
@@ -2652,13 +2657,66 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         turns = fake_channel.events_of("turn")
         progress = [event for event in turns if event.get("phase") == "progress"]
         finals = [event for event in turns if event.get("phase") == "final"]
-        self.assertEqual(len(progress), 1)
-        self.assertIn("秋姐被点名了", progress[0]["text"])
+        self.assertEqual(progress, [])
+        self.assertFalse(any("秋姐被点名了" in event.get("text", "") for event in turns))
         self.assertEqual(len(finals), 1)
-        self.assertNotIn("秋姐被点名了", finals[0]["text"])
         self.assertIn("哼哼，那必须说得过去呀", finals[0]["text"])
         self.assertFalse(
             any(event.get("kind") == "tool" for event in fake_channel.events)
+        )
+        server.active = None
+
+    async def test_search_history_still_flushes_pre_tool_progress(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        turn = Turn(
+            turn_id="search-progress",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            state="running",
+        )
+        server.active = turn
+        stamp = "2026-10-21T00:00:00Z"
+        await server.channel_conn.send(
+            make_event(turn.turn_id, 1, "turn_started", {}, stamp)
+        )
+        await server._emit(turn, "assistant_delta", {"text": "我去翻一下记录。"})
+        await server._emit_tool_call_once(
+            turn, "search-hidden", SEARCH_CHAT_HISTORY_TOOL_NAME, {}
+        )
+        await wait_until(
+            lambda: any(
+                event.get("phase") == "progress" and "翻一下记录" in event.get("text", "")
+                for event in fake_channel.events_of("turn")
+            )
+        )
+        server.active = None
+
+    async def test_wait_user_drops_pre_tool_narration(self) -> None:
+        fake_channel = FakeChannel()
+        server = await self.start_server(channel=fake_channel)
+        turn = Turn(
+            turn_id="wait-user-progress",
+            conn=server.channel_conn,
+            message="working",
+            include_reasoning=False,
+            client_message_id=None,
+            origin="mqtt",
+            state="running",
+        )
+        server.active = turn
+        stamp = "2026-10-21T00:00:00Z"
+        await server.channel_conn.send(
+            make_event(turn.turn_id, 1, "turn_started", {}, stamp)
+        )
+        await server._emit(turn, "assistant_delta", {"text": "你先说完我再接。"})
+        await server._emit_tool_call_once(turn, "wait-user-hidden", WAIT_USER_TOOL, {})
+        await asyncio.sleep(0.05)
+        self.assertFalse(
+            any("你先说完" in event.get("text", "") for event in fake_channel.events)
         )
         server.active = None
 

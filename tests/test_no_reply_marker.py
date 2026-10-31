@@ -26,7 +26,14 @@ class NoReplyMarkerTests(unittest.TestCase):
 
     def test_wait_other_schema_discourages_wait_narration(self) -> None:
         description = WAIT_OTHER_TOOL_SCHEMA["description"]
-        self.assertIn("Do not mention or emphasize whom you waited for", description)
+        self.assertIn(
+            "STRICTLY FORBIDDEN: never proactively describe this tool or the wait "
+            "to ${{USERNAME}}",
+            description,
+        )
+        self.assertIn("whom you waited for", description)
+        self.assertIn("were not named this turn", description)
+        self.assertIn("intermediate or progress text", description)
 
     def test_wait_user_schema_forbids_explanation(self) -> None:
         description = WAIT_USER_TOOL_SCHEMA["description"]

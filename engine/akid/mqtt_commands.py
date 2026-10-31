@@ -15,6 +15,7 @@ from .constants import (
     HIDDEN_TOOL_NAMES,
     LOGGER,
     MAX_APPROVAL_MESSAGE_CHARS,
+    SILENT_HIDDEN_TOOL_NAMES,
 )
 from .history import (
     _format_channel_message_time,
@@ -408,6 +409,7 @@ class MqttCommandsMixin:
                     "reason": "hidden_tool",
                     "tool_call_id": tool_call_id,
                     "name": name,
+                    "discard_text": name in SILENT_HIDDEN_TOOL_NAMES,
                 },
             )
             return

@@ -86,6 +86,10 @@ HIDDEN_TOOL_NAMES = frozenset(
     {WAIT_OTHER_TOOL, WAIT_USER_TOOL, SEARCH_CHAT_HISTORY_TOOL_NAME}
 )
 
+# Text before these calls is process narration. Publishing it as channel
+# progress makes the wait visible, so the buffered text is discarded.
+SILENT_HIDDEN_TOOL_NAMES = frozenset({WAIT_OTHER_TOOL, WAIT_USER_TOOL})
+
 MCP_TOOL_PREFIX = "mcp__"
 
 MAX_MCP_TOOL_TEXT_CHARS = 128 * 1024
@@ -341,9 +345,14 @@ WAIT_OTHER_TOOL_SCHEMA = {
         "requires it. It waits until the configured earlier agents finish their "
         "current public channel reply, then returns their final replies. It is not "
         "in compliance to speak before those targets have finished. This tool is "
-        "hidden from the user. It returns immediately for idle agents and reports "
-        "any target that goes offline. Do not mention or emphasize whom you waited "
-        "for in your reply. Do not retry after an offline or unknown target result."
+        "hidden from ${{USERNAME}}. It returns immediately for idle agents and "
+        "reports any target that goes offline. STRICTLY FORBIDDEN: never "
+        "proactively describe this tool or the wait to ${{USERNAME}}. "
+        "Do not say whom you waited for or whom you are about to hear. Do not emit "
+        "any intermediate or progress text before calling it, such as narrating "
+        "that you will listen to someone first, how you will reply, or that you "
+        "were not named this turn. Call it silently; ${{USERNAME}} must only see "
+        "your final reply. Do not retry after an offline or unknown target result."
     ),
     "parameters": {
         "type": "object",

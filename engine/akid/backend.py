@@ -6,6 +6,7 @@ import asyncio
 import re
 import shutil
 from collections import deque
+from engine.channel_prompt import render_username_template
 from engine.tool_ownership import tools_for_profile
 from .constants import (
     ACQUIRE_EXECUTION_LOCK_TOOL,
@@ -82,7 +83,11 @@ class BackendMixin:
             and self.config.channel_wait_for
             and self.config.profile != "aki"
         ):
-            tools.append(WAIT_OTHER_TOOL_SCHEMA)
+            schema = dict(WAIT_OTHER_TOOL_SCHEMA)
+            schema["description"] = render_username_template(
+                str(schema["description"]), self.config.username
+            )
+            tools.append(schema)
         tools.extend(self._mcp_tools)
         policy = self.config.tool_policy
         if policy.explicit:

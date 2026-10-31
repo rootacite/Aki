@@ -411,7 +411,11 @@ class ChannelConnection:
             state.text += delta
             return
         if event_type == "assistant_segment":
-            await self._flush_progress(turn_id, seq, state, force=True)
+            if data.get("discard_text"):
+                state.text = ""
+                state.last_text = ""
+            else:
+                await self._flush_progress(turn_id, seq, state, force=True)
             state.segment += 1
             state.text = ""
             state.last_text = ""
