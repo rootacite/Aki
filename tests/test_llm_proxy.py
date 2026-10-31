@@ -11,7 +11,14 @@ from unittest import mock
 
 from engine.aki_config import ModelRoute
 from engine.grok_oauth import GrokCredentials
-from engine.llm_proxy import LlmProxy, ProxyBindError, _open_upstream
+from engine.llm_proxy import (
+    LlmProxy,
+    ProxyBindError,
+    _open_upstream,
+    continuation_payload,
+    splice_unclosed_think,
+    unclosed_think_reasoning,
+)
 
 
 def _route(model: str, upstream: str, url_path: str) -> ModelRoute:
@@ -549,6 +556,211 @@ class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(captured["reasoning_effort"], "low")
         self.assertNotIn("reasoning_budget_tokens", captured)
+
+
+class ThinkCloseHelperTests(unittest.TestCase):
+    def test_stop_without_content_is_unclosed(self) -> None:
+        self.assertEqual(
+            unclosed_think_reasoning(
+                {"content": "", "reasoning_content": "想一想"},
+                "stop",
+            ),
+            "想一想",
+        )
+
+    def test_visible_content_is_not_unclosed(self) -> None:
+        self.assertIsNone(
+            unclosed_think_reasoning(
+                {"content": "早点睡", "reasoning_content": "想一想"},
+                "stop",
+            )
+        )
+
+    def test_continuation_closes_think_and_does_not_mutate_the_request(self) -> None:
+        original = {"model": "qwen", "messages": [{"role": "user", "content": "hi"}], "stream": True}
+        follow = continuation_payload(original, "想一想")
+        self.assertEqual(original["messages"], [{"role": "user", "content": "hi"}])
+        self.assertEqual(follow["continue_final_message"], "content")
+        self.assertFalse(follow["add_generation_prompt"])
+        self.assertFalse(follow["stream"])
+        self.assertEqual(follow["messages"][-1]["reasoning_content"], "想一想")
+        self.assertEqual(follow["messages"][-1]["content"], "")
+
+    def test_splice_keeps_original_when_continuation_is_empty(self) -> None:
+        original = {
+            "choices": [
+                {
+                    "message": {"content": "", "reasoning_content": "想一想"},
+                    "finish_reason": "stop",
+                }
+            ]
+        }
+        self.assertIs(
+            splice_unclosed_think(
+                original,
+                {"choices": [{"message": {"content": "  "}, "finish_reason": "stop"}]},
+            ),
+            original,
+        )
+
+
+class SoloThinkCloseProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.requests: list[dict] = []
+
+        async def upstream(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            body = json.loads(rest[:length])
+            self.requests.append(body)
+            if body.get("continue_final_message") == "content":
+                payload = json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {"content": "早点睡吧。"},
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ).encode()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                    + payload
+                )
+            elif body.get("stream") is True:
+                sse = (
+                    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"我应该回答。"},"finish_reason":null}]}\n\n'
+                    'data: {"choices":[{"index":0,"delta":{"reasoning_content":"嗯。"},"finish_reason":"stop"}]}\n\n'
+                    "data: [DONE]\n\n"
+                ).encode()
+                framed = f"{len(sse):x}\r\n".encode() + sse + b"\r\n0\r\n\r\n"
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+                    + framed
+                )
+            else:
+                payload = json.dumps(
+                    {
+                        "choices": [
+                            {
+                                "message": {
+                                    "content": "",
+                                    "reasoning_content": "我应该回答。",
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ).encode()
+                writer.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                    + f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
+                    + payload
+                )
+            await writer.drain()
+            writer.close()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = self.upstream.sockets[0].getsockname()[1]
+        route = ModelRoute(
+            model_id="qwen3.6-35b-a3b",
+            upstream_name="qwen-local",
+            upstream_model="qwen.gguf",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=128000,
+            max_tokens=32768,
+            inputs=("text",),
+            url=f"http://127.0.0.1:{port}/chat/completions",
+            api_key="local",
+            solo=True,
+        )
+        self.proxy = LlmProxy("127.0.0.1", 0, "loopback-token", (route,))
+        await self.proxy.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+
+    async def _post(self, body: dict) -> bytes:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        raw = json.dumps(body).encode()
+        writer.write(
+            (
+                "POST /v1/chat/completions HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(raw)}\r\n\r\n"
+            ).encode()
+            + raw
+        )
+        await writer.drain()
+        chunks: list[bytes] = []
+        while True:
+            chunk = await asyncio.wait_for(reader.read(65536), timeout=2)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        writer.close()
+        return b"".join(chunks)
+
+    async def test_json_stop_without_content_continues_after_think(self) -> None:
+        payload = await self._post(
+            {
+                "model": "qwen3.6-35b-a3b",
+                "messages": [{"role": "user", "content": "睡吗"}],
+                "stream": False,
+            }
+        )
+        self.assertIn(b"200 OK", payload)
+        body = json.loads(payload.split(b"\r\n\r\n", 1)[1])
+        self.assertEqual(body["choices"][0]["message"]["content"], "早点睡吧。")
+        self.assertEqual(body["choices"][0]["message"]["reasoning_content"], "我应该回答。")
+        self.assertEqual(len(self.requests), 2)
+        follow = self.requests[1]
+        self.assertEqual(follow["continue_final_message"], "content")
+        self.assertFalse(follow["add_generation_prompt"])
+        self.assertEqual(follow["messages"][-1]["reasoning_content"], "我应该回答。")
+        self.assertEqual(follow["messages"][-1]["content"], "")
+
+    async def test_stream_stop_without_content_appends_the_continuation(self) -> None:
+        payload = await self._post(
+            {
+                "model": "qwen3.6-35b-a3b",
+                "messages": [{"role": "user", "content": "睡吗"}],
+                "stream": True,
+            }
+        )
+        self.assertIn(b"text/event-stream", payload)
+        text = payload.split(b"\r\n\r\n", 1)[1].decode()
+        self.assertIn("我应该回答。", text)
+        self.assertIn("嗯。", text)
+        self.assertIn("早点睡吧。", text)
+        self.assertEqual(len(self.requests), 2)
+        self.assertEqual(
+            self.requests[1]["messages"][-1]["reasoning_content"],
+            "我应该回答。嗯。",
+        )
 
 
 class DynamicSoloRouteProxyTests(unittest.IsolatedAsyncioTestCase):

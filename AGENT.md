@@ -439,9 +439,11 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   才拉起本地 OpenAI 兼容服务；模型名和上下文长度实时读取
   `/v1/models` 与 `/props`。输出上限沿用服务器给出的正数 `n_predict`；该值缺失、
   为负或不小于上下文窗口时固定为 32768，不再把 `max_tokens` 写成整个窗口。
-  服务器报告视觉能力时 input 仍是 `text,image`。本地模型若把可见回复只写进
-  reasoning 且正文为空，akid 在 turn 结束时把回复从 reasoning 里分离出来发布，
-  并写回这条 assistant 消息。这是兜底，不改变模型把正文写进思考的原因。
+  服务器报告视觉能力时 input 仍是 `text,image`。本地 solo 路由若在
+  `</think>` 之前以 `stop` 结束、正文为空且没有工具调用，loopback proxy 扣住
+  结束包，用 `continue_final_message: "content"` 让 llama.cpp 补上结束标签并继续
+  生成正文，再接回同一条响应。续写后正文仍为空时，akid 再从 reasoning 里分离回复
+  并写回这条 assistant 消息。这两层都是兜底，不改变模型提前停止的原因。
   最后一次请求或 turn 结束后
   `idle_timeout`（默认 900 秒）无活动则关闭进程，下一条消息重新拉起。状态文件在
   `~/.aki/solo/<profile>.backend.json`，代理据此发布动态路由。旧 `[solo] model`
