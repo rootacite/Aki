@@ -23,6 +23,7 @@ from engine.layer_notify import (
 from engine.solo_mode import solo_conversation_id
 from engine.solo_memory import (
     FALLBACK_SUMMARY_STATUS,
+    NSFW_ERROR_STATUS,
     SOLO_SUMMARY_TIMEOUT_SECONDS,
 )
 from engine.protocol import (
@@ -146,16 +147,23 @@ class LifecycleMixin:
         self._start_layer_notifier()
         self._start_proactive_services()
         memory_config = self._solo_memory_llm_config()
-        if memory_config is not None and any(
+        nsfw_config = self._solo_nsfw_llm_config()
+        needs_summary = any(
             session.summary_status == FALLBACK_SUMMARY_STATUS
             for session in self.solo_memory.sessions
-        ):
+        )
+        needs_nsfw = nsfw_config is not None and any(
+            session.nsfw_status == NSFW_ERROR_STATUS
+            for session in self.solo_memory.sessions
+        )
+        if memory_config is not None and (needs_summary or needs_nsfw):
             task = asyncio.create_task(
-                self.solo_memory.retry_fallback_summaries(
+                self.solo_memory.retry_pending_analysis(
                     **memory_config,
                     timeout=SOLO_SUMMARY_TIMEOUT_SECONDS,
+                    nsfw_config=nsfw_config,
                 ),
-                name="akid-solo-summary-retry",
+                name="akid-solo-memory-retry",
             )
             self._channel_tasks.add(task)
             task.add_done_callback(self._channel_tasks.discard)

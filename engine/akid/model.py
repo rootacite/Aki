@@ -18,6 +18,9 @@ from engine.letta_llm import (
 )
 from engine.solo_memory import (
     FALLBACK_SUMMARY_STATUS,
+    NSFW_ERROR_STATUS,
+    NSFW_PENDING_STATUS,
+    SOLO_NSFW_TIMEOUT_SECONDS,
     SOLO_SUMMARY_TIMEOUT_SECONDS,
     SoloMemorySession,
     capture_solo_entries,
@@ -240,6 +243,25 @@ class ModelMixin:
         }
 
 
+    def _solo_nsfw_llm_config(self) -> dict[str, str] | None:
+        """Return a classifier route only when the private solo model is usable."""
+        aki = self.config.aki
+        if aki is None or not aki.proxy_token or not self.solo_backend.configured:
+            return None
+        if not self.solo_backend.status().get("running"):
+            return None
+        route = self.solo_backend.last_route()
+        if route is None:
+            return None
+        return {
+            "proxy_base_url": aki.proxy_base_url,
+            "proxy_token": aki.proxy_token,
+            "model": route.model_id,
+            "api": route.api,
+            "route_path": route.path,
+        }
+
+
     async def _finalize_solo_memory_session(
         self,
         session: SoloSession,
@@ -261,6 +283,8 @@ class ModelMixin:
             ended_at=solo_now_iso(),
             summary="",
             summary_status=FALLBACK_SUMMARY_STATUS,
+            nsfw=False,
+            nsfw_status=NSFW_PENDING_STATUS,
             entries=entries,
         )
         if self.solo_backend.configured:
@@ -293,12 +317,30 @@ class ModelMixin:
         else:
             memory_session.summary = fallback_summary(entries)
             memory_session.summary_status = FALLBACK_SUMMARY_STATUS
+        nsfw_config = self._solo_nsfw_llm_config()
+        if nsfw_config is not None:
+            await self.solo_memory.classify_nsfw(
+                memory_session,
+                **nsfw_config,
+                timeout=SOLO_NSFW_TIMEOUT_SECONDS,
+            )
+        else:
+            memory_session.nsfw = True
+            memory_session.nsfw_status = NSFW_ERROR_STATUS
+            LOGGER.warning(
+                "solo NSFW classification unavailable; hiding session from group "
+                "session=%s",
+                memory_session.session_id,
+            )
         self.solo_memory.add_session(memory_session)
         LOGGER.info(
-            "solo memory stored session=%s entries=%s summary_status=%s",
+            "solo memory stored session=%s entries=%s summary_status=%s "
+            "nsfw=%s nsfw_status=%s",
             memory_session.session_id,
             len(entries),
             memory_session.summary_status,
+            memory_session.nsfw,
+            memory_session.nsfw_status,
         )
 
 

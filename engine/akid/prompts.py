@@ -164,10 +164,12 @@ class PromptsMixin:
             else latest_solo_session_id(visible_sessions)
         )
         memory_config = self._solo_memory_llm_config()
+        group_context = self._solo_session is None
         if memory_config is not None:
             solo_memories_block = await self.solo_memory.render_for_prompt(
                 current_session_id=current_session_id,
                 just_ended_session_id=just_ended,
+                group_context=group_context,
                 **memory_config,
             )
         else:
@@ -175,6 +177,7 @@ class PromptsMixin:
                 visible_sessions,
                 budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
                 just_ended_session_id=just_ended,
+                group_context=group_context,
             )
         self._channel_transcript_status.update(
             {

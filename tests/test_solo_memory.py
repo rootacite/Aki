@@ -10,9 +10,20 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from engine.live_context import estimate_tokens, render_solo_memories
+from engine.live_context import (
+    NSFW_SOLO_PLACEHOLDER,
+    estimate_tokens,
+    render_solo_memories,
+)
 from engine.solo_memory import (
     FALLBACK_SUMMARY_STATUS,
+    NSFW_ERROR_STATUS,
+    NSFW_LEGACY_STATUS,
+    NSFW_READY_STATUS,
+    SOLO_NSFW_MAX_TOKENS,
+    SOLO_NSFW_REASONING_BUDGET_TOKENS,
+    SOLO_NSFW_SYSTEM_PROMPT,
+    SOLO_NSFW_TIMEOUT_SECONDS,
     SOLO_SUMMARY_TIMEOUT_SECONDS,
     SoloMemoryEntry,
     SoloMemoryManager,
@@ -129,6 +140,68 @@ class SoloMemoryStoreTests(unittest.TestCase):
             rendered,
         )
         self.assertNotIn("<message ", rendered)
+
+    def test_group_redacts_nsfw_session_but_solo_keeps_real_content(self) -> None:
+        session = SoloMemorySession(
+            session_id="solo-nsfw",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            summary="explicit summary",
+            nsfw=True,
+            nsfw_status=NSFW_READY_STATUS,
+            entries=[entry(1, "explicit body")],
+        )
+        group = render_solo_memories(
+            [session], group_context=True, just_ended_session_id="solo-nsfw"
+        )
+        self.assertIn(NSFW_SOLO_PLACEHOLDER, group)
+        self.assertIn('just_ended="true"', group)
+        self.assertNotIn("explicit summary", group)
+        self.assertNotIn("explicit body", group)
+        self.assertNotIn("Master (user", group)
+        self.assertIn("body: ", group)
+
+        solo = render_solo_memories([session])
+        self.assertIn("explicit summary", solo)
+        self.assertIn("explicit body", solo)
+        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, solo)
+
+    def test_legacy_session_without_nsfw_field_remains_visible_in_group(self) -> None:
+        session = SoloMemorySession.from_dict(
+            {
+                "session_id": "legacy",
+                "started_at": "2026-10-27T10:00:00Z",
+                "ended_at": "2026-10-27T10:10:00Z",
+                "summary": "legacy summary",
+                "entries": [
+                    {
+                        "id": "sme_legacy",
+                        "seq": 1,
+                        "role": "user",
+                        "sender": "Master",
+                        "timestamp": "2026-10-27T10:01:00Z",
+                        "text": "legacy body",
+                        "tokens": 2,
+                    }
+                ],
+            }
+        )
+        self.assertFalse(session.nsfw)
+        self.assertEqual(session.nsfw_status, NSFW_LEGACY_STATUS)
+        group = render_solo_memories([session], group_context=True)
+        self.assertIn("legacy summary", group)
+        self.assertIn("legacy body", group)
+        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, group)
+
+        failed = SoloMemorySession.from_dict(
+            {
+                "session_id": "failed",
+                "summary": "failed summary",
+                "nsfw": False,
+                "nsfw_status": NSFW_ERROR_STATUS,
+            }
+        )
+        self.assertTrue(failed.nsfw)
 
     def test_memory_prompt_keeps_core_blocks_and_ignores_inline_tool_reference(
         self,
@@ -270,6 +343,11 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
             "route_path": "/chat/completions",
         }
 
+    def classifier_kwargs(self) -> dict[str, str]:
+        values = self.api_kwargs()
+        values.pop("base_prompt")
+        return values
+
     async def test_summary_uses_personality_api_and_strips_runtime_blocks(self) -> None:
         self.api.responses = [response_with({"summary": "安静的一段独处"})]
         manager = self.manager()
@@ -323,6 +401,76 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         await manager.summarize(session, **self.api_kwargs())
         self.assertEqual(session.summary_status, FALLBACK_SUMMARY_STATUS)
         self.assertIn("remember this", session.summary)
+
+    async def test_nsfw_classifier_uses_isolated_prompt_and_records_result(self) -> None:
+        self.api.responses = [response_with({"nsfw": True})]
+        manager = self.manager()
+        session = SoloMemorySession(
+            session_id="s1",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            entries=[entry(1, "explicit body")],
+        )
+        await manager.classify_nsfw(session, **self.classifier_kwargs())
+
+        self.assertTrue(session.nsfw)
+        self.assertEqual(session.nsfw_status, NSFW_READY_STATUS)
+        self.assertGreaterEqual(SOLO_NSFW_TIMEOUT_SECONDS, 60.0)
+        request = self.api.requests[0]
+        system = request["messages"][0]["content"]
+        self.assertEqual(system, SOLO_NSFW_SYSTEM_PROMPT)
+        self.assertNotIn("You are Aki.", system)
+        self.assertNotIn("<channel-policy>", system)
+        self.assertEqual(request["max_tokens"], SOLO_NSFW_MAX_TOKENS)
+        self.assertGreaterEqual(SOLO_NSFW_MAX_TOKENS, 32 * 1024)
+        self.assertEqual(
+            request["reasoning_budget_tokens"],
+            SOLO_NSFW_REASONING_BUDGET_TOKENS,
+        )
+        self.assertGreaterEqual(SOLO_NSFW_REASONING_BUDGET_TOKENS, 15 * 1024)
+        payload = json.loads(request["messages"][1]["content"])
+        self.assertEqual(payload["entries"][0]["text"], "explicit body")
+
+    async def test_nsfw_classifier_failure_fails_closed(self) -> None:
+        self.api.responses = [response_with({"nsfw": "yes"})]
+        manager = self.manager()
+        session = SoloMemorySession(
+            session_id="s1",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            entries=[entry(1, "uncertain body")],
+        )
+        await manager.classify_nsfw(session, **self.classifier_kwargs())
+
+        self.assertTrue(session.nsfw)
+        self.assertEqual(session.nsfw_status, NSFW_ERROR_STATUS)
+        self.assertIn("non-boolean", manager.last_error or "")
+
+    async def test_retry_pending_analysis_reclassifies_error_session(self) -> None:
+        manager = self.manager()
+        manager.add_session(
+            SoloMemorySession(
+                session_id="s1",
+                started_at="2026-10-27T10:00:00Z",
+                ended_at="2026-10-27T10:10:00Z",
+                summary="summary",
+                summary_status="ready",
+                nsfw=True,
+                nsfw_status=NSFW_ERROR_STATUS,
+                entries=[entry(1, "body")],
+            )
+        )
+        self.api.responses = [response_with({"nsfw": False})]
+
+        await manager.retry_pending_analysis(
+            **self.api_kwargs(), nsfw_config=self.classifier_kwargs()
+        )
+
+        self.assertFalse(manager.sessions[0].nsfw)
+        self.assertEqual(manager.sessions[0].nsfw_status, NSFW_READY_STATUS)
+        reloaded = self.manager()
+        self.assertFalse(reloaded.sessions[0].nsfw)
+        self.assertEqual(reloaded.sessions[0].nsfw_status, NSFW_READY_STATUS)
 
     def rendered_tokens(self, sessions: list[SoloMemorySession]) -> int:
         return estimate_tokens(

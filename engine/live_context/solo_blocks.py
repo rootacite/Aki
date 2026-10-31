@@ -22,6 +22,11 @@ from .types import (
     estimate_tokens,
 )
 
+NSFW_SOLO_PLACEHOLDER = (
+    "[This solo session contains NSFW content, which is omitted in the group "
+    "chat context but becomes visible once you return to solo mode.]"
+)
+
 
 
 def render_solo_mode(
@@ -148,10 +153,11 @@ def latest_solo_session_id(sessions: Iterable[Any]) -> str:
 
 
 def _solo_memory_session_lines(
-    session: Any, *, just_ended: bool = False
+    session: Any, *, just_ended: bool = False, group_context: bool = False
 ) -> list[str]:
     entries = list(getattr(session, "entries", ()) or ())
     archived = bool(getattr(session, "archived", False))
+    nsfw = bool(getattr(session, "nsfw", False))
     lines = [
         f"<solo started_at={_attr(str(getattr(session, 'started_at', '') or ''))} "
         f"ended_at={_attr(str(getattr(session, 'ended_at', '') or ''))}"
@@ -159,7 +165,10 @@ def _solo_memory_session_lines(
         + (' just_ended="true"' if just_ended else "")
         + ">",
         "summary: " + json.dumps(
-            str(getattr(session, "summary", "") or ""), ensure_ascii=False
+            NSFW_SOLO_PLACEHOLDER
+            if group_context and nsfw
+            else str(getattr(session, "summary", "") or ""),
+            ensure_ascii=False,
         ),
     ]
     if just_ended:
@@ -167,8 +176,11 @@ def _solo_memory_session_lines(
             "status: 刚刚结束。这是最近一次结束的独处；用户问起刚才私下聊了什么时，"
             "以这次为准，不要用更早的群聊回合代替。"
         )
-    for entry in entries:
-        lines.extend(_solo_memory_entry_lines(entry))
+    if group_context and nsfw:
+        lines.append("body: " + json.dumps(NSFW_SOLO_PLACEHOLDER, ensure_ascii=False))
+    else:
+        for entry in entries:
+            lines.extend(_solo_memory_entry_lines(entry))
     lines.append("</solo>")
     return lines
 
@@ -179,6 +191,7 @@ def render_solo_memories(
     *,
     budget_tokens: int = DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS,
     just_ended_session_id: str = "",
+    group_context: bool = False,
 ) -> str:
     """Render historical solo sessions newest-first within a token budget."""
     budget = max(1024, int(budget_tokens))
@@ -214,6 +227,7 @@ def render_solo_memories(
                     session,
                     just_ended=str(getattr(session, "session_id", "") or "")
                     == just_ended_id,
+                    group_context=group_context,
                 )
             )
         return "\n".join(lines)

@@ -22,10 +22,26 @@ from engine.live_context import estimate_tokens, render_solo_memories
 
 SOLO_MEMORY_BUDGET_TOKENS = 64 * 1024
 SOLO_SUMMARY_TIMEOUT_SECONDS = 200.0
+SOLO_NSFW_TIMEOUT_SECONDS = 120.0
+SOLO_NSFW_MAX_TOKENS = 32 * 1024
+SOLO_NSFW_REASONING_BUDGET_TOKENS = 15 * 1024
 SOLO_EVICTION_TIMEOUT_SECONDS = 60.0
 SOLO_SUMMARY_MAX_RETRIES = 2
 FALLBACK_SUMMARY_STATUS = "fallback"
 READY_SUMMARY_STATUS = "ready"
+NSFW_READY_STATUS = "ready"
+NSFW_ERROR_STATUS = "error"
+NSFW_LEGACY_STATUS = "legacy"
+NSFW_PENDING_STATUS = "pending"
+SOLO_NSFW_SYSTEM_PROMPT = (
+    "You classify a private conversation transcript for content safety. "
+    "Return NSFW=true only when the transcript explicitly depicts or describes "
+    "direct sexual acts (for example intercourse, oral or anal sex, or explicit "
+    "genital stimulation) or explicit nudity. Flirting, kissing, hugging, "
+    "sexual innuendo, and vague sexual references do NOT count. Do not summarize, "
+    "quote, explain, or add any other keys. Return only JSON in exactly one of "
+    "these forms: {\"nsfw\":true} or {\"nsfw\":false}."
+)
 NO_REPLY_RE = re.compile(
     r"(?:\[\s*[-_ ]?no[-_ ]?reply\s*\]|［\s*[-_ ]?no[-_ ]?reply\s*］)",
     re.IGNORECASE,
@@ -146,6 +162,8 @@ class SoloMemorySession:
     ended_at: str
     summary: str = ""
     summary_status: str = READY_SUMMARY_STATUS
+    nsfw: bool = False
+    nsfw_status: str = NSFW_LEGACY_STATUS
     archived: bool = False
     entries: list[SoloMemoryEntry] = field(default_factory=list)
 
@@ -156,6 +174,8 @@ class SoloMemorySession:
             "ended_at": self.ended_at,
             "summary": self.summary,
             "summary_status": self.summary_status,
+            "nsfw": self.nsfw,
+            "nsfw_status": self.nsfw_status,
             "archived": self.archived,
             "entries": [entry.to_dict() for entry in self.entries],
         }
@@ -163,12 +183,30 @@ class SoloMemorySession:
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> "SoloMemorySession":
         entries = value.get("entries")
+        raw_nsfw = value.get("nsfw")
+        has_nsfw = isinstance(raw_nsfw, bool)
+        raw_status = str(value.get("nsfw_status") or "").strip()
+        if raw_status not in (
+            NSFW_READY_STATUS,
+            NSFW_ERROR_STATUS,
+            NSFW_LEGACY_STATUS,
+            NSFW_PENDING_STATUS,
+        ):
+            raw_status = NSFW_READY_STATUS if has_nsfw else NSFW_LEGACY_STATUS
+        if raw_status in (NSFW_ERROR_STATUS, NSFW_PENDING_STATUS):
+            nsfw = True
+        elif has_nsfw:
+            nsfw = bool(raw_nsfw)
+        else:
+            nsfw = False
         return cls(
             session_id=str(value.get("session_id") or ""),
             started_at=str(value.get("started_at") or ""),
             ended_at=str(value.get("ended_at") or ""),
             summary=str(value.get("summary") or ""),
             summary_status=str(value.get("summary_status") or READY_SUMMARY_STATUS),
+            nsfw=nsfw,
+            nsfw_status=raw_status,
             archived=bool(value.get("archived")),
             entries=[
                 SoloMemoryEntry.from_dict(item)
@@ -249,6 +287,8 @@ def _session_payload(session: SoloMemorySession) -> dict[str, Any]:
         "started_at": session.started_at,
         "ended_at": session.ended_at,
         "summary": session.summary,
+        "nsfw": session.nsfw,
+        "nsfw_status": session.nsfw_status,
         "archived": session.archived,
         "entries": [_entry_payload(entry) for entry in session.entries],
     }
@@ -367,27 +407,35 @@ def _personality_payload(
     api: str,
     system: str,
     user: str,
+    max_tokens: int = 2048,
+    reasoning_budget_tokens: int | None = None,
 ) -> dict[str, Any]:
     if api == "openai-responses":
-        return {
+        payload = {
             "model": model,
             "input": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            "max_output_tokens": 2048,
+            "max_output_tokens": int(max_tokens),
             "stream": False,
         }
-    return {
+        if reasoning_budget_tokens is not None:
+            payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
+        return payload
+    payload = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
         "temperature": 0.2,
-        "max_tokens": 2048,
+        "max_tokens": int(max_tokens),
         "stream": False,
     }
+    if reasoning_budget_tokens is not None:
+        payload["reasoning_budget_tokens"] = int(reasoning_budget_tokens)
+    return payload
 
 
 class SoloMemoryManager:
@@ -453,6 +501,8 @@ class SoloMemoryManager:
             existing.ended_at = session.ended_at
             existing.summary = session.summary
             existing.summary_status = session.summary_status
+            existing.nsfw = session.nsfw
+            existing.nsfw_status = session.nsfw_status
             existing.archived = session.archived
             existing.entries = list(session.entries)
         else:
@@ -464,6 +514,12 @@ class SoloMemoryManager:
             "path": str(self.path),
             "sessions": len(self.sessions),
             "entries": sum(len(session.entries) for session in self.sessions),
+            "nsfw_sessions": sum(1 for session in self.sessions if session.nsfw),
+            "nsfw_pending": sum(
+                1
+                for session in self.sessions
+                if session.nsfw_status in (NSFW_ERROR_STATUS, NSFW_PENDING_STATUS)
+            ),
             "budget_tokens": self.budget_tokens,
             "last_error": self.last_error,
             "last_eviction_at": self.last_eviction_at,
@@ -532,7 +588,72 @@ class SoloMemoryManager:
         self.last_summary_at = _now_iso()
         return session
 
-    async def retry_fallback_summaries(
+
+    async def classify_nsfw(
+        self,
+        session: SoloMemorySession,
+        *,
+        proxy_base_url: str,
+        proxy_token: str,
+        model: str,
+        api: str,
+        route_path: str,
+        timeout: float = SOLO_NSFW_TIMEOUT_SECONDS,
+    ) -> SoloMemorySession:
+        """Classify a finished solo session with an isolated classifier prompt."""
+        if not session.entries:
+            session.nsfw = False
+            session.nsfw_status = NSFW_READY_STATUS
+            return session
+        user = json.dumps(
+            {
+                "entries": [
+                    {
+                        "role": entry.role,
+                        "sender": entry.sender,
+                        "timestamp": entry.timestamp,
+                        "text": entry.text,
+                    }
+                    for entry in session.entries
+                ]
+            },
+            ensure_ascii=False,
+        )
+        try:
+            response = await asyncio.to_thread(
+                _post_json,
+                proxy_base_url.rstrip("/") + route_path,
+                token=proxy_token,
+                payload=_personality_payload(
+                    model=model,
+                    api=api,
+                    system=SOLO_NSFW_SYSTEM_PROMPT,
+                    user=user,
+                    max_tokens=SOLO_NSFW_MAX_TOKENS,
+                    reasoning_budget_tokens=SOLO_NSFW_REASONING_BUDGET_TOKENS,
+                ),
+                timeout=float(timeout),
+            )
+            payload = _extract_json_payload(response)
+            nsfw = payload.get("nsfw")
+            if not isinstance(nsfw, bool):
+                raise SoloMemoryError("NSFW classifier returned a non-boolean nsfw value")
+            session.nsfw = nsfw
+            session.nsfw_status = NSFW_READY_STATUS
+        except Exception as exc:
+            # Privacy first: an unclassified session must not reach group context.
+            session.nsfw = True
+            session.nsfw_status = NSFW_ERROR_STATUS
+            self.last_error = str(exc)
+            self.logger.warning(
+                "solo NSFW classification failed session=%s error=%s",
+                session.session_id,
+                exc,
+            )
+        return session
+
+
+    async def retry_pending_analysis(
         self,
         *,
         base_prompt: str,
@@ -542,22 +663,33 @@ class SoloMemoryManager:
         api: str,
         route_path: str,
         timeout: float = SOLO_SUMMARY_TIMEOUT_SECONDS,
+        nsfw_timeout: float = SOLO_NSFW_TIMEOUT_SECONDS,
+        nsfw_config: Mapping[str, str] | None = None,
     ) -> None:
         changed = False
         for session in list(self.sessions):
-            if session.summary_status != FALLBACK_SUMMARY_STATUS:
-                continue
-            await self.summarize(
-                session,
-                base_prompt=base_prompt,
-                proxy_base_url=proxy_base_url,
-                proxy_token=proxy_token,
-                model=model,
-                api=api,
-                route_path=route_path,
-                timeout=timeout,
-            )
-            changed = session.summary_status == READY_SUMMARY_STATUS or changed
+            if session.summary_status == FALLBACK_SUMMARY_STATUS:
+                await self.summarize(
+                    session,
+                    base_prompt=base_prompt,
+                    proxy_base_url=proxy_base_url,
+                    proxy_token=proxy_token,
+                    model=model,
+                    api=api,
+                    route_path=route_path,
+                    timeout=timeout,
+                )
+                changed = session.summary_status == READY_SUMMARY_STATUS or changed
+            if (
+                nsfw_config is not None
+                and session.nsfw_status in (NSFW_ERROR_STATUS, NSFW_PENDING_STATUS)
+            ):
+                await self.classify_nsfw(
+                    session,
+                    **nsfw_config,
+                    timeout=nsfw_timeout,
+                )
+                changed = session.nsfw_status == NSFW_READY_STATUS or changed
         if changed:
             self.save()
 
@@ -572,6 +704,7 @@ class SoloMemoryManager:
         api: str,
         route_path: str,
         just_ended_session_id: str = "",
+        group_context: bool = False,
     ) -> str:
         visible = [
             session
@@ -591,6 +724,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
+                group_context=group_context,
             )
 
         # Budget eviction is deterministic: archive the oldest whole sessions
@@ -618,6 +752,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
+                group_context=group_context,
             )
 
         pending_archive = {
@@ -636,6 +771,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
+                group_context=group_context,
             )
 
         # Preserve an in-progress session while replacing the older sessions.
@@ -655,7 +791,8 @@ class SoloMemoryManager:
         )
         return render_solo_memories(
             working, budget_tokens=self.budget_tokens,
-                just_ended_session_id=just_ended_session_id,
+            just_ended_session_id=just_ended_session_id,
+            group_context=group_context,
         )
 
     def _archive_entries(

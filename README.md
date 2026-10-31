@@ -470,6 +470,10 @@ sender (source, at timestamp, seq=N): "JSON-escaped text" attachments=[...]
 
 `solo-transcript` 与 `channel-transcript` 结构相同，但 Note 改为私密 solo 会话，只对当前模型和用户可见。
 
+退出独处时会生成 summary，并追加一次独立的 NSFW 分类调用。被标记为 NSFW 的 solo
+session 在群聊里只显示固定占位符，summary 和正文都不会注入群聊模型；分类调用只走
+solo 模型路由，不会回退到群聊模型。回到 solo 后恢复真实内容。
+
 `live-context` 固定段：
 
 | 段 | 内容 |

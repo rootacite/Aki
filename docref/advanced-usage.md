@@ -309,6 +309,14 @@ wake routing → identity → roster`；易变 per-turn tail 为
     system_append；群聊给最近一次结束的会话标 `just_ended`。`# solo-mode` 只在独处的
     system_append 里。当前独处原文在 solo conversation，不再另贴 `# solo-transcript`。
 
+退出独处时先写 summary，再用第二次独立 API call 和专用 system prompt 判断本次会话是否
+包含明确的性行为或裸露；调用不带人格或智能体上下文，并且只允许走 solo 模型路由，
+绝不回退到群聊模型。分类请求输出上限为 32K tokens，思考预算为 15K tokens；proxy 在
+solo 路由上优先使用请求显式预算。结果保存在 solo session 的 `nsfw` 字段。群聊 `# solo-memories`
+对 NSFW 会话隐藏 summary 与正文，只保留固定占位符；
+solo 模式仍显示真实内容。分类失败按 NSFW 隐藏并在下次启动重试，分类完成前新 session
+不会进入群聊上下文。旧记录缺少 `nsfw` 字段时按 SFW 兼容。
+
 群聊 user-role overlay 顺序固定为 `# channel-transcript → # live-context / # runtime-context →
 # turn-control → # format-guard`。独处 user-role overlay 只留 `# live-context /
 # runtime-context → # wait-user`。`# format-guard` 只重复在群聊 user 前缀末尾，不落盘。

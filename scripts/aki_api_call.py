@@ -733,7 +733,7 @@ def build_overlay(
                 scene=scene,
             ),
         ]
-        memories = render_solo_memories(solo_sessions)
+        memories = render_solo_memories(solo_sessions, group_context=False)
         if memories:
             stable_parts.append(memories)
         frozen = render_channel_transcript(
@@ -758,6 +758,7 @@ def build_overlay(
             solo_sessions,
             budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
             just_ended_session_id=latest_solo_session_id(solo_sessions),
+            group_context=True,
         )
         if memories:
             stable_parts.append(memories)

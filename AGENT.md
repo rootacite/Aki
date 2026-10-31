@@ -411,6 +411,15 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   API/JSON/ID 校验失败或淘汰后仍超预算时，不修改 active 存储，当前 prompt 只渲染预算内
   最新内容。`<solo-memories>` 同时注入独处和群聊请求；最近一次结束的会话
   标 `just_ended`。摘要走 solo 的运行时模型；未配置 solo 启动脚本时使用群聊模型。
+  摘要完成后追加第二次独立 API call，用专用 system prompt 且不携带人格/智能体上下文，
+  判断本次独处是否包含明确的性行为或裸露，并把结果写入 session 的 `nsfw` 字段。
+  分类调用只允许使用 solo 模型路由，绝不回退到群聊模型；solo 路由不可用时按 NSFW 隐藏。
+  分类请求的输出上限为 32K tokens，避免推理型本地模型在输出 JSON 前被截断。
+  分类请求同时携带 15K tokens 的思考预算；proxy 在 solo 路由上优先使用请求显式预算，
+  未提供时才回落到默认 1536。
+  `nsfw=true` 的会话在群聊 `<solo-memories>` 里把 summary 和正文替换为固定占位符，
+  在 solo 中仍显示真实内容；分类失败按 NSFW 隐藏并在下次启动重试。分类完成前新 session
+  不写入 `solo-memory`，因此群聊不会看到未分类内容。旧记录缺字段时按 SFW 兼容。
   新的独处消息写入
   `solo` conversation，不进入群聊 `default` conversation。频道状态在独处期间
   发布独处模型，reasoning effort 固定为 `medium`。loopback proxy 对

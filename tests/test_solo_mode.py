@@ -11,6 +11,7 @@ from engine import akictl
 from engine.akid import GatewayConfig, GatewayServer, NullConnection, Turn
 from engine.aki_config import atomic_write, load_config, set_key, template_text
 from engine.live_context import (
+    NSFW_SOLO_PLACEHOLDER,
     ChannelMember,
     ChannelTranscriptEntry,
     apply_channel_transcript,
@@ -659,6 +660,8 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.session_id, "solo-memory-1")
         self.assertEqual(len(session.entries), 2)
         self.assertEqual(session.summary_status, "fallback")
+        self.assertTrue(session.nsfw)
+        self.assertEqual(session.nsfw_status, "error")
         self.assertTrue(session.summary)
 
         memories = dict(
@@ -667,6 +670,8 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertEqual(len(memories["sessions"]), 1)
+        self.assertTrue(memories["sessions"][0]["nsfw"])
+        self.assertEqual(memories["sessions"][0]["nsfw_status"], "error")
         system = json.loads(self.agent_path.read_text(encoding="utf-8"))["system"]
         self.assertNotIn("<solo-memories", system)
         self.assertNotIn("<solo-mode", system)
@@ -674,8 +679,22 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("# solo-memories", overlay)
         self.assertIn('just_ended="true"', overlay)
         self.assertIn("刚刚结束", overlay)
-        self.assertIn("这是独处里说的秘密", overlay)
-        self.assertIn("独处里的私密回复", overlay)
+        self.assertIn(NSFW_SOLO_PLACEHOLDER, overlay)
+        self.assertNotIn("这是独处里说的秘密", overlay)
+        self.assertNotIn("独处里的私密回复", overlay)
+
+        self.server._solo_session = SoloSession(
+            session_id="solo-next",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-28T10:00:00Z",
+            group_magic="group-magic",
+        )
+        solo_overlay = await self.overlay_text(self.server)
+        self.server._solo_session = None
+        self.assertIn("这是独处里说的秘密", solo_overlay)
+        self.assertIn("独处里的私密回复", solo_overlay)
         group_path = self.server.group_channel_history_path
         if group_path.is_file():
             group_text = group_path.read_text(encoding="utf-8")
@@ -707,6 +726,140 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("# solo-mode", overlay)
         self.assertIn('<wait-user allowed="false"', overlay)
         self.assertNotIn("# channel-wake-routing", overlay)
+
+    async def test_solo_session_is_not_visible_until_summary_and_nsfw_finish(
+        self,
+    ) -> None:
+        from engine.solo_mode import SoloSession
+
+        summary_started = asyncio.Event()
+        classification_started = asyncio.Event()
+        release_classification = asyncio.Event()
+
+        async def fake_summarize(session, **_kwargs):
+            summary_started.set()
+            session.summary = "secret summary"
+            session.summary_status = "ready"
+            return session
+
+        async def fake_classify(session, **_kwargs):
+            classification_started.set()
+            await release_classification.wait()
+            session.nsfw = True
+            session.nsfw_status = "ready"
+            return session
+
+        self.server._solo_memory_llm_config = lambda: {
+            "base_prompt": "BASE",
+            "proxy_base_url": "http://127.0.0.1:1/v1",
+            "proxy_token": "token",
+            "model": "model",
+            "api": "openai-completions",
+            "route_path": "/chat/completions",
+        }
+        self.server._solo_nsfw_llm_config = lambda: {
+            "proxy_base_url": "http://127.0.0.1:1/v1",
+            "proxy_token": "token",
+            "model": "model",
+            "api": "openai-completions",
+            "route_path": "/chat/completions",
+        }
+        self.server.solo_memory.summarize = fake_summarize
+        self.server.solo_memory.classify_nsfw = fake_classify
+        history = [
+            ChannelTranscriptEntry(
+                seq=1,
+                sender="Master",
+                sender_id="master",
+                text="secret user body",
+            ),
+            ChannelTranscriptEntry(
+                seq=2,
+                sender="Aki",
+                sender_id="legacy_aki",
+                text="secret agent body",
+                from_agent=True,
+            ),
+        ]
+        session = SoloSession(
+            session_id="solo-timing",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-31T00:00:00Z",
+            group_magic="group-magic",
+        )
+        task = asyncio.create_task(
+            self.server._finalize_solo_memory_session(session, history)
+        )
+        await asyncio.wait_for(summary_started.wait(), timeout=1.0)
+        await asyncio.wait_for(classification_started.wait(), timeout=1.0)
+
+        during = await self.overlay_text(self.server)
+        self.assertEqual(self.server.solo_memory.sessions, [])
+        self.assertNotIn("secret summary", during)
+        self.assertNotIn("secret user body", during)
+        self.assertNotIn("secret agent body", during)
+
+        release_classification.set()
+        await asyncio.wait_for(task, timeout=1.0)
+        self.assertEqual(len(self.server.solo_memory.sessions), 1)
+        after = await self.overlay_text(self.server)
+        self.assertIn(NSFW_SOLO_PLACEHOLDER, after)
+        self.assertNotIn("secret summary", after)
+        self.assertNotIn("secret user body", after)
+        self.assertNotIn("secret agent body", after)
+
+    async def test_nsfw_classifier_never_falls_back_to_group_model(self) -> None:
+        from engine.solo_mode import SoloSession
+
+        classifier_calls: list[str] = []
+
+        async def fake_summarize(session, **_kwargs):
+            session.summary = "summary"
+            session.summary_status = "ready"
+            return session
+
+        async def fake_classify(session, **_kwargs):
+            classifier_calls.append(session.session_id)
+            session.nsfw = False
+            session.nsfw_status = "ready"
+            return session
+
+        self.server._solo_memory_llm_config = lambda: {
+            "base_prompt": "BASE",
+            "proxy_base_url": "http://127.0.0.1:1/v1",
+            "proxy_token": "group-token",
+            "model": "group-model",
+            "api": "openai-completions",
+            "route_path": "/chat/completions",
+        }
+        self.server._solo_nsfw_llm_config = lambda: None
+        self.server.solo_memory.summarize = fake_summarize
+        self.server.solo_memory.classify_nsfw = fake_classify
+        history = [
+            ChannelTranscriptEntry(
+                seq=1,
+                sender="Master",
+                sender_id="master",
+                text="private body",
+            )
+        ]
+        session = SoloSession(
+            session_id="solo-no-route",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-31T00:00:00Z",
+            group_magic="group-magic",
+        )
+
+        await self.server._finalize_solo_memory_session(session, history)
+
+        self.assertEqual(classifier_calls, [])
+        stored = self.server.solo_memory.sessions[0]
+        self.assertTrue(stored.nsfw)
+        self.assertEqual(stored.nsfw_status, "error")
 
     async def test_proactive_text_is_recorded_in_solo_history(self) -> None:
         from engine.solo_mode import SoloSession

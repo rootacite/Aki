@@ -53,6 +53,7 @@ from .mentions import (
     strip_user_notice_target,
 )
 from .solo_blocks import (
+    NSFW_SOLO_PLACEHOLDER,
     _solo_memory_entry_lines,
     _solo_memory_session_lines,
     apply_solo_memories,

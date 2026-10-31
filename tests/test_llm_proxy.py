@@ -546,6 +546,18 @@ class SoloReasoningProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(captured["reasoning_effort"], "medium")
         self.assertEqual(captured["reasoning_budget_tokens"], 1536)
 
+    async def test_solo_model_honors_explicit_reasoning_budget(self) -> None:
+        captured = await self._post(
+            {
+                "model": "qwen3.6-35b-a3b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "reasoning_effort": "low",
+                "reasoning_budget_tokens": 15 * 1024,
+            }
+        )
+        self.assertEqual(captured["reasoning_effort"], "medium")
+        self.assertEqual(captured["reasoning_budget_tokens"], 15 * 1024)
+
     async def test_group_model_keeps_its_own_effort(self) -> None:
         captured = await self._post(
             {

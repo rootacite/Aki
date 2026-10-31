@@ -357,12 +357,20 @@ class LlmProxy:
         if route is None or path != expected:
             writer.write(_status_json(404, "unknown model"))
             return 404, model_id, "-"
+        requested_reasoning_budget = payload.get("reasoning_budget_tokens")
         payload["model"] = route.upstream_model
         if route.extra_body:
             payload.update(route.extra_body)
         if route.solo:
             payload["reasoning_effort"] = SOLO_REASONING_EFFORT
-            payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
+            if (
+                isinstance(requested_reasoning_budget, int)
+                and not isinstance(requested_reasoning_budget, bool)
+                and requested_reasoning_budget > 0
+            ):
+                payload["reasoning_budget_tokens"] = requested_reasoning_budget
+            else:
+                payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
         forwarded = json.dumps(payload).encode("utf-8")
         if self.debug is not None:
             self.debug.publish_request(
