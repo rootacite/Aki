@@ -56,7 +56,7 @@ python3 install-daemon.py --uninstall        # 不删除 profile 配置、MemFS/
 
 ### 一键部署
 
-`deploy.sh` 按 `AGENT.md` 的部署要求串成一条命令：默认运行
+`deploy.sh` 按 `AGENTS.md` 的部署要求串成一条命令：默认运行
 `python3 install-daemon.py` 校验或构建 vendored Letta runtime 并刷新 systemd unit，
 调用 `scripts/sync-personas.py` 同步人格，用 `aki-safectl.py` 重启运行中的 profile，
 再核对各 unit 的启动时间、最近 journal 告警和 health/status。
