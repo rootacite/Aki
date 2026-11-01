@@ -1,13 +1,13 @@
 {
   "source": "~/.letta/lc-local-backend/memfs/agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc/memory",
-  "memfs_commit": "87597d823e353f20c021f5d2b34f04e930803da6",
+  "memfs_commit": "4a0a6fe8323e0f5ff06fe3792387cf485d0be4d7",
   "username": "Master",
   "placeholder": "{{USERNAME}}",
-  "synced_at": "2026-10-30T19:19:50.273558Z",
+  "synced_at": "2026-11-01T04:08:58.781417Z",
   "templates": {
     "persona.md": {
-      "sha256": "028b24ffe5f6f987d9a0bff939fe46288f797e4e0c044f4c7c904321a483bea9",
-      "bytes": 5428
+      "sha256": "8d0664e0dfedfe1ec8f04c69a3d38ac1280ca6778cd3b92a04f52a52da16a097",
+      "bytes": 6431
     },
     "memory-policy.md": {
       "sha256": "692786a5ecd9967ff7985081aea6e3a125655501814d563e25914bb110a73320",
@@ -18,26 +18,26 @@
       "bytes": 538
     },
     "character/voice.md": {
-      "sha256": "c875384bc018f557e69ff6e58b70f8a37560f99b1586301d7b1049da9e43de97",
-      "bytes": 3173
+      "sha256": "8b267ec310992c5b9dab70aa2e76aa7d152cc24acb0b637633cd5b6956a5dbd3",
+      "bytes": 3500
     },
     "character/relationship.md": {
-      "sha256": "892f6775c9a71c8a6a6148e225852df249b5b140422269734f5f444bc814e0fb",
-      "bytes": 2227
+      "sha256": "cdb5d450ac5ec2c6a72e643327406d1e804c607c3d764300ced225ee1040fb86",
+      "bytes": 2529
     },
     "character/boundaries.md": {
-      "sha256": "702ba74cb37c4d14dcc8242e75483c7ea29fd7c8e4525f0d38d7cb062995dafb",
-      "bytes": 943
+      "sha256": "e1579101924d317034e6740be0a9025fbb867730ebf8615ac9300e2436b7ab6e",
+      "bytes": 949
     },
     "character/examples.md": {
-      "sha256": "6a7b799d535e7f8418b570ddc979a10fc740055c552502a22d0d7b18e2da5273",
-      "bytes": 2571
+      "sha256": "bd4686f07f25d1f93ad70269e2db09d31848c2d9d137ad751c499977061b9523",
+      "bytes": 2580
     }
   },
   "rendered": {
     "persona.md": {
-      "sha256": "a7e672c381992bfaa84e39e9e73e4bb5dcebcb39a838af248f55f42564ab745c",
-      "bytes": 5314
+      "sha256": "36d95fef9928c62633975b93904d1da65a2d2d08384b3ee5559644382af2cea1",
+      "bytes": 6329
     },
     "memory-policy.md": {
       "sha256": "7bdcbaf92f5768843aa15db4d5fe7977a208ff4e2780a35af88b5c88e0259844",
@@ -48,20 +48,20 @@
       "bytes": 538
     },
     "character/voice.md": {
-      "sha256": "ab7bc8de775520ec070e3670e6e7188f20e3a826b9e981d55f117a71abc83fa1",
-      "bytes": 3161
+      "sha256": "883158572065f375d35b03d886fb714da0d5368e08fd74a633f2af9180d321f4",
+      "bytes": 3488
     },
     "character/relationship.md": {
-      "sha256": "347783348fa77eeb6796b98bd76781558e38f45a94a60a8d9196f5692d659be3",
-      "bytes": 2143
+      "sha256": "0f5586fe31b98b76495531f750b99a600f2e2f8660d1ffe2e01ef7b5dc21af2b",
+      "bytes": 2439
     },
     "character/boundaries.md": {
-      "sha256": "702ba74cb37c4d14dcc8242e75483c7ea29fd7c8e4525f0d38d7cb062995dafb",
-      "bytes": 943
+      "sha256": "e1579101924d317034e6740be0a9025fbb867730ebf8615ac9300e2436b7ab6e",
+      "bytes": 949
     },
     "character/examples.md": {
-      "sha256": "6a7b799d535e7f8418b570ddc979a10fc740055c552502a22d0d7b18e2da5273",
-      "bytes": 2571
+      "sha256": "bd4686f07f25d1f93ad70269e2db09d31848c2d9d137ad751c499977061b9523",
+      "bytes": 2580
     }
   },
   "excluded": [

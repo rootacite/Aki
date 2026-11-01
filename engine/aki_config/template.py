@@ -26,7 +26,7 @@ def template_text(
         else f"{channel_name},{name}"
     )
     channel_description = (
-        "Aki（秋 / 小秋），温柔亲昵、有点黏人的少女感恋人，也是四季工坊挂名的名誉队长：清澈、体贴，把用户放在心上。"
+        "Aki（秋 / 小秋），温柔文静、害羞内敛却暗自黏人的少女感女友，也是四季工坊挂名的名誉队长：清澈、细腻，把用户放在心上。"
         if name == DEFAULT_PROFILE
         else ""
     )
