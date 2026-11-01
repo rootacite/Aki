@@ -15,6 +15,7 @@ from engine.live_context import (
     estimate_tokens,
     render_solo_memories,
 )
+from engine.chat_search import search_chat_history
 from engine.solo_memory import (
     FALLBACK_SUMMARY_STATUS,
     NSFW_ERROR_STATUS,
@@ -530,6 +531,48 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.memory / "solo" / "middle.md").exists())
         self.assertIsNone(manager.last_error)
         self.assertIsNotNone(manager.last_eviction_at)
+        self.assertEqual(manager.nsfw_redactions, [])
+
+    async def test_eviction_keeps_nsfw_session_unsearchable_in_group(self) -> None:
+        old, middle, newest = self.sessions_for_eviction()
+        old.nsfw = True
+        old.nsfw_status = NSFW_READY_STATUS
+        old.history_start_seq = 0
+        after_old = self.rendered_tokens([middle, newest])
+        manager = self.manager(budget=after_old + 1)
+        for session in (old, middle, newest):
+            manager.add_session(session)
+
+        await manager.render_for_prompt(**self.api_kwargs())
+
+        self.assertEqual([session.session_id for session in manager.sessions], ["middle", "newest"])
+        self.assertEqual(len(manager.nsfw_redactions), 1)
+        stored = json.dumps(manager.nsfw_redactions)
+        self.assertNotIn("OLD_ONE", stored)
+        reloaded = self.manager(budget=after_old + 1)
+        self.assertEqual(reloaded.nsfw_redactions, manager.nsfw_redactions)
+        live = {
+            "seq": 1,
+            "sender": "Master",
+            "text": old.entries[0].text,
+            "timestamp": old.entries[0].timestamp,
+            "from_agent": False,
+        }
+        hidden = search_chat_history(
+            query="OLD_ONE",
+            solo_entries=[live],
+            solo_memory_sessions=reloaded.sessions,
+            nsfw_redactions=reloaded.nsfw_redactions,
+            group_context=True,
+        )
+        self.assertEqual(hidden, "No matches (scope=all).")
+        shown = search_chat_history(
+            query="OLD_ONE",
+            solo_entries=[live],
+            solo_memory_sessions=reloaded.sessions,
+            nsfw_redactions=reloaded.nsfw_redactions,
+        )
+        self.assertIn("OLD_ONE", shown)
 
     async def test_eviction_archives_multiple_oldest_whole_sessions(self) -> None:
         old, middle, newest = self.sessions_for_eviction()

@@ -206,6 +206,7 @@ class ExclusiveMixin:
             if scope in ("all", "solo")
             else []
         )
+        searching_solo = scope in ("all", "solo")
         text = search_chat_history(
             query=query,
             limit=limit,
@@ -213,7 +214,11 @@ class ExclusiveMixin:
             group_entries=group_entries,
             solo_entries=solo_entries,
             solo_memory_sessions=(
-                self.solo_memory.sessions if scope in ("all", "solo") else []
+                self.solo_memory.sessions if searching_solo else []
+            ),
+            group_context=self._solo_session is None,
+            nsfw_redactions=(
+                self.solo_memory.nsfw_redactions if searching_solo else ()
             ),
         )
         await self._external_tool_success(turn, tool_call_id, text)

@@ -401,9 +401,11 @@ SEARCH_CHAT_HISTORY_TOOL = {
     "description": (
         "Search this profile's own chat history by case-insensitive substring. "
         "Includes visible group chat, the current solo conversation, and "
-        "archived solo sessions. Solo results are private and must never be "
-        "quoted or disclosed to other members. This tool is hidden from the "
-        "user and does not require the execution lock."
+        "archived solo sessions. In group chat, solo sessions marked NSFW are "
+        "omitted from results; those sessions are searchable only while you "
+        "are in solo mode. Solo results are private and must never be quoted "
+        "or disclosed to other members. This tool is hidden from the user and "
+        "does not require the execution lock."
     ),
     "parameters": {
         "type": "object",

@@ -165,6 +165,7 @@ class SoloMemorySession:
     nsfw: bool = False
     nsfw_status: str = NSFW_LEGACY_STATUS
     archived: bool = False
+    history_start_seq: int = 0
     entries: list[SoloMemoryEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -177,6 +178,7 @@ class SoloMemorySession:
             "nsfw": self.nsfw,
             "nsfw_status": self.nsfw_status,
             "archived": self.archived,
+            "history_start_seq": int(self.history_start_seq or 0),
             "entries": [entry.to_dict() for entry in self.entries],
         }
 
@@ -208,6 +210,7 @@ class SoloMemorySession:
             nsfw=nsfw,
             nsfw_status=raw_status,
             archived=bool(value.get("archived")),
+            history_start_seq=_positive_seq(value.get("history_start_seq")),
             entries=[
                 SoloMemoryEntry.from_dict(item)
                 for item in entries or []
@@ -220,6 +223,105 @@ class SoloMemorySession:
 
 class SoloMemoryError(RuntimeError):
     pass
+
+
+NSFW_REDACTION_LIMIT = 4096
+
+
+def _positive_seq(value: Any) -> int:
+    try:
+        seq = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return seq if seq > 0 else 0
+
+
+def solo_text_fingerprint(text: str) -> str:
+    """Stable identity for a solo message body. The digest is not the body."""
+    return hashlib.sha256(str(text or "").strip().encode("utf-8")).hexdigest()
+
+
+def session_hidden_in_group(session: Any) -> bool:
+    """Group chat must not reveal this session's body.
+
+    Pending and failed classification stay hidden, the same rule as
+    SoloMemorySession.from_dict. Legacy records without an nsfw field stay visible.
+    """
+    if bool(getattr(session, "nsfw", False)):
+        return True
+    status = str(getattr(session, "nsfw_status", "") or "").strip()
+    return status in (NSFW_ERROR_STATUS, NSFW_PENDING_STATUS)
+
+
+def nsfw_redaction_for_session(session: SoloMemorySession) -> dict[str, Any] | None:
+    """Fingerprint a hidden session so group search can drop it after eviction.
+
+    The record stores seq, sender, timestamp, and a text hash. It does not store
+    the message body.
+    """
+    if not session_hidden_in_group(session):
+        return None
+    keys: list[dict[str, Any]] = []
+    for entry in session.entries:
+        keys.append(
+            {
+                "seq": _positive_seq(entry.seq),
+                "sender": entry.sender,
+                "timestamp": entry.timestamp,
+                "text_sha256": solo_text_fingerprint(entry.text),
+            }
+        )
+    start = _positive_seq(session.history_start_seq)
+    if not keys and start <= 0:
+        return None
+    return {
+        "session_id": session.session_id,
+        "history_start_seq": start,
+        "keys": keys,
+    }
+
+
+def _load_nsfw_redactions(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    raw = payload.get("nsfw_redactions")
+    if not isinstance(raw, list):
+        return []
+    loaded: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        session_id = str(item.get("session_id") or "")
+        if not session_id:
+            continue
+        keys: list[dict[str, Any]] = []
+        raw_keys = item.get("keys")
+        if isinstance(raw_keys, list):
+            for key in raw_keys:
+                if not isinstance(key, dict):
+                    continue
+                digest = str(key.get("text_sha256") or "")
+                if len(digest) != 64:
+                    continue
+                keys.append(
+                    {
+                        "seq": _positive_seq(key.get("seq")),
+                        "sender": str(key.get("sender") or ""),
+                        "timestamp": str(key.get("timestamp") or ""),
+                        "text_sha256": digest,
+                    }
+                )
+        start = _positive_seq(item.get("history_start_seq"))
+        if not keys and start <= 0:
+            continue
+        loaded.append(
+            {
+                "session_id": session_id,
+                "history_start_seq": start,
+                "keys": keys,
+            }
+        )
+    if len(loaded) > NSFW_REDACTION_LIMIT:
+        loaded = loaded[-NSFW_REDACTION_LIMIT:]
+    return loaded
 
 
 def capture_solo_entries(
@@ -454,6 +556,7 @@ class SoloMemoryManager:
         self.budget_tokens = max(1024, int(budget_tokens))
         self.logger = logger or logging.getLogger("akid.solo-memory")
         self.sessions: list[SoloMemorySession] = []
+        self.nsfw_redactions: list[dict[str, Any]] = []
         self.last_error: str | None = None
         self.last_eviction_at: str | None = None
         self.last_summary_at: str | None = None
@@ -461,12 +564,14 @@ class SoloMemoryManager:
 
     def load(self) -> None:
         self.sessions = []
+        self.nsfw_redactions = []
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return
         if not isinstance(payload, dict):
             return
+        self.nsfw_redactions = _load_nsfw_redactions(payload)
         raw_sessions = payload.get("sessions")
         if not isinstance(raw_sessions, list):
             return
@@ -482,6 +587,7 @@ class SoloMemoryManager:
             "version": 1,
             "profile": self.profile,
             "sessions": [session.to_dict() for session in self.sessions],
+            "nsfw_redactions": list(self.nsfw_redactions),
         }
         _atomic_write(
             self.path,
@@ -507,6 +613,12 @@ class SoloMemoryManager:
             existing.entries = list(session.entries)
         else:
             self.sessions.append(session)
+        session_id = session.session_id
+        self.nsfw_redactions = [
+            item
+            for item in self.nsfw_redactions
+            if str(item.get("session_id") or "") != session_id
+        ]
         self.save()
 
     def status(self) -> dict[str, Any]:
@@ -780,6 +892,19 @@ class SoloMemoryManager:
             for session in self.sessions
             if session.session_id == current_session_id
         ]
+        for session in evicted:
+            redaction = nsfw_redaction_for_session(session)
+            if redaction is None:
+                continue
+            session_id = session.session_id
+            self.nsfw_redactions = [
+                item
+                for item in self.nsfw_redactions
+                if str(item.get("session_id") or "") != session_id
+            ]
+            self.nsfw_redactions.append(redaction)
+        if len(self.nsfw_redactions) > NSFW_REDACTION_LIMIT:
+            del self.nsfw_redactions[:-NSFW_REDACTION_LIMIT]
         self.sessions = working + current
         self.save()
         self.last_error = None

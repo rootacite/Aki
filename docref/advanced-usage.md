@@ -315,7 +315,8 @@ wake routing → identity → roster`；易变 per-turn tail 为
 solo 路由上优先使用请求显式预算。结果保存在 solo session 的 `nsfw` 字段。群聊 `# solo-memories`
 对 NSFW 会话隐藏 summary 与正文，只保留固定占位符；
 solo 模式仍显示真实内容。分类失败按 NSFW 隐藏并在下次启动重试，分类完成前新 session
-不会进入群聊上下文。旧记录缺少 `nsfw` 字段时按 SFW 兼容。
+不会进入群聊上下文。旧记录缺少 `nsfw` 字段时按 SFW 兼容。群聊模式下
+`search_chat_history` 不返回这些会话的正文；独处模式下可以搜到。
 
 群聊 user-role overlay 顺序固定为 `# channel-transcript → # live-context / # runtime-context →
 # turn-control → # format-guard`。独处 user-role overlay 只留 `# live-context /

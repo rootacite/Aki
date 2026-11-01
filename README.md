@@ -392,7 +392,7 @@ Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
 | `<exclusive-domain-guidance>` | 不调用/不模拟别人的专属工具；被点名做别人的任务时一行 handoff；没人点名就 `[NO_REPLY]` |
 | `<output-rules>` | 最终文本直接发到频道，不要用工具发文本；沉默输出 `[NO_REPLY]` |
 | `<privacy-rules>` | solo 内容严格私密，不得在群聊转述、引用、总结或暗示 |
-| `<chat-history-search>` | 隐藏工具 `search_chat_history(query, limit=8)`，scope 可选 `all` / `group` / `solo`；不得泄露 solo 结果，不得向用户提这个工具 |
+| `<chat-history-search>` | 隐藏工具 `search_chat_history(query, limit=8)`，scope 可选 `all` / `group` / `solo`；不得泄露 solo 结果，不得向用户提这个工具；群聊模式下不返回标记为 nsfw 的独处会话正文 |
 | `<image-rules>` | 当前回合图片已经作为多模态输入；旧图用 `ViewImage`；发图用 `#[/absolute/path]`，不要调用 `tokifactor_send_image` |
 | `<emoji-catalog>` | 可选；用 `#[name:desc]`，必须匹配目录，tag 必须独立成句 |
 

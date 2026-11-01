@@ -420,6 +420,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   `nsfw=true` 的会话在群聊 `<solo-memories>` 里把 summary 和正文替换为固定占位符，
   在 solo 中仍显示真实内容；分类失败按 NSFW 隐藏并在下次启动重试。分类完成前新 session
   不写入 `solo-memory`，因此群聊不会看到未分类内容。旧记录缺字段时按 SFW 兼容。
+  群聊模式下 `search_chat_history` 同样不返回这些会话的正文，包括仍留在
+  `<profile>.solo.jsonl` 里、序号落在该会话范围内的记录；分类未完成或失败的会话也排除。
+  独处模式下可以搜到。会话因预算被淘汰后，群聊搜索仍按不含正文的指纹排除这些记录。
   新的独处消息写入
   `solo` conversation，不进入群聊 `default` conversation。频道状态在独处期间
   发布独处模型，reasoning effort 固定为 `medium`。loopback proxy 对

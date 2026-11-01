@@ -9,6 +9,7 @@ from engine.akid import NullConnection, Turn
 from engine.akid.constants import (
     EXTERNAL_TOOL_NAMES,
     HIDDEN_TOOL_NAMES,
+    SEARCH_CHAT_HISTORY_TOOL,
     SEARCH_CHAT_HISTORY_TOOL_NAME,
 )
 from engine.chat_search import (
@@ -17,7 +18,14 @@ from engine.chat_search import (
 )
 from engine.execution_policy import READ_ONLY_TOOLS, requires_execution_lock
 from engine.letta_llm import render_execution_lock_mod
-from engine.solo_memory import SoloMemoryEntry, SoloMemorySession
+from engine.live_context import render_channel_policy, render_solo_policy
+from engine.solo_memory import (
+    SoloMemoryEntry,
+    SoloMemorySession,
+    nsfw_redaction_for_session,
+    solo_text_fingerprint,
+)
+from engine.solo_mode import SoloSession
 from tests.test_exclusive_tools import DummyBackend, make_server
 
 
@@ -138,6 +146,174 @@ class ChatSearchRenderTests(unittest.TestCase):
         self.assertIn("Found 50 matches", capped)
         self.assertLessEqual(len(capped), SEARCH_MAX_RESULT_CHARS)
 
+    def test_group_context_omits_nsfw_solo_and_keeps_other_hits(self) -> None:
+        group = [row(1, "Master", "phrase in group", "2026-10-28T09:00:00Z")]
+        solo = [
+            row(8, "Master", "phrase leading [NO_REPLY]", "2026-10-27T10:00:08Z"),
+            row(10, "Master", "phrase explicit  ", "2026-10-27T10:00:10Z"),
+            row(11, "Master", "phrase gap [NO_REPLY]", "2026-10-27T10:00:11Z"),
+            row(13, "Master", "phrase trailing [NO_REPLY]", "2026-10-27T10:00:13Z"),
+            row(20, "Master", "phrase safe solo", "2026-10-28T10:00:20Z"),
+        ]
+        nsfw = SoloMemorySession(
+            session_id="nsfw",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            summary="explicit summary that must stay unsearchable",
+            nsfw=True,
+            nsfw_status="ready",
+            history_start_seq=7,
+            entries=[
+                memory_entry(10, "Master", "phrase explicit", "2026-10-27T10:00:10Z"),
+                memory_entry(12, "Master", "phrase explicit later", "2026-10-27T10:00:12Z"),
+            ],
+        )
+        safe = SoloMemorySession(
+            session_id="safe",
+            started_at="2026-10-28T10:00:00Z",
+            ended_at="2026-10-28T10:10:00Z",
+            nsfw=False,
+            nsfw_status="ready",
+            history_start_seq=19,
+            entries=[
+                memory_entry(20, "Master", "phrase safe solo", "2026-10-28T10:00:20Z")
+            ],
+        )
+        hidden = search_chat_history(
+            query="phrase",
+            group_entries=group,
+            solo_entries=solo,
+            solo_memory_sessions=[nsfw, safe],
+            group_context=True,
+        )
+        self.assertIn("phrase in group", hidden)
+        self.assertIn("phrase safe solo", hidden)
+        self.assertNotIn("explicit", hidden)
+        self.assertNotIn("leading", hidden)
+        self.assertNotIn("trailing", hidden)
+        self.assertNotIn("phrase gap", hidden)
+        self.assertNotIn("omitted", hidden)
+        self.assertNotIn("nsfw", hidden.casefold())
+
+        visible = search_chat_history(
+            query="phrase",
+            group_entries=group,
+            solo_entries=solo,
+            solo_memory_sessions=[nsfw, safe],
+        )
+        self.assertIn("phrase explicit", visible)
+        self.assertIn("phrase explicit later", visible)
+        self.assertIn("phrase gap", visible)
+        self.assertIn("phrase leading", visible)
+        self.assertIn("phrase trailing", visible)
+        self.assertIn("phrase safe solo", visible)
+
+    def test_group_context_hides_pending_error_and_keeps_legacy(self) -> None:
+        pending = SoloMemorySession(
+            session_id="pending",
+            started_at="2026-10-27T10:00:00Z",
+            ended_at="2026-10-27T10:10:00Z",
+            nsfw=False,
+            nsfw_status="pending",
+            entries=[
+                memory_entry(1, "Master", "pending secret", "2026-10-27T10:00:01Z")
+            ],
+        )
+        failed = SoloMemorySession(
+            session_id="failed",
+            started_at="2026-10-27T11:00:00Z",
+            ended_at="2026-10-27T11:10:00Z",
+            nsfw=False,
+            nsfw_status="error",
+            entries=[
+                memory_entry(2, "Master", "failed secret", "2026-10-27T11:00:02Z")
+            ],
+        )
+        legacy = SoloMemorySession(
+            session_id="legacy",
+            started_at="2026-10-27T12:00:00Z",
+            ended_at="2026-10-27T12:10:00Z",
+            entries=[
+                memory_entry(3, "Master", "legacy secret", "2026-10-27T12:00:03Z")
+            ],
+        )
+        text = search_chat_history(
+            query="secret",
+            solo_memory_sessions=[pending, failed, legacy],
+            group_context=True,
+        )
+        self.assertIn("legacy secret", text)
+        self.assertNotIn("pending secret", text)
+        self.assertNotIn("failed secret", text)
+
+    def test_group_context_uses_redaction_after_session_is_gone(self) -> None:
+        gone = SoloMemorySession(
+            session_id="gone",
+            started_at="2026-10-26T10:00:00Z",
+            ended_at="2026-10-26T10:10:00Z",
+            nsfw=True,
+            nsfw_status="ready",
+            history_start_seq=29,
+            entries=[
+                memory_entry(30, "Master", "evicted explicit", "2026-10-26T10:00:30Z")
+            ],
+        )
+        redaction = nsfw_redaction_for_session(gone)
+        self.assertIsNotNone(redaction)
+        assert redaction is not None
+        self.assertNotIn("evicted explicit", json.dumps(redaction))
+        self.assertEqual(
+            redaction["keys"][0]["text_sha256"],
+            solo_text_fingerprint("evicted explicit"),
+        )
+        solo = [
+            row(30, "Master", "evicted explicit", "2026-10-26T10:00:30Z"),
+            row(31, "Master", "evicted trailing", "2026-10-26T10:00:31Z"),
+            row(40, "Master", "later safe", "2026-10-28T10:00:40Z"),
+        ]
+        safe = SoloMemorySession(
+            session_id="later",
+            started_at="2026-10-28T10:00:00Z",
+            ended_at="2026-10-28T10:10:00Z",
+            nsfw=False,
+            nsfw_status="ready",
+            history_start_seq=39,
+            entries=[memory_entry(40, "Master", "later safe", "2026-10-28T10:00:40Z")],
+        )
+        hidden = search_chat_history(
+            query="evicted",
+            solo_entries=solo,
+            solo_memory_sessions=[safe],
+            nsfw_redactions=[redaction],
+            group_context=True,
+        )
+        self.assertEqual(hidden, "No matches (scope=all).")
+        kept = search_chat_history(
+            query="later",
+            solo_entries=solo,
+            solo_memory_sessions=[safe],
+            nsfw_redactions=[redaction],
+            group_context=True,
+        )
+        self.assertIn("later safe", kept)
+        solo_mode = search_chat_history(
+            query="evicted",
+            solo_entries=solo,
+            solo_memory_sessions=[safe],
+            nsfw_redactions=[redaction],
+        )
+        self.assertIn("evicted explicit", solo_mode)
+        self.assertIn("evicted trailing", solo_mode)
+
+    def test_prompts_describe_the_group_and_solo_search_boundary(self) -> None:
+        group = render_channel_policy(user_name="Master")
+        solo = render_solo_policy(user_name="Master")
+        self.assertIn("solo sessions marked NSFW are omitted", group)
+        self.assertIn("including solo sessions marked NSFW", solo)
+        description = str(SEARCH_CHAT_HISTORY_TOOL["description"])
+        self.assertIn("omitted from results", description)
+        self.assertIn("solo mode", description)
+
 
 class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self) -> None:
@@ -210,6 +386,68 @@ class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("group needle", text)
         self.assertIn("solo needle", text)
         self.assertIn("archived needle", text)
+
+    async def test_handler_hides_nsfw_solo_in_group_and_shows_it_in_solo(self) -> None:
+        backend = DummyBackend()
+        server = make_server(self.root / "nsfw-search", profile="aki", backend=backend)
+        server.group_channel_history_path.parent.mkdir(parents=True, exist_ok=True)
+        server.group_channel_history_path.write_text(
+            json.dumps(row(1, "Master", "group phrase", "2026-10-28T10:00:00Z"))
+            + "\n",
+            encoding="utf-8",
+        )
+        server.solo_channel_history_path.write_text(
+            json.dumps(row(4, "Master", "live phrase", "2026-10-27T10:00:04Z"))
+            + "\n",
+            encoding="utf-8",
+        )
+        server.solo_memory.add_session(
+            SoloMemorySession(
+                session_id="nsfw",
+                started_at="2026-10-27T10:00:00Z",
+                ended_at="2026-10-27T10:10:00Z",
+                nsfw=True,
+                nsfw_status="ready",
+                history_start_seq=3,
+                entries=[
+                    memory_entry(4, "Master", "live phrase", "2026-10-27T10:00:04Z")
+                ],
+            )
+        )
+        server.active = Turn(
+            turn_id="turn-group",
+            conn=NullConnection(),
+            message="x",
+            include_reasoning=False,
+            client_message_id=None,
+        )
+
+        async def run(call_id: str) -> str:
+            await server._handle_external_tool(
+                {
+                    "request": {
+                        "tool_call_id": call_id,
+                        "tool_name": SEARCH_CHAT_HISTORY_TOOL_NAME,
+                        "input": {"query": "phrase"},
+                    }
+                }
+            )
+            return backend.results[-1][1]
+
+        group_text = await run("group")
+        self.assertIn("group phrase", group_text)
+        self.assertNotIn("live phrase", group_text)
+
+        server._solo_session = SoloSession(
+            session_id="solo-live",
+            target_id="aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-28T12:00:00Z",
+            group_magic="magic",
+        )
+        solo_text = await run("solo")
+        self.assertIn("live phrase", solo_text)
 
     async def test_handler_rejects_invalid_arguments(self) -> None:
         cases = (

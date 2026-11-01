@@ -285,6 +285,7 @@ class ModelMixin:
             summary_status=FALLBACK_SUMMARY_STATUS,
             nsfw=False,
             nsfw_status=NSFW_PENDING_STATUS,
+            history_start_seq=int(self._solo_memory_start_seq),
             entries=entries,
         )
         if self.solo_backend.configured:
