@@ -298,7 +298,7 @@ wake routing → identity → roster`；易变 per-turn tail 为
    execution guidance、专属域规则和输出规则。
 7. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
    使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
-8. `# format-guard`：静态 base 中保留 `# Format Guard`；每个 turn 在 user-role overlay
+8. `# format-guard`：静态 base 中保留 `# Format Guard`（含 `~[text]` 隐藏段）；每个 turn 在 user-role overlay
    末尾完整重复一次，使用各自 username 渲染。
 9. `# live-context` / `# runtime-context`：桌面时间、焦点窗口、进程、zsh 历史、截图路径、
    Aki 生活账本，以及 MemFS 绝对路径和 MCP 信息；关闭桌面实况时使用 `# runtime-context`。

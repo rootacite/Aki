@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Mapping
@@ -26,6 +27,117 @@ CHARACTER_ALIASES = {
     "natsu": "Natsu",
     "夏": "Natsu",
 }
+
+
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_FENCE_RE = re.compile(r"(?m)^\s*(```|~~~).*$")
+
+
+def conceal_hidden_spans(content: str) -> str:
+    """Drop complete ``~[text]`` spans before a desktop bubble is drawn.
+
+    The first ``]`` ends a span. An unclosed ``~[`` stays visible. Spans that
+    overlap inline code or a fenced code block stay literal. This matches the
+    Tokifactor display filter; the published message is left unchanged.
+    """
+    text = str(content or "")
+    if "~[" not in text:
+        return text
+    protected = _protected_indexes(text)
+    spans = _hidden_span_ranges(text, protected)
+    if not spans:
+        return text
+    pieces: list[str] = []
+    cursor = 0
+    for start, end in spans:
+        pieces.append(text[cursor:start])
+        cursor = end
+    pieces.append(text[cursor:])
+    joined = pieces[0]
+    for piece in pieces[1:]:
+        joined = _join_around_removal(joined, piece)
+    return joined
+
+
+def _protected_indexes(content: str) -> list[bool]:
+    protected = [False] * len(content)
+    for match in _INLINE_CODE_RE.finditer(content):
+        for index in range(match.start(), match.end()):
+            protected[index] = True
+    fence_start: int | None = None
+    for match in _FENCE_RE.finditer(content):
+        if fence_start is None:
+            fence_start = match.start()
+            continue
+        for index in range(fence_start, match.end()):
+            protected[index] = True
+        fence_start = None
+    if fence_start is not None:
+        for index in range(fence_start, len(content)):
+            protected[index] = True
+    return protected
+
+
+def _hidden_span_ranges(content: str, protected: list[bool]) -> list[tuple[int, int]]:
+    spans: list[tuple[int, int]] = []
+    index = 0
+    length = len(content)
+    while index < length:
+        if protected[index]:
+            index += 1
+            continue
+        if content.startswith("~[", index):
+            close = content.find("]", index + 2)
+            if close < 0:
+                break
+            if any(protected[cursor] for cursor in range(index, close + 1)):
+                index += 2
+                continue
+            spans.append((index, close + 1))
+            index = close + 1
+            continue
+        index += 1
+    return spans
+
+
+def _is_horizontal_space(char: str) -> bool:
+    return char in " \t"
+
+
+def _is_line_break(char: str) -> bool:
+    return char in "\r\n"
+
+
+def _trim_end_horizontal(text: str) -> str:
+    end = len(text)
+    while end > 0 and _is_horizontal_space(text[end - 1]):
+        end -= 1
+    return text[:end]
+
+
+def _trim_start_horizontal(text: str) -> str:
+    start = 0
+    while start < len(text) and _is_horizontal_space(text[start]):
+        start += 1
+    return text[start:]
+
+
+def _join_around_removal(left: str, right: str) -> str:
+    left_trimmed = _trim_end_horizontal(left)
+    right_trimmed = _trim_start_horizontal(right)
+    removed_left = len(left_trimmed) != len(left)
+    removed_right = len(right_trimmed) != len(right)
+    if not removed_left and not removed_right:
+        return left + right
+    need_space = (
+        bool(left_trimmed)
+        and bool(right_trimmed)
+        and not _is_line_break(left_trimmed[-1])
+        and not _is_line_break(right_trimmed[0])
+    )
+    if need_space:
+        return left_trimmed + " " + right_trimmed
+    return left_trimmed + right_trimmed
 
 
 def preview_text(text: str, limit: int = DEFAULT_PREVIEW_CHARS) -> str:
@@ -146,7 +258,7 @@ class LayerNotifier:
 
     def notify(self, character: str, text: str) -> bool:
         queued = False
-        for paragraph in split_paragraphs(text):
+        for paragraph in split_paragraphs(conceal_hidden_spans(text)):
             preview = preview_text(paragraph, self.preview_chars)
             if not preview:
                 continue

@@ -10,6 +10,7 @@ from engine.layer_notify import (
     LayerNotifier,
     character_for_names,
     character_for_profile,
+    conceal_hidden_spans,
     preview_text,
     split_paragraphs,
 )
@@ -58,6 +59,26 @@ class LayerNotifyHelpersTests(unittest.TestCase):
         code = "```\nfirst\n\nsecond\n```"
         self.assertEqual(split_paragraphs(single), [single])
         self.assertEqual(split_paragraphs(code), [code])
+
+    def test_conceal_hidden_spans_matches_the_chat_window(self) -> None:
+        self.assertEqual("hello  world", conceal_hidden_spans("hello  world"))
+        self.assertEqual("看见 这句话", conceal_hidden_spans("看见 ~[不要显示] 这句话"))
+        self.assertEqual("a b c", conceal_hidden_spans("a ~[one] b ~[two] c"))
+        self.assertEqual("prefixsuffix", conceal_hidden_spans("prefix~[x]suffix"))
+        self.assertEqual("", conceal_hidden_spans("~[only]"))
+        self.assertEqual("hello ~[no close", conceal_hidden_spans("hello ~[no close"))
+        fenced = "before\n\n```\n~[keep]\n```\n\nafter"
+        self.assertEqual(fenced, conceal_hidden_spans(fenced))
+        self.assertEqual("see `~[keep]` now", conceal_hidden_spans("see `~[keep]` now"))
+        self.assertEqual(
+            ["hello", "world"],
+            split_paragraphs(conceal_hidden_spans("hello\n\n~[secret]\n\nworld")),
+        )
+
+    def test_notify_drops_a_hidden_only_bubble(self) -> None:
+        notifier = LayerNotifier(Path("/tmp/aki-hidden-span.sock"))
+        self.assertFalse(notifier.notify("Aki", "~[secret]"))
+        self.assertTrue(notifier.notify("Aki", "hello ~[secret] there"))
 
 
 class LayerNotifierTests(unittest.IsolatedAsyncioTestCase):

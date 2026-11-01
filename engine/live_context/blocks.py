@@ -33,6 +33,16 @@ from .types import (
     _text,
 )
 
+_HIDDEN_SPAN_RULE = (
+    "<hidden-span>To keep text out of the Tokifactor chat window, wrap it as "
+    "`~[text]`. The window removes each complete span, markers included, before "
+    "drawing a bubble. A message or paragraph that contains only such spans is not "
+    "shown. `]` ends the span; do not put `]` inside, and do not place the span in "
+    "backticks or a code block. Newlines inside the span are allowed. The raw span "
+    "stays in the published message, so other members still receive it."
+    "</hidden-span>"
+)
+
 
 def _channel_turn_details(
     *,
@@ -180,6 +190,7 @@ def render_channel_policy(
         "already attached as multimodal input—do NOT call ViewImage on them. For "
         "images in older messages, call ViewImage on their path. To send an image, "
         "write `#[/absolute/path/to/image]` directly in your reply.</image-rules>",
+        _HIDDEN_SPAN_RULE,
     ]
     entries = list(emoji_entries)
     if entries:
@@ -239,6 +250,7 @@ def render_solo_policy(
         "already attached as multimodal input—do NOT call ViewImage on them. For "
         "images in older messages, call ViewImage on their path. To send an image, "
         "write `#[/absolute/path/to/image]` directly in your reply.</image-rules>",
+        _HIDDEN_SPAN_RULE,
         "<emoji-rules>When an emoji captures your thought and saves words, output "
         "`#[name:desc]` directly (no backticks, quotes, or code blocks). `name` MUST "
         "match the catalog when one is listed; `desc` is a brief semantic label "
@@ -424,6 +436,9 @@ def render_user_format_guard(user_name: str) -> str:
             f"4. **WAKE TAG CHECK**: In group chat, if your reply is meant for {name} "
             f"alone, ensure `@{name} ` (with a trailing space) is present in your reply "
             "so you do NOT accidentally wake every other agent in the room.",
+            "5. **HIDDEN SPAN (`~[text]`)**: Text inside `~[text]` is not shown in the "
+            "Tokifactor window. `]` ends the span. Write the span as plain text, not in "
+            "backticks or a code block. The raw span stays in the published message.",
         ]
     )
 

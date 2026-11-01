@@ -120,6 +120,7 @@ class UserOverlayMarkdownTests(unittest.TestCase):
         self.assertIn("IM BUBBLE SPLITTING", guard)
         self.assertIn("ZERO MARKDOWN BLOAT", guard)
         self.assertIn("WAKE TAG CHECK", guard)
+        self.assertIn("HIDDEN SPAN (`~[text]`)", guard)
         self.assertIn("`'\\n\\n'` (two newlines)", guard)
         self.assertIn("Master", guard)
         match = _FORMAT_GUARD_RE.search(guard)

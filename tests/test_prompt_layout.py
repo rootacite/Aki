@@ -29,6 +29,7 @@ class PromptLayoutTests(unittest.TestCase):
                 text,
             )
             self.assertIn("ZERO MARKDOWN BLOAT", text)
+            self.assertIn("HIDDEN SPAN (`~[text]`)", text)
             self.assertIn("`'\\n\\n'` (two newlines)", text)
             self.assertIn(user_name, text)
 

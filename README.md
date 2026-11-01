@@ -266,7 +266,7 @@ user   = user_message_prefix + "\n\n" + MQTT 信封
 | C1 | `channel-identity` | 回合内稳定 | 本地 profile 配置 | 告诉模型“我是谁”、自己的 id、别名、频道描述 |
 | C2 | `channel-context` | 回合内稳定 | 在线成员列表 | 告诉模型“谁在线”、如何 @ 人；成员描述标记为不可信 |
 | C3 | `tool-ownership` | 回合内稳定 | `EXCLUSIVE_TOOLS` / `DOMAIN_OWNERS` | 定义专属工具和任务域，禁止越权调用或模拟他人工具 |
-| C4 | `channel-policy` | 回合内稳定 | 频道协议 + 用户名 + emoji 目录 | 定义 mention 语法、执行锁、输出规则、隐私、图片、历史搜索、表情 |
+| C4 | `channel-policy` | 回合内稳定 | 频道协议 + 用户名 + emoji 目录 | 定义 mention 语法、执行锁、输出规则、隐私、图片、历史搜索、表情、`~[text]` 隐藏段 |
 | C5 | `channel-wake-routing` | 回合内稳定 | 用户名 + 成员别名 | 定义回复时如何控制 Agent-Wake 路由，避免广播风暴 |
 | C6 | `night-talk` | 条件性 | night-talk 回合 | 夜话模式只允许只读工具，禁止执行锁和写操作 |
 
@@ -294,7 +294,7 @@ Aki/Fuyu 使用完整版，Haru/Natsu 使用精简版。所有版本最后都是
 | `## Mods` | mods 是可信本地代码，用于工具、权限、UI、provider、生命周期等运行时能力 |
 | `## Hooks` | hooks 是工具调用、prompt、压缩、通知等前后的确定性钩子 |
 | `# Self-evolution` | 区分 memory、skills、harness configuration 三种演化方式；基础 prompt 由 Aki 自己维护 |
-| `# Format Guard` | 3 条固定输出规则：简短、`\n\n` 分气泡、禁止 Markdown |
+| `# Format Guard` | 4 条固定输出规则：简短、`\n\n` 分气泡、禁止 Markdown、`~[text]` 不在 Tokifactor 窗口显示 |
 | `{CORE_MEMORY}` | 核心记忆插入点，必须恰好出现一次 |
 
 Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
@@ -310,7 +310,7 @@ Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
 | `# Memory` | 记忆写入原则和秘密禁令 |
 | `# Channel behavior` | 群聊回复、`[NO_REPLY]`、handoff、隐私 |
 | `# Working style` | 回答顺序和工作习惯 |
-| `# Format Guard` | 同样的 3 条输出规则 |
+| `# Format Guard` | 同样的 4 条输出规则 |
 | `{CORE_MEMORY}` | 核心记忆插入点 |
 
 #### B. CORE_MEMORY
@@ -394,6 +394,7 @@ Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
 | `<privacy-rules>` | solo 内容严格私密，不得在群聊转述、引用、总结或暗示 |
 | `<chat-history-search>` | 隐藏工具 `search_chat_history(query, limit=8)`，scope 可选 `all` / `group` / `solo`；不得泄露 solo 结果，不得向用户提这个工具；群聊模式下不返回标记为 nsfw 的独处会话正文 |
 | `<image-rules>` | 当前回合图片已经作为多模态输入；旧图用 `ViewImage`；发图用 `#[/absolute/path]` |
+| `<hidden-span>` | `~[text]` 不画进 Tokifactor 窗口；第一个 `]` 结束；原文仍留在已发布消息里 |
 | `<emoji-catalog>` | 可选；用 `#[name:desc]`，必须匹配目录，tag 必须独立成句 |
 
 `channel-wake-routing` 固定四种路由：
@@ -506,12 +507,13 @@ solo 模型路由，不会回退到群聊模型。回到 solo 后恢复真实内
 | `## Wait Other` | 必须等待的成员列表；要求最终回复前调用一次 `wait_other` |
 | `## Wait User` | 仅用户触发的消息允许 `wait_user`；agent 触发或 night-talk 禁止 |
 
-`format-guard` 固定 4 条：
+`format-guard` 固定 5 条：
 
 1. 对话简短，跟随用户节奏，不主动长篇讲课。
 2. 多条想法用 `\n\n` 拆成 2 到 3 个聊天气泡。
 3. 禁止 Markdown 标题、列表、编号步骤、表格。
 4. 群聊中如果只回复用户，必须包含 `@<用户名> `，避免误唤醒其他 agent。
+5. `~[text]` 不在 Tokifactor 窗口显示；第一个 `]` 结束；原文仍留在已发布消息里。
 
 ### MQTT 用户消息信封
 
@@ -577,7 +579,7 @@ phase: final
 - **历史双轨**：Letta 自身的 conversation history 是一条线；`channel-transcript` 是频道全员可见历史，来源、附件、seq 更完整。
 - **不可信边界**：花名册描述、频道历史、solo 记忆、live context 都明确标记为 untrusted；`channel-identity` 的描述则标记为 `local-config`。
 - **权限多重强化**：执行锁、专属工具和唤醒规则在基础 prompt、`tool-ownership`、`channel-policy`、`turn-control`、`format-guard` 中多处重复，这是为了降低模型漏规则的概率。
-- **格式守卫有重复**：基础 prompt 里的 Format Guard 是 3 条；user prefix 的 `format-guard` 是 4 条，多了 wake tag 检查。这是有意的“静态底线 + 回合末强化”。
+- **格式守卫有重复**：基础 prompt 里的 Format Guard 是 4 条；user prefix 的 `format-guard` 是 5 条，多了 wake tag 检查。这是有意的“静态底线 + 回合末强化”。
 - **记忆不是即时生效**：核心记忆修改只影响下一次编译，不会改变当前回合的 system prompt。
 - **Letta reminder 去重**：patch `0008` 会剥离环境、agent info、MCP server、permission mode 四类 Letta 自动 reminder，因为 Aki 已经用 `runtime-context` / `live-context` / `channel-policy` 自己渲染了这些信息；其他功能性 reminder 保留。
 

@@ -50,7 +50,9 @@ from engine.live_context import (
     render_new_message,
     render_channel_wake_routing,
     render_channel_transcript,
+    render_solo_policy,
     render_solo_transcript,
+    render_user_format_guard,
     render_live_context,
     render_user_insertion,
     render_user_insertions,
@@ -289,6 +291,10 @@ class ChannelContextTests(unittest.TestCase):
         self.assertTrue(policy.startswith(f"<{CHANNEL_POLICY_TAG}"))
         self.assertIn("Your final text output is published directly to the channel.", policy)
         self.assertIn("To stay silent, output exact token: [NO_REPLY]", policy)
+        self.assertIn("<hidden-span>", policy)
+        self.assertIn("`~[text]`", policy)
+        self.assertIn("<hidden-span>", render_solo_policy(user_name="Master"))
+        self.assertIn("HIDDEN SPAN", render_user_format_guard("Master"))
         self.assertTrue(turn.startswith(f"# {TURN_CONTROL_TAG}"))
         self.assertIn("## Turn Action & Permissions", turn)
         self.assertIn('<wait-other targets="Aki,Fuyu">', turn)

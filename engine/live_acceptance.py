@@ -196,6 +196,7 @@ def _validate_block(name: str, block: str, errors: list[str]) -> None:
             "CONVERSATIONAL BREVITY (CRITICAL)" not in block
             or "IM BUBBLE SPLITTING" not in block
             or "ZERO MARKDOWN BLOAT" not in block
+            or "HIDDEN SPAN" not in block
         ):
             errors.append("format-guard body is missing")
 
@@ -248,6 +249,8 @@ def analyze_request(
             errors.append("solo overlay is missing emoji tag rules")
         if "#[/absolute/path/to/image]" not in all_text:
             errors.append("solo overlay is missing image send rules")
+        if "~[text]" not in all_text:
+            errors.append("solo overlay is missing the hidden span rule")
         if "acquire_execution_lock" not in all_text:
             errors.append("solo overlay is missing the execution lock rule")
     else:

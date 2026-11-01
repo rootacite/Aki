@@ -435,6 +435,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("<solo-policy", overlay)
         self.assertIn("#[name:desc]", overlay)
         self.assertIn("#[/absolute/path/to/image]", overlay)
+        self.assertIn("`~[text]`", overlay)
         self.assertIn("# wait-user", overlay)
         self.assertNotIn("# solo-transcript", overlay)
         self.assertNotIn("<channel-context>", overlay)

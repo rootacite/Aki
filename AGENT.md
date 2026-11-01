@@ -395,6 +395,12 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   执行锁或多模态输入。Tokifactor 用 `scripts/sync-emoji-assets.py` 把素材缩放到最长边
   512px 后生成 Compose Resources 与 `catalog.json`；前端只按 `name` 匹配，并保留对缺失
   或错误 desc 的容错。前端在标签处切段，表情单独渲染为无气泡透明消息。
+- 隐藏段：`~[text]` 不画进 Tokifactor 聊天气泡、图片说明、成员最近消息和系统通知预览。
+  第一个 `]` 结束该段，段内可以换行；没闭合的 `~[` 保持原样。行内代码和围栏代码里的
+  写法保持字面量。只含隐藏段的消息或段落不生成气泡。原文仍留在频道记录里，其他成员
+  读到的 transcript 包含这段文字。群聊 `<channel-policy>`、独处 `<solo-policy>`、基础
+  Format Guard 和群聊 user-role `format-guard` 都写明这条规则。桌面气泡在拆段前去掉
+  同一段，避免隐藏文字从通知里漏出来。
 - 独处模式：`akictl solo <成员>` 通过群 control 握手。目标成员切换到由群 magic 与
   memberId 派生的 solo magic，但保持 MQTT session/client id 与订阅不变；其他成员继续
   正常运行。目标成员的群 transcript 在独处期间冻结，作为稳定 system overlay
@@ -479,7 +485,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
     最近一次结束的独处标 `just_ended`。`# solo-memories` 只在一次独处结束时变化。
   - 独处 stable system overlay：`<channel-identity> → <tool-ownership> →
     <solo-policy> → # solo-mode → # solo-memories → 冻结的 # channel-transcript`。
-    `solo-policy` 保留表情、发图、执行锁、隐私和历史搜索；不包含花名册、唤醒路由和
+    `solo-policy` 保留表情、发图、执行锁、隐私、历史搜索和 `~[text]` 隐藏段；不包含花名册、唤醒路由和
     `@` 交接。冻结群聊记录最多 16K token。
   - `# format-guard` 在 base prompt 中保留静态规则，并在每个群聊 turn 的 user-role
     overlay 末尾完整重复一次。独处不再重复这份 user-role format-guard。
@@ -568,8 +574,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - akid 后端自动把“最终消息”写入该通道，不提供模型工具：本地 turn 完成后推送 Aki 气泡；
   频道 turn 的最终回复在成功发布后推送；其他成员的 `akid.v1` 最终消息按发送者映射到
   Aki/Fuyu/Haru/Natsu 主题。最终消息先按 tokifactor 的 `splitAgentParagraphs` 规则拆分：
-  空行分段、连续空行合并、围栏代码块内部不拆、代码块前后文本各自成段；每个自然段生成一个
-  气泡，再按 80 字符折叠空白预览。进度、工具、审批、控制消息以及重放的积压消息不通知。
+  空行分段、连续空行合并、围栏代码块内部不拆、代码块前后文本各自成段；拆段前先去掉
+  `~[text]` 隐藏段。每个剩余自然段生成一个气泡，再按 80 字符折叠空白预览。进度、工具、
+  审批、控制消息以及重放的积压消息不通知。
   `aki.health` / `aki.status` 的 `layer.notifier` 暴露发送计数和错误。
 - 用户活跃状态卡由 `qml/PresencePanel.qml` 实现：显示 akid 判定的活跃/非活跃、连续活跃
   时长、连续未输入时长和是否达到离开阈值。akid 每次 presence 采样后推送快照；前端在两次
