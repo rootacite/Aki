@@ -9,6 +9,7 @@ from engine.live_context import (
     render_live_context,
     render_runtime_context,
     render_solo_memories,
+    render_solo_format_guard,
     render_solo_mode,
     render_solo_transcript,
     render_turn_control,
@@ -126,6 +127,18 @@ class UserOverlayMarkdownTests(unittest.TestCase):
         match = _FORMAT_GUARD_RE.search(guard)
         self.assertIsNotNone(match)
         self.assertEqual(_FORMAT_GUARD_RE.sub("", guard).strip(), "")
+
+    def test_solo_format_guard_relaxes_length_without_im_context(self) -> None:
+        guard = render_solo_format_guard("Master")
+        self.assertTrue(guard.startswith("# solo-format-guard\n\n"))
+        self.assertIn("SHORT SENTENCES BY DEFAULT (短句为主)", guard)
+        self.assertIn("There is no fixed reply-length limit", guard)
+        self.assertIn("Do not cap the number of bubbles", guard)
+        self.assertIn("ZERO MARKDOWN BLOAT", guard)
+        self.assertIn("HIDDEN SPAN (`~[text]`)", guard)
+        self.assertIn("Master", guard)
+        for forbidden in ("real-time IM chatroom", "IM BUBBLE", "CRITICAL", "2 or 3"):
+            self.assertNotIn(forbidden, guard)
 
 
 if __name__ == "__main__":

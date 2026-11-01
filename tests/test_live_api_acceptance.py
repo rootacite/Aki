@@ -15,6 +15,10 @@ from engine.live_context import (
     ProcessInfo,
     render_channel_transcript,
     render_live_context,
+    render_solo_format_guard,
+    render_solo_mode,
+    render_solo_policy,
+    render_solo_wait_user,
     render_turn_control,
     render_user_format_guard,
 )
@@ -72,6 +76,37 @@ def request_event(seq: int, *, request_id: str | None = None) -> dict:
     }
 
 
+def solo_prompt(seq: int) -> str:
+    member = ChannelMember(id="aki", name="Aki", is_self=True)
+    transcript = render_channel_transcript(
+        [ChannelTranscriptEntry(seq=seq, sender="Master", sender_id="master", text="group")],
+        frozen=True,
+    )
+    live = render_live_context(
+        LiveContextSnapshot(captured_at=datetime(2026, 10, 30, 12, 0, tzinfo=timezone.utc)),
+        memory_dir="/tmp/memfs/agent/memory",
+        mcp_servers=("tavily",),
+        mcp_tools=[{"name": "mcp__tavily__search"}],
+    )
+    mode = render_solo_mode(
+        member_name="Aki",
+        user_name="Master",
+        session_id="solo-live",
+        scene="private room",
+    )
+    return "\n\n".join(
+        [
+            transcript,
+            mode,
+            live,
+            render_solo_format_guard("Master"),
+            render_solo_wait_user(user_name="Master"),
+            f"[akid MQTT channel message]\nseq: {seq}\n"
+            "sender: Master\nsource: user\nphase: final\n\nhello",
+        ]
+    )
+
+
 def terminal(request_id: str) -> dict:
     return {"event": "response_end", "request_id": request_id}
 
@@ -85,6 +120,25 @@ class LiveAcceptanceAnalyzerTests(unittest.TestCase):
         self.assertEqual(report["status"], "PASS", report)
         self.assertEqual(report["received_turns"], 5)
         self.assertEqual(report["user_seqs"], [1, 2, 3, 4, 5])
+
+    def test_accepts_solo_overlay_with_relaxed_format_guard(self) -> None:
+        event = {
+            "event": "request",
+            "request_id": "req-solo",
+            "payload": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "# Format Guard\n\n"
+                        + render_solo_policy(user_name="Master")
+                        + "\n\n# channel-transcript\nfrozen",
+                    },
+                    {"role": "user", "content": solo_prompt(1)},
+                ]
+            },
+        }
+        report = analyze_events([event, terminal("req-solo")], expected_turns=1)
+        self.assertEqual(report["status"], "PASS", report)
 
     def test_detects_duplicate_and_missing_blocks(self) -> None:
         events = [request_event(1), terminal("req-1")]

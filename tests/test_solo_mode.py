@@ -18,6 +18,7 @@ from engine.live_context import (
     apply_solo_mode,
     apply_solo_transcript,
     render_channel_transcript,
+    render_solo_format_guard,
     render_turn_control,
     render_solo_mode,
     render_solo_transcript,
@@ -443,11 +444,17 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("<channel-policy", overlay)
         self.assertNotIn("# turn-control", overlay)
         self.assertNotIn("# format-guard", overlay)
+        self.assertIn("# solo-format-guard", overlay)
+        self.assertIn("SHORT SENTENCES BY DEFAULT (短句为主)", overlay)
         self.assertLess(
             overlay.index("# solo-mode"), overlay.index("# channel-transcript")
         )
         self.assertLess(
-            overlay.index("# channel-transcript"), overlay.index("# wait-user")
+            overlay.index("# channel-transcript"),
+            overlay.index("# solo-format-guard"),
+        )
+        self.assertLess(
+            overlay.index("# solo-format-guard"), overlay.index("# wait-user")
         )
         self.assertEqual(self.server.backend.switched, ["solo-agent-aki"])
 

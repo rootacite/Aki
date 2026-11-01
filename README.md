@@ -272,7 +272,7 @@ user   = user_message_prefix + "\n\n" + MQTT 信封
 
 #### A. 基础 system prompt
 
-Aki/Fuyu 使用完整版，Haru/Natsu 使用精简版。所有版本最后都是 `# Format Guard` 加 `{CORE_MEMORY}`。
+Aki/Fuyu 使用完整版，Haru/Natsu 使用精简版。所有版本最后都是模式中性的 `# Format Guard` 加 `{CORE_MEMORY}`；群聊和独处分别在回合级 overlay 中补齐自己的格式约束。
 
 完整版的主要固定段如下：
 
@@ -294,7 +294,7 @@ Aki/Fuyu 使用完整版，Haru/Natsu 使用精简版。所有版本最后都是
 | `## Mods` | mods 是可信本地代码，用于工具、权限、UI、provider、生命周期等运行时能力 |
 | `## Hooks` | hooks 是工具调用、prompt、压缩、通知等前后的确定性钩子 |
 | `# Self-evolution` | 区分 memory、skills、harness configuration 三种演化方式；基础 prompt 由 Aki 自己维护 |
-| `# Format Guard` | 4 条固定输出规则：简短、`\n\n` 分气泡、禁止 Markdown、`~[text]` 不在 Tokifactor 窗口显示 |
+| `# Format Guard` | 4 条跨模式规则：短句为主且不设固定长度、`\n\n` 分气泡、禁止 Markdown、`~[text]` 不在 Tokifactor 窗口显示 |
 | `{CORE_MEMORY}` | 核心记忆插入点，必须恰好出现一次 |
 
 Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
@@ -310,7 +310,7 @@ Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
 | `# Memory` | 记忆写入原则和秘密禁令 |
 | `# Channel behavior` | 群聊回复、`[NO_REPLY]`、handoff、隐私 |
 | `# Working style` | 回答顺序和工作习惯 |
-| `# Format Guard` | 同样的 4 条输出规则 |
+| `# Format Guard` | 同样的 4 条跨模式输出规则 |
 | `{CORE_MEMORY}` | 核心记忆插入点 |
 
 #### B. CORE_MEMORY
@@ -424,6 +424,7 @@ If nothing to say, output [NO_REPLY].
 | D2 | `live-context` / `runtime-context` | 始终 | 提供 MemFS、MCP、时间、窗口、进程、shell 历史、截图、生活账本 |
 | D3 | `turn-control` | 群聊 | 当前回合的动作权限、回复预算、执行归属、等待规则。独处换成 `# wait-user` |
 | D4 | `format-guard` | 群聊 | 紧贴用户输入的输出格式强约束。独处不重复这一份 |
+| D5 | `solo-format-guard` | 独处 | 宽松格式约束：短句为主、无固定长度、不限制气泡数；放在 `wait-user` 前 |
 | E | MQTT 信封 / 用户文本 | 始终 | 真正的用户消息 |
 
 排序逻辑：
@@ -515,6 +516,13 @@ solo 模型路由，不会回退到群聊模型。回到 solo 后恢复真实内
 4. 群聊中如果只回复用户，必须包含 `@<用户名> `，避免误唤醒其他 agent。
 5. `~[text]` 不在 Tokifactor 窗口显示；第一个 `]` 结束；原文仍留在已发布消息里。
 
+独处使用独立的 `solo-format-guard`，固定 4 条：
+
+1. 短句为主，跟随用户节奏；不设固定回复长度。
+2. 不同想法可用 `\n\n` 分气泡，不限制气泡数量。
+3. 禁止 Markdown 标题、列表、编号步骤、表格。
+4. `~[text]` 不在 Tokifactor 窗口显示；第一个 `]` 结束；原文仍留在已发布消息里。
+
 ### MQTT 用户消息信封
 
 真正的 user content 大致是：
@@ -579,7 +587,7 @@ phase: final
 - **历史双轨**：Letta 自身的 conversation history 是一条线；`channel-transcript` 是频道全员可见历史，来源、附件、seq 更完整。
 - **不可信边界**：花名册描述、频道历史、solo 记忆、live context 都明确标记为 untrusted；`channel-identity` 的描述则标记为 `local-config`。
 - **权限多重强化**：执行锁、专属工具和唤醒规则在基础 prompt、`tool-ownership`、`channel-policy`、`turn-control`、`format-guard` 中多处重复，这是为了降低模型漏规则的概率。
-- **格式守卫有重复**：基础 prompt 里的 Format Guard 是 4 条；user prefix 的 `format-guard` 是 5 条，多了 wake tag 检查。这是有意的“静态底线 + 回合末强化”。
+- **格式守卫分层**：基础 prompt 的 Format Guard 是 4 条跨模式规则；群聊 user prefix 的 `format-guard` 是 5 条严格规则，独处 user prefix 的 `solo-format-guard` 是 4 条宽松规则。这是有意的“公共静态底线 + 模式级动态覆盖”。
 - **记忆不是即时生效**：核心记忆修改只影响下一次编译，不会改变当前回合的 system prompt。
 - **Letta reminder 去重**：patch `0008` 会剥离环境、agent info、MCP server、permission mode 四类 Letta 自动 reminder，因为 Aki 已经用 `runtime-context` / `live-context` / `channel-policy` 自己渲染了这些信息；其他功能性 reminder 保留。
 

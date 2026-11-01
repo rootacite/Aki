@@ -41,6 +41,8 @@ RUNTIME_CONTEXT_TAG = "runtime-context"
 
 FORMAT_GUARD_TAG = "format-guard"
 
+SOLO_FORMAT_GUARD_TAG = "solo-format-guard"
+
 SOLO_MODE_TAG = "solo-mode"
 
 SOLO_TRANSCRIPT_TAG = "solo-transcript"
@@ -146,6 +148,8 @@ _SOLO_MEMORIES_RE = re.compile(
 )
 
 _FORMAT_GUARD_RE = _markdown_block_re(FORMAT_GUARD_TAG)
+
+_SOLO_FORMAT_GUARD_RE = _markdown_block_re(SOLO_FORMAT_GUARD_TAG)
 
 _ZSH_EXTENDED_RE = re.compile(
     r"^: (?P<timestamp>\d+):(?P<duration>\d+);(?P<command>.*)$"

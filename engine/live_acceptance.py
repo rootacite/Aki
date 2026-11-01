@@ -26,13 +26,15 @@ BLOCK_ORDER = (
     "solo-transcript",
     "context",
     "turn-control",
+    "solo-format-guard",
     "format-guard",
     "wait-user",
 )
 
 _BLOCK_RE = re.compile(
     r"(?m)^# (solo-mode|solo-memories|channel-transcript|solo-transcript|"
-    r"live-context|runtime-context|turn-control|format-guard|wait-user)\b[^\n]*$"
+    r"live-context|runtime-context|turn-control|solo-format-guard|format-guard|"
+    r"wait-user)\b[^\n]*$"
 )
 _SEQ_RE = re.compile(r"(?m)^seq:[ \t]*(\d+)[ \t]*$")
 _SOURCE_RE = re.compile(r"(?m)^source:[ \t]*(user|agent)[ \t]*$")
@@ -42,7 +44,7 @@ _OLD_ATTR_RE = re.compile(
 )
 _OLD_ENVELOPE_RE = re.compile(
     r"<(?:turn-control|channel-transcript|solo-memories|solo-mode|"
-    r"solo-transcript|live-context|runtime-context|format-guard)\b"
+    r"solo-transcript|live-context|runtime-context|solo-format-guard|format-guard)\b"
 )
 
 
@@ -199,6 +201,21 @@ def _validate_block(name: str, block: str, errors: list[str]) -> None:
             or "HIDDEN SPAN" not in block
         ):
             errors.append("format-guard body is missing")
+    elif name == "solo-format-guard":
+        if (
+            "SHORT SENTENCES BY DEFAULT" not in block
+            or "BUBBLE SPLITTING" not in block
+            or "ZERO MARKDOWN BLOAT" not in block
+            or "HIDDEN SPAN" not in block
+        ):
+            errors.append("solo-format-guard body is missing")
+        for forbidden in (
+            "real-time IM chatroom",
+            "CONVERSATIONAL BREVITY (CRITICAL)",
+            "2 or 3",
+        ):
+            if forbidden in block:
+                errors.append(f"solo-format-guard still contains {forbidden!r}")
 
 
 def analyze_request(
@@ -233,6 +250,10 @@ def analyze_request(
     if solo:
         if "turn-control" in names or "format-guard" in names:
             errors.append("solo overlay still has group turn-control or format-guard")
+        if "solo-format-guard" not in names:
+            errors.append("solo-format-guard is missing")
+        elif len(names) < 2 or names[-2] != "solo-format-guard":
+            errors.append("solo-format-guard must be the second-last solo block")
         if "solo-transcript" in names:
             errors.append("solo overlay duplicates the solo conversation")
         if "# channel-transcript" not in all_text:
