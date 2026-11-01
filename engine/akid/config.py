@@ -10,6 +10,7 @@ from pathlib import Path
 from engine.aki_config import ComfyUI, SoloBackend, ToolPolicy
 from engine.layer_process import default_layer_binary
 from engine.avatar import default_avatar_path
+from engine.tool_ownership import is_disabled_tool
 from engine.channel import (
     DEFAULT_MAGIC,
     TEXT_TOPIC,
@@ -188,8 +189,10 @@ def build_letta_command(config: GatewayConfig) -> list[str]:
     policy = config.tool_policy
     if policy.explicit:
         command.extend(["--toolset", policy.toolset])
-        if policy.allow:
-            command.extend(["--tools", ",".join(policy.allow)])
-        if policy.deny:
-            command.extend(["--disallowedTools", ",".join(policy.deny)])
+        allow = [name for name in policy.allow if not is_disabled_tool(name)]
+        deny = [name for name in policy.deny if not is_disabled_tool(name)]
+        if allow:
+            command.extend(["--tools", ",".join(allow)])
+        if deny:
+            command.extend(["--disallowedTools", ",".join(deny)])
     return command

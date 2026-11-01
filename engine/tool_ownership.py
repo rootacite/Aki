@@ -13,7 +13,13 @@ from engine.image_generation import ASPECT_RATIOS, MAX_IMAGES, MAX_PROMPT_CHARS
 
 TOOL_OWNERSHIP_TAG = "tool-ownership"
 
+DISABLED_TOOL_NAMES = frozenset({"tokifactor_send_image"})
+
 OWNER_LABELS: dict[str, str] = {"aki": "Aki", "haru": "Haru", "natsu": "Natsu"}
+
+
+def is_disabled_tool(tool_name: str) -> bool:
+    return tool_name in DISABLED_TOOL_NAMES
 
 TOOL_OWNERSHIP_DENIED = "TOOL_OWNERSHIP_DENIED"
 
@@ -378,9 +384,8 @@ EXCLUSIVE_TOOLS: tuple[ExclusiveTool, ...] = (
             "require the execution lock, but may require user approval. The "
             "result contains only absolute local paths, byte counts, and MIME "
             "types; it never embeds image bytes. Exclusive to Haru. To share a "
-            "returned path in the same channel message as text, write "
-            "`#[/absolute/path]` in the final reply; use tokifactor_send_image "
-            "only for a standalone image-only message. Files under /tmp are ephemeral. "
+            "returned path in a channel message, write `#[/absolute/path]` in the "
+            "final reply. Files under /tmp are ephemeral. "
             f"Prompts are limited to {MAX_PROMPT_CHARS} characters."
         ),
         parameters=_parameters(

@@ -5510,59 +5510,19 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(server.writable.revision, 0)
         self.assertEqual(server.writable.status()["registered"], [])
 
-    async def test_tokifactor_image_external_tool_auto_approves_and_sends(self) -> None:
+    async def test_tokifactor_image_tool_is_hidden_and_disabled(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         await wait_until(lambda: server._external_tools_registered)
+        names = [tool["name"] for tool in server._external_tools()]
+        self.assertNotIn("tokifactor_send_image", names)
         image_path = self.root / "pixel.png"
-        image_path.write_bytes(
-            __import__("base64").b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-            )
-        )
+        image_path.write_bytes(PNG_1X1)
         result = await channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
         self.assertFalse(result.events_of("approval"))
-        self.assertEqual(len(fake_channel.images), 1)
-        self.assertEqual(fake_channel.images[0]["caption"], "fake caption")
-        self.assertEqual(fake_channel.images[0]["mime"], "image/png")
-        self.assertIn("external tool result: sent tokifactor image", result.final_text)
-
-    async def test_tokifactor_image_external_tool_rejects_unregistered_source(self) -> None:
-        fake_channel = FakeChannel()
-        server = await self.start_server(channel=fake_channel)
-        await wait_until(lambda: server._external_tools_registered)
-        outside = Path(tempfile.mkdtemp(prefix="akid-no-image-", dir=str(Path.home() / ".local" / "share")))
-        image_path = outside / "pixel.png"
-        image_path.write_bytes(
-            __import__("base64").b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-            )
-        )
-        try:
-            result = await channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
-            self.assertEqual(fake_channel.images, [])
-            self.assertIn("registered writable directory", result.final_text)
-        finally:
-            await asyncio.to_thread(__import__("shutil").rmtree, outside, True)
-
-    async def test_tokifactor_image_external_tool_can_require_approval(self) -> None:
-        fake_channel = FakeChannel()
-        server = await self.start_server(channel=fake_channel, image_require_approval=True)
-        await wait_until(lambda: server._external_tools_registered)
-        image_path = self.root / "pixel-approval.png"
-        image_path.write_bytes(
-            __import__("base64").b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
-            )
-        )
-        task = asyncio.create_task(
-            channel_send(server, f"EXTERNAL_IMAGE:{image_path}")
-        )
-        approval = await wait_for_approval(server)
-        self.assertEqual(approval["tool_name"], "tokifactor_send_image")
-        await respond_approval(server, approval["approval_id"], allow=True)
-        await task
-        self.assertEqual(len(fake_channel.images), 1)
+        self.assertEqual(fake_channel.images, [])
+        self.assertIn("tokifactor_send_image is disabled", result.final_text)
+        self.assertIn("#[/absolute/path/to/image]", result.final_text)
 
     async def test_tokifactor_file_external_tool_records_path_without_extra_turn(self) -> None:
         fake_channel = FakeChannel()
@@ -5870,7 +5830,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             await respond_approval(server, approval["approval_id"], allow=True)
             result = await task
             self.assertIn("image generated", result.final_text)
-            self.assertIn("tokifactor_send_image", result.final_text)
+            self.assertIn("#[/absolute/path]", result.final_text)
             files = list(output_dir.glob("image-*.png"))
             self.assertEqual(len(files), 1)
             self.assertEqual(files[0].read_bytes(), PNG_1X1)

@@ -7,7 +7,7 @@ import re
 import shutil
 from collections import deque
 from engine.channel_prompt import render_username_template
-from engine.tool_ownership import tools_for_profile
+from engine.tool_ownership import is_disabled_tool, tools_for_profile
 from .constants import (
     ACQUIRE_EXECUTION_LOCK_TOOL,
     CAMERA_TOOL,
@@ -17,7 +17,6 @@ from .constants import (
     SCREENSHOT_TOOL,
     SEARCH_CHAT_HISTORY_TOOL,
     TOKIFACTOR_FILE_TOOL,
-    TOKIFACTOR_IMAGE_TOOL,
     WAIT_OTHER_TOOL_SCHEMA,
     WAIT_USER_TOOL_SCHEMA,
 )
@@ -75,7 +74,6 @@ class BackendMixin:
         if self.config.screenshot_enabled and self._screenshot_backends():
             tools.append(SCREENSHOT_TOOL)
         if self.channel is not None:
-            tools.append(TOKIFACTOR_IMAGE_TOOL)
             tools.append(TOKIFACTOR_FILE_TOOL)
             tools.append(WAIT_USER_TOOL_SCHEMA)
         if (
@@ -89,6 +87,7 @@ class BackendMixin:
             )
             tools.append(schema)
         tools.extend(self._mcp_tools)
+        tools = [tool for tool in tools if not is_disabled_tool(tool["name"])]
         policy = self.config.tool_policy
         if policy.explicit:
             tools = [tool for tool in tools if tool["name"] in policy.allow_set]

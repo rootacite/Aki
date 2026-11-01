@@ -219,7 +219,6 @@ def render_execution_lock_mod() -> str:
     external_tools = json.dumps(
         sorted(
             {
-                "tokifactor_send_image",
                 "tokifactor_send_file",
                 "camera_take_photo",
                 "desktop_take_screenshot",

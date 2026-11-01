@@ -57,9 +57,7 @@ class ExecutionPolicyTests(unittest.TestCase):
         self.assertIn(
             "generate_image", execution_policy_payload()["lock_exempt_tools"]
         )
-        self.assertFalse(is_read_only_tool("tokifactor_send_image"))
-        self.assertFalse(requires_execution_lock("tokifactor_send_image"))
-        self.assertIn(
+        self.assertNotIn(
             "tokifactor_send_image",
             execution_policy_payload()["lock_exempt_tools"],
         )
@@ -81,7 +79,8 @@ class ExecutionPolicyTests(unittest.TestCase):
             self.assertIn("`Grep`, `Glob`, `LS`", prompt)
             self.assertNotIn("ListDir", prompt)
             self.assertIn("requires the device-wide execution lock", prompt)
-            self.assertIn("`tokifactor_send_image`, and `tokifactor_send_file` are explicitly lock-exempt", prompt)
+            self.assertIn("`generate_image` and `tokifactor_send_file` are explicitly lock-exempt", prompt)
+            self.assertNotIn("tokifactor_send_image", prompt)
             self.assertIn(
                 "Manual lock release is intentionally unavailable", prompt
             )

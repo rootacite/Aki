@@ -317,8 +317,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   已注册桌面截图、相机、频道发图与发文件、MiniMax 文生图 `generate_image`，并启用桌面实况。
   文生图走 `[upstream.minimax]` 与 `[image]`，固定 `image-01`、base64 回传和
   `/tmp/aki/images` 输出；生成结果只返回路径与元数据，分享时再调用
-  `tokifactor_send_image`。`generate_image`、`tokifactor_send_image` 与
-  `tokifactor_send_file` 都是非只读工具，但显式免执行锁，不需要先调用
+  `#[/absolute/path]`。`generate_image` 与 `tokifactor_send_file` 都是非只读工具，
+  但显式免执行锁，不需要先调用
   `acquire_execution_lock`；生图审批仍由 `[image] require_approval` 控制。
   `generate_image` 还是 Haru 的
   exclusive tool：其他成员不会注册该工具，会在 `<tool-ownership>` 中看到
@@ -378,8 +378,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   才会保留 8 MiB 以内的原图，超过 8 MiB 且压缩失败则拒绝。Aki 把
   入站图片存入各 profile 的 `~/.aki/channel-media/`，频道历史和 system prompt 只记录
   `{"name","path"}`；只有当前触发 turn 的新消息图片作为 base64 多模态输入。纯图片只记录
-  不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片，不为此调用
-  `tokifactor_send_image`。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
+  不唤醒。Agent 用最终正文 `#[/absolute/path]` 内嵌图片。Agent 触发的临时 turn 必须通过 conversation 快照回滚，确保
   user role 中新增的多模态 base64 和后续消息全部消失。
 - 频道文件：`tokifactor_send_file` 读取任意可读的绝对路径文件，不要求所在目录可写或已注册，
   按 tokifactor 的 `tokifactor/file` 分片协议加密发布。发送成功后在当前群聊

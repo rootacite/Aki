@@ -177,7 +177,7 @@ Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和
 
 Haru profile 使用 `userdata3/`、`aki-haru` provider 和 7723 proxy 端口，默认模型句柄
 是 `aki-haru/gemini-3.8-flash`。她的 `[tools]` 段显式把工具收窄为 `Read,Write,Edit,ViewImage,
-Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_image,tokifactor_send_file,generate_image,comfyui_startup,comfyui_generate,comfyui_end`，并把 `Bash/exec_command/write_stdin` 与子代理工具
+Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot,camera_take_photo,tokifactor_send_file,generate_image,comfyui_startup,comfyui_generate,comfyui_end`，并把 `Bash/exec_command/write_stdin` 与子代理工具
 从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
 bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
@@ -882,27 +882,9 @@ python3 scripts/sync-emoji-assets.py --tokifactor ../tokifactor
 Tokifactor 输入框左侧的表情按钮会按成员分组展示全部表情包；用户选择后直接发送规范
 `#[name:desc]` 文本，因此智能体和其他客户端都能理解，同时用户自己的消息也渲染为表情。
 
-Agent 可以用最终正文中的 `#[/absolute/path/to/image]` 内嵌图片；图片会作为同一消息的附件
-发布并从正文移除。不要为这种带正文图片消息调用 `tokifactor_send_image`。
-
-akid 通过 Letta external tool 协议注册独立工具 `tokifactor_send_image`。Agent 可以调用它：
-
-```json
-{"path": "/tmp/example.png", "caption": "图片名称（可选）"}
-```
-
-- 只接受 PNG、JPEG、GIF、WebP；超过 2 MiB 的图优先压缩到 2 MiB 以下，原始文件最大 64 MiB。
-- 图片路径必须在 `/tmp`、`~/.local/share/tmp` 或用户已注册的可写目录内。
-- 使用 tokifactor `PictureChunk` 协议加密分片发布到 `tokifactor/picture`。
-- 可选 caption 会加密为这张图片的名称，并作为纯图片消息写入发送者自己的频道历史。
-- 该工具只用于纯图片消息；正文与图片同条发送应使用 `#[/absolute/path]`。
-- `tokifactor_send_image` 是非只读工具，但显式**不占用整机执行锁**，不需要先调用
-  `acquire_execution_lock`。
-- 工具默认自动通过；如需审批，可设置
-  `AKI_TOKIFACTOR_IMAGE_REQUIRE_APPROVAL=1` 或启动时加
-  `--tokifactor-image-require-approval`。启用后本地客户端或频道
-  `akid-approve` 都可以批准。
-- 返回 `transfer_id`、字节数、分片数和 MIME 类型。
+Agent 可以用最终正文中的 `#[/absolute/path/to/image]` 发送图片；图片会作为同一消息的附件
+发布并从正文移除。`tokifactor_send_image` 已全局禁用并从工具列表隐藏；纯图片和带正文图片
+都统一使用 `#[/absolute/path]`。
 
 `tokifactor_send_file` 用于发送任意本地文件：
 
@@ -933,9 +915,9 @@ Haru 通过 Letta external tool 注册 `generate_image`，后端调用 MiniMax
 - 请求固定使用 `response_format=base64`，避免让 akid 再下载一次远端 URL。图片解码后会校验
   PNG/JPEG/GIF/WebP 文件头和大小，再写入 `/tmp/aki/images/`；目录 `0700`、文件 `0600`。
 - 工具结果只返回本地路径、字节数、MIME、模型和宽高比，不返回 base64 或 API key。Haru
-  需要分享时继续调用 `tokifactor_send_image`，不会把图片塞进模型上下文。
+  需要分享时在最终正文写 `#[/absolute/path]`，不会把图片塞进模型上下文。
 - `generate_image` 是非只读工具，但显式**不占用整机执行锁**，不需要先调用
-  `acquire_execution_lock`；后续调用 `tokifactor_send_image` 分享图片同样免锁。
+  `acquire_execution_lock`。
   `require_approval` 默认 `true`，审批事件里的 `tool_name` 是 `generate_image`、
   `channel` 是 `image`。
 - `generate_image` 是 Haru 的专属工具，和日程工具之于 Aki 一样由
@@ -1015,8 +997,7 @@ akid 通过 Letta external tool 注册 `camera_take_photo`。当前只支持单�
 - 默认使用 `ffmpeg` 从 V4L2 设备抓取一帧 JPEG，默认 `/dev/video0`、1280×720。
 - 只接受 `/dev/videoN` 字符设备；图片输出到 `/tmp/aki/camera/`。
 - 工具结果只包含路径、字节数、实际宽高、设备路径和 MIME，不包含图片内容；
-  Agent 需要查看时自行 `Read`/`ViewImage`，也可以继续用
-  `tokifactor_send_image` 发送该路径。
+  Agent 需要查看时自行 `Read`/`ViewImage`；发送时在最终正文写 `#[/absolute/path]`。
 - **始终需要用户审批**。审批事件里的 `tool_name` 是 `camera_take_photo`，
   `channel` 是 `camera`；拒绝或超时不会打开摄像头。
 - 文件位于 `/tmp`，重启后可能被系统清理。

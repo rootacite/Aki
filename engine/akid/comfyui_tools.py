@@ -114,6 +114,6 @@ class ComfyUIToolsMixin:
             "comfyui image generated "
             f"path={result['path']} bytes={result['bytes']} mime={result['mime']} "
             f"seed={result['seed']} prompt_id={result['prompt_id']} "
-            f"images={result['image_count']}. Use tokifactor_send_image or "
-            f"#[/absolute/path] to share it.",
+            f"images={result['image_count']}. Use #[/absolute/path] in your reply "
+            "to share it.",
         )

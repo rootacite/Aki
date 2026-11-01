@@ -179,8 +179,7 @@ def render_channel_policy(
         '{"name":"image name","path":"local path"}. Images in the current turn are '
         "already attached as multimodal input—do NOT call ViewImage on them. For "
         "images in older messages, call ViewImage on their path. To send an image, "
-        "write `#[/absolute/path/to/image]` directly in your reply (do NOT call "
-        "tokifactor_send_image).</image-rules>",
+        "write `#[/absolute/path/to/image]` directly in your reply.</image-rules>",
     ]
     entries = list(emoji_entries)
     if entries:
@@ -239,8 +238,7 @@ def render_solo_policy(
         '{"name":"image name","path":"local path"}. Images in the current turn are '
         "already attached as multimodal input—do NOT call ViewImage on them. For "
         "images in older messages, call ViewImage on their path. To send an image, "
-        "write `#[/absolute/path/to/image]` directly in your reply (do NOT call "
-        "tokifactor_send_image).</image-rules>",
+        "write `#[/absolute/path/to/image]` directly in your reply.</image-rules>",
         "<emoji-rules>When an emoji captures your thought and saves words, output "
         "`#[name:desc]` directly (no backticks, quotes, or code blocks). `name` MUST "
         "match the catalog when one is listed; `desc` is a brief semantic label "

@@ -262,7 +262,7 @@ class RemoteToolsMixin:
                 f"mime={item['mime']}"
             )
         lines.append(
-            "Use tokifactor_send_image with one path to share it in the channel."
+            "Write #[/absolute/path] in the final reply to share it in the channel."
         )
         await self._external_tool_success(turn, tool_call_id, "\n".join(lines))
 

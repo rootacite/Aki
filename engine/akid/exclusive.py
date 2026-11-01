@@ -31,6 +31,7 @@ from engine.life_ledger import LedgerError
 from engine.schedule_store import ScheduleError
 from engine.tool_ownership import (
     authorize_exclusive_tool,
+    is_disabled_tool,
     is_exclusive_tool,
     ownership_denied_message,
 )
@@ -62,6 +63,14 @@ class ExclusiveMixin:
         tool_input = request.get("input") or {}
         if not tool_call_id:
             LOGGER.warning("external tool request missing tool_call_id")
+            return
+        if is_disabled_tool(tool_name):
+            await self._send_external_result(
+                tool_call_id,
+                f"{tool_name} is disabled; write `#[/absolute/path/to/image]` "
+                "in the final reply instead",
+                True,
+            )
             return
         turn = self.active
         if turn is None or turn.end_sent:

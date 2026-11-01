@@ -421,7 +421,6 @@ class HaruLettaIntegrationTests(unittest.TestCase):
                         "comfyui_startup",
                         "comfyui_generate",
                         "comfyui_end",
-                        "tokifactor_send_image",
                         "tokifactor_send_file",
                         "wait_user",
                         "wait_other",

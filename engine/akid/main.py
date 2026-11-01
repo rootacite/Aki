@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--tokifactor-image-require-approval",
         action="store_true",
-        help="require approval for tokifactor_send_image (default: auto-approve)",
+        help="legacy flag; tokifactor_send_image is disabled and hidden",
     )
     parser.add_argument(
         "--tokifactor-file-require-approval",
