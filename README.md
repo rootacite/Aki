@@ -173,7 +173,7 @@ akictl natsu chat
 | `akictl profiles` | 查看成员与 profile 状态 |
 | `akictl allow /path/to/project` | 授权一个可写目录 |
 | `akictl compact` | 压缩上下文并整理记忆 |
-| `akictl reset` | 重置当前会话（先备份） |
+| `akictl soft_reset <agent> [--solo]` | 清空指定智能体的群聊或 solo turns（先备份；保留频道记录与 solo memory） |
 
 更完整的 REPL 命令和服务管理见 [进阶使用](docref/advanced-usage.md)。对话入口只有 MQTT；
 `akictl chat` 会以本机唯一的真人身份发送频道消息。`bin/aki`、`aki.chat.*` 和 KDE widget

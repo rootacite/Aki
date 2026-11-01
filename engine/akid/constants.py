@@ -454,7 +454,7 @@ CAPABILITIES = {
     "mcp_native_tools": True,
     "avatar": True,
     "mqtt_manage": True,
-    "conversation_reset": True,
+    "conversation_soft_reset": True,
     "username_manage": True,
     "exclusive_tools": True,
     "schedule_tools": True,

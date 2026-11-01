@@ -1122,7 +1122,9 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RpcError):
             await client.call("aki.username.set", {"username": ""})
 
-    async def test_conversation_reset_backs_up_and_clears(self) -> None:
+    async def test_conversation_soft_reset_backs_up_and_preserves_records(
+        self,
+    ) -> None:
         await self.start_server()
         assert self.server is not None
         conversation_dir = (
@@ -1153,16 +1155,61 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         (conversation_dir / "messages.jsonl").write_text(
             '{"message":"old"}\n', encoding="utf-8"
         )
+        transcripts = self.root / "transcripts"
+        reflection_dir = transcripts / "test-agent" / "default"
+        reflection_dir.mkdir(parents=True)
+        transcript_path = reflection_dir / "transcript.jsonl"
+        state_path = reflection_dir / "state.json"
+        payload_path = reflection_dir / "payload-auto-old.json"
+        payload_dir = reflection_dir / "multi-reflection-payloads"
+        payload_dir.mkdir()
+        transcript_path.write_text('{"kind":"assistant"}\n', encoding="utf-8")
+        state_path.write_text('{"total_completed_steps":1}\n', encoding="utf-8")
+        payload_path.write_text('{"old":true}\n', encoding="utf-8")
+        (payload_dir / "old.json").write_text('{"old":true}\n', encoding="utf-8")
+        group_history = self.server.group_channel_history_path
+        solo_history = self.server.solo_channel_history_path
+        group_seen = group_history.with_suffix(".seen.json")
+        solo_seen = solo_history.with_suffix(".seen.json")
+        solo_memory = self.server.solo_memory.path
+        for path in (group_history, solo_history, group_seen, solo_seen, solo_memory):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("preserve me\n", encoding="utf-8")
+        preserved_bytes = {
+            path: path.read_bytes()
+            for path in (group_history, solo_history, group_seen, solo_seen, solo_memory)
+        }
         client = await self.client()
         await client.hello()
         self.server.last_usage = {"context_tokens": 83_364, "prompt_tokens": 76_903}
-        result = await client.call("aki.conversation.reset", {})
+        with mock.patch.dict(
+            os.environ, {"LETTA_TRANSCRIPT_ROOT": str(transcripts)}
+        ):
+            result = await client.call(
+                "aki.conversation.soft_reset", {"solo": False}
+            )
         self.assertTrue(result["backend_ready"])
         self.assertEqual(result["conversation_id"], "default")
+        self.assertEqual(result["mode"], "group")
+        self.assertEqual(result["active_conversation_id"], "default")
+        self.assertEqual(
+            result["preserved"], ["channel_history", "solo_memory"]
+        )
         self.assertGreater(result["cleared_messages_bytes"], 0)
         backup = Path(result["backup_path"])
         self.assertTrue(backup.is_dir())
-        self.assertEqual((backup / "messages.jsonl").read_text(), '{"message":"old"}\n')
+        self.assertEqual(
+            (backup / "conversation" / "messages.jsonl").read_text(),
+            '{"message":"old"}\n',
+        )
+        self.assertEqual(
+            (backup / "reflection" / "transcript.jsonl").read_text(),
+            '{"kind":"assistant"}\n',
+        )
+        self.assertEqual(
+            (backup / "reflection" / "state.json").read_text(),
+            '{"total_completed_steps":1}\n',
+        )
         self.assertEqual((conversation_dir / "messages.jsonl").read_bytes(), b"")
         record = json.loads((conversation_dir / "conversation.json").read_text())
         self.assertEqual(record["in_context_message_ids"], [])
@@ -1170,8 +1217,16 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(record["summary"])
         self.assertIsNone(self.server.last_usage)
         self.assertEqual(self.server._channel_control_metadata()["contextTokens"], "0")
+        self.assertFalse(transcript_path.exists())
+        self.assertFalse(state_path.exists())
+        self.assertFalse(payload_path.exists())
+        self.assertFalse(payload_dir.exists())
+        for path, content in preserved_bytes.items():
+            self.assertEqual(path.read_bytes(), content)
 
-    async def test_conversation_reset_interrupts_active_and_drops_queue(self) -> None:
+    async def test_conversation_soft_reset_interrupts_active_and_drops_queue(
+        self,
+    ) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         conversation_dir = (
@@ -1210,13 +1265,15 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         )
         await wait_until(lambda: bool(server.queue))
         queued = server.queue[0]
-        result = await client.call("aki.conversation.reset", {})
+        result = await client.call(
+            "aki.conversation.soft_reset", {"solo": False}
+        )
         self.assertEqual(result["interrupted_turn_id"], active.turn_id)
         self.assertEqual(result["dropped_turn_ids"], [queued.turn_id])
         self.assertTrue(
             any(
                 event.get("kind") == "error"
-                and "conversation reset" in str(event.get("text") or "")
+                and "soft reset" in str(event.get("text") or "")
                 for event in fake_channel.events
             )
         )
@@ -1230,6 +1287,115 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ended), 2)
         self.assertTrue((conversation_dir / "messages.jsonl").read_bytes() == b"")
         self.assertTrue(Path(result["backup_path"]).is_dir())
+
+    async def test_conversation_soft_reset_targets_solo_without_group_changes(
+        self,
+    ) -> None:
+        server = await self.start_server()
+        group_dir = (
+            server.config.backend_dir
+            / "conversations"
+            / _b64url("default:test-agent")
+        )
+        solo_id = "solo-test-agent"
+        solo_dir = (
+            server.config.backend_dir
+            / "conversations"
+            / _b64url(f"conversation:{solo_id}")
+        )
+        for directory, message in (
+            (group_dir, '{"message":"group"}\n'),
+            (solo_dir, '{"message":"solo"}\n'),
+        ):
+            directory.mkdir(parents=True)
+            (directory / "conversation.json").write_text(
+                json.dumps(
+                    {
+                        "id": directory.name,
+                        "agent_id": "test-agent",
+                        "archived": False,
+                        "archived_at": None,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "last_message_at": "2026-01-01T00:00:00Z",
+                        "summary": "old summary",
+                        "in_context_message_ids": ["m1"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "messages.jsonl").write_text(message, encoding="utf-8")
+        transcripts = self.root / "transcripts"
+        solo_reflection = transcripts / "test-agent" / solo_id
+        solo_reflection.mkdir(parents=True)
+        (solo_reflection / "transcript.jsonl").write_text(
+            '{"kind":"assistant"}\n', encoding="utf-8"
+        )
+        (solo_reflection / "state.json").write_text(
+            '{"total_completed_steps":1}\n', encoding="utf-8"
+        )
+        client = await self.client()
+        await client.hello()
+        with mock.patch.dict(
+            os.environ, {"LETTA_TRANSCRIPT_ROOT": str(transcripts)}
+        ):
+            result = await client.call(
+                "aki.conversation.soft_reset", {"solo": True}
+            )
+        self.assertEqual(result["conversation_id"], solo_id)
+        self.assertEqual(result["mode"], "solo")
+        self.assertEqual((group_dir / "messages.jsonl").read_text(), '{"message":"group"}\n')
+        group_record = json.loads((group_dir / "conversation.json").read_text())
+        self.assertEqual(group_record["in_context_message_ids"], ["m1"])
+        self.assertEqual(group_record["summary"], "old summary")
+        self.assertEqual((solo_dir / "messages.jsonl").read_bytes(), b"")
+        solo_record = json.loads((solo_dir / "conversation.json").read_text())
+        self.assertEqual(solo_record["in_context_message_ids"], [])
+        self.assertIsNone(solo_record["summary"])
+        self.assertFalse((solo_reflection / "transcript.jsonl").exists())
+        self.assertFalse((solo_reflection / "state.json").exists())
+
+    async def test_conversation_soft_reset_restores_active_solo_conversation(
+        self,
+    ) -> None:
+        server = await self.start_server()
+        group_dir = (
+            server.config.backend_dir
+            / "conversations"
+            / _b64url("default:test-agent")
+        )
+        group_dir.mkdir(parents=True)
+        (group_dir / "conversation.json").write_text(
+            json.dumps(
+                {
+                    "id": "default",
+                    "agent_id": "test-agent",
+                    "archived": False,
+                    "archived_at": None,
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "last_message_at": None,
+                    "summary": None,
+                    "in_context_message_ids": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+        (group_dir / "messages.jsonl").write_text("", encoding="utf-8")
+        solo_id = "solo-test-agent"
+        server._backend_conversation_id = solo_id
+        server.last_usage = {"context_tokens": 123, "prompt_tokens": 100}
+        client = await self.client()
+        await client.hello()
+        result = await client.call(
+            "aki.conversation.soft_reset", {"solo": False}
+        )
+        self.assertEqual(result["conversation_id"], "default")
+        self.assertEqual(result["active_conversation_id"], solo_id)
+        self.assertEqual(server._active_conversation_id(), solo_id)
+        self.assertEqual(
+            server.last_usage, {"context_tokens": 123, "prompt_tokens": 100}
+        )
 
     def _assert_tool_detail(
         self,

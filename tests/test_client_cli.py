@@ -13,6 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 
 from engine.akid import _b64url
+from engine.aki_config import template_text
+from engine.akictl.soft_reset import _agent_target
 
 
 class ClientCliTests(unittest.TestCase):
@@ -25,6 +27,11 @@ class ClientCliTests(unittest.TestCase):
         self.socket = self.root / "akid.sock"
         self.writable_state = self.root / "writable.json"
         self.repo_cwd = self.root / "repo"
+        self.cli_home = self.root / "cli-home"
+        (self.cli_home / ".aki").mkdir(parents=True)
+        (self.cli_home / ".aki" / "aki.conf").write_text(
+            template_text("test-agent"), encoding="utf-8"
+        )
         shutil.copytree(ROOT / "userdata", self.repo_cwd / "userdata")
         (self.repo_cwd / "userdata" / "username.txt").write_text("OldName\n", encoding="utf-8")
         (self.repo_cwd / "scripts").mkdir(parents=True)
@@ -73,11 +80,17 @@ class ClientCliTests(unittest.TestCase):
             self.server.stderr.close()
         self.tempdir.cleanup()
 
-    def run_akictl(self, *args: str, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+    def run_akictl(
+        self,
+        *args: str,
+        stdin: str | None = None,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env["AKI_SOCKET"] = str(self.socket)
         # Never let a CLI test resolve the operator's real ~/.aki/aki.conf.
         env["AKI_CONFIG"] = str(self.root / "aki.conf")
+        env.update(extra_env or {})
         return subprocess.run(
             [sys.executable, str(ROOT / "bin" / "akictl"), *args],
             cwd=str(ROOT),
@@ -106,6 +119,10 @@ class ClientCliTests(unittest.TestCase):
         unknown = self.run_akictl("help", "missing")
         self.assertEqual(unknown.returncode, 2)
         self.assertIn("unknown command: missing", unknown.stderr)
+
+        retired = self.run_akictl("reset")
+        self.assertEqual(retired.returncode, 2)
+        self.assertIn("akictl reset was removed", retired.stderr)
 
     def test_akictl_status_and_writable_management(self) -> None:
         allowed = Path(tempfile.mkdtemp(prefix="akid-cli-allow-", dir=str(Path.home() / ".local" / "share")))
@@ -158,37 +175,73 @@ class ClientCliTests(unittest.TestCase):
         self.assertIn("local", disabled_payload["status"]["excluded_servers"])
         self.assertEqual(read_mcp_excluded(state_path), ("local",))
 
-    def test_akictl_reset_clears_default_conversation(self) -> None:
+    def test_akictl_soft_reset_clears_group_and_solo_conversations(self) -> None:
         conversation_dir = (
             self.root / "backend" / "conversations" / _b64url("default:test-agent")
         )
-        conversation_dir.mkdir(parents=True)
-        (conversation_dir / "conversation.json").write_text(
-            json.dumps(
-                {
-                    "id": "default",
-                    "agent_id": "test-agent",
-                    "archived": False,
-                    "archived_at": None,
-                    "created_at": "2026-01-01T00:00:00Z",
-                    "updated_at": "2026-01-01T00:00:00Z",
-                    "last_message_at": "2026-01-01T00:00:00Z",
-                    "summary": None,
-                    "in_context_message_ids": ["m1"],
-                }
-            ),
-            encoding="utf-8",
+        solo_dir = (
+            self.root
+            / "backend"
+            / "conversations"
+            / _b64url("conversation:solo-test-agent")
         )
-        (conversation_dir / "messages.jsonl").write_text(
-            '{"message":"old"}\n', encoding="utf-8"
+        for directory, conversation_id in (
+            (conversation_dir, "default"),
+            (solo_dir, "solo-test-agent"),
+        ):
+            directory.mkdir(parents=True)
+            (directory / "conversation.json").write_text(
+                json.dumps(
+                    {
+                        "id": conversation_id,
+                        "agent_id": "test-agent",
+                        "archived": False,
+                        "archived_at": None,
+                        "created_at": "2026-01-01T00:00:00Z",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                        "last_message_at": "2026-01-01T00:00:00Z",
+                        "summary": None,
+                        "in_context_message_ids": ["m1"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (directory / "messages.jsonl").write_text(
+                '{"message":"old"}\n', encoding="utf-8"
+            )
+        env = {"HOME": str(self.cli_home)}
+        result = self.run_akictl(
+            "soft_reset", "Aki", "--socket", str(self.socket), extra_env=env
         )
-        result = self.run_akictl("reset", "--socket", str(self.socket))
         self.assertEqual(result.returncode, 0, result.stderr)
         data = json.loads(result.stdout)
         self.assertTrue(data["backend_ready"])
         self.assertEqual(data["conversation_id"], "default")
+        self.assertEqual(data["mode"], "group")
         self.assertEqual((conversation_dir / "messages.jsonl").read_bytes(), b"")
+        self.assertEqual((solo_dir / "messages.jsonl").read_text(), '{"message":"old"}\n')
         self.assertTrue((self.root / "backups").is_dir())
+
+        solo = self.run_akictl(
+            "soft_reset",
+            "Aki",
+            "--solo",
+            "--socket",
+            str(self.socket),
+            extra_env=env,
+        )
+        self.assertEqual(solo.returncode, 0, solo.stderr)
+        solo_data = json.loads(solo.stdout)
+        self.assertEqual(solo_data["conversation_id"], "solo-test-agent")
+        self.assertEqual(solo_data["mode"], "solo")
+        self.assertEqual((solo_dir / "messages.jsonl").read_bytes(), b"")
+
+    def test_soft_reset_agent_name_supports_profile_and_alias(self) -> None:
+        profile, config = _agent_target("aki", home=self.cli_home)
+        self.assertEqual(profile, "aki")
+        self.assertEqual(config.agent_id, "test-agent")
+        alias_profile, _alias_config = _agent_target("秋", home=self.cli_home)
+        self.assertEqual(alias_profile, "aki")
 
     def test_akictl_username_get_and_set(self) -> None:
         (self.memory / "human.md").write_text(

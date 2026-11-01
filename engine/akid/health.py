@@ -70,8 +70,8 @@ class HealthMixin:
 
         if method == "aki.status":
             return await self._status(), None
-        if method == "aki.conversation.reset":
-            return await self._reset_conversation(), None
+        if method == "aki.conversation.soft_reset":
+            return await self._soft_reset_conversation(request.params), None
         if method == "aki.username.get":
             return self._username_get(), None
         if method == "aki.username.set":

@@ -31,6 +31,7 @@ from .service import (
     _service_status,
 )
 from .solo import _solo
+from .soft_reset import _soft_reset
 from .support import (
     _mcp_call,
     _model_call,
@@ -57,7 +58,7 @@ COMMANDS = {
     "mcp",
     "avatar",
     "identity",
-    "reset",
+    "soft_reset",
     "username",
     "set-username",
     "recompile",
@@ -74,11 +75,15 @@ SERVICE_COMMANDS = {"up", "down", "restart", "status", "logs", "profiles"}
 
 ALL_COMMANDS = COMMANDS | SERVICE_COMMANDS
 
+RETIRED_COMMANDS = {
+    "reset": "use 'akictl soft_reset <agent name> [--solo]'",
+}
+
 
 
 HELP_TEXT = (
     "usage: akictl [--profile NAME] [profile] <command> [options]\n"
-    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|identity|reset|username|set-username|recompile|compact|solo|nighttalk|help] [options]\n"
+    "       akictl [chat|status|health|history|allow|disallow|allowlist|memory|mqtt|mcp|model|reasoning|avatar|identity|soft_reset|username|set-username|recompile|compact|solo|nighttalk|help] [options]\n"
     "\n"
     "  akictl <profile> up|down|restart|status|logs   manage one profile service\n"
     "  akictl profiles            list ~/.aki profiles and service state\n"
@@ -106,7 +111,9 @@ HELP_TEXT = (
     "  akictl avatar              show Aki's avatar asset status\n"
     "  akictl identity show       show this profile's immutable member id\n"
     "  akictl identity rename N   rename this identity; old labels stay aliases\n"
-    "  akictl reset               reset the default conversation (backs up first)\n"
+    "  akictl soft_reset AGENT    clear group or solo turns (backs up first)\n"
+    "  akictl soft_reset AGENT --solo\n"
+    "                             clear solo turns; keep chat history and memory\n"
     "  akictl username            show how Aki addresses the user\n"
     "  akictl set-username NAME   set how Aki addresses the user (e.g. Master)\n"
     "  akictl recompile           rebuild the current conversation prompt from MemFS\n"
@@ -382,11 +389,20 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser.add_argument("name", nargs="?")
     parsers["identity"] = parser
     parser = argparse.ArgumentParser(
-        prog="akictl reset",
-        description="Reset the default conversation (backs up the old transcript first)",
+        prog="akictl soft_reset",
+        description=(
+            "Clear one agent's group or solo conversation turns while preserving "
+            "channel history and solo memories"
+        ),
     )
     _add_common(parser)
-    parsers["reset"] = parser
+    parser.add_argument("agent_name", help="agent name, profile, or alias")
+    parser.add_argument(
+        "--solo",
+        action="store_true",
+        help="clear the solo conversation instead of the group conversation",
+    )
+    parsers["soft_reset"] = parser
     parser = argparse.ArgumentParser(prog="akictl username")
     _add_common(parser)
     parsers["username"] = parser
@@ -478,6 +494,13 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
     except ConfigError as exc:
         pkg().print(f"error: {exc}", file=sys.stderr)
         return 2
+    if argv and argv[0] in RETIRED_COMMANDS:
+        pkg().print(
+            f"error: akictl {argv[0]} was removed; "
+            f"{RETIRED_COMMANDS[argv[0]]}",
+            file=sys.stderr,
+        )
+        return 2
     positional_profile: str | None = None
     if argv and argv[0] not in ALL_COMMANDS:
         candidate: str | None = None
@@ -496,6 +519,13 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         ):
             positional_profile = candidate
             argv.pop(0)
+    if argv and argv[0] in RETIRED_COMMANDS:
+        pkg().print(
+            f"error: akictl {argv[0]} was removed; "
+            f"{RETIRED_COMMANDS[argv[0]]}",
+            file=sys.stderr,
+        )
+        return 2
     command = default_command
     if argv and argv[0] in ALL_COMMANDS:
         command = argv.pop(0)
@@ -577,8 +607,8 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return pkg()._management(args, "aki.avatar.status", profile=profile)
     if command == "identity":
         return _identity(args, profile)
-    if command == "reset":
-        return pkg()._management(args, "aki.conversation.reset", profile=profile)
+    if command == "soft_reset":
+        return _soft_reset(args)
     if command == "username":
         return pkg()._management(args, "aki.username.get", profile=profile)
     if command == "set-username":

@@ -338,7 +338,8 @@ def repl(
         "akictl MQTT REPL. Commands: /status /health /history [n] /allow <dir> "
         "/disallow <dir> /allowlist /memory ... /mqtt ... /mcp ... /model [set <id>] "
         "/reasoning [set <level>] /avatar /username /set-username <name> "
-        "/recompile /compact [mode] [--omit-tool-results] /reset /quit",
+        "/recompile /compact [mode] [--omit-tool-results] "
+        "/soft_reset [--solo] /quit",
         file=sys.stderr,
     )
     while True:
@@ -399,8 +400,12 @@ def repl(
                 _print_json(_model_call(client, rest))
             elif prompt == "/avatar":
                 _print_json(_rpc_call(client, "aki.avatar.status"))
-            elif prompt == "/reset":
-                _print_json(_rpc_call(client, "aki.conversation.reset"))
+            elif prompt == "/soft_reset" or prompt.startswith("/soft_reset "):
+                parts = prompt.split()
+                params = {"solo": "--solo" in parts[1:]}
+                _print_json(
+                    _rpc_call(client, "aki.conversation.soft_reset", params)
+                )
             elif prompt == "/username":
                 _print_json(_rpc_call(client, "aki.username.get"))
             elif prompt.startswith("/set-username "):

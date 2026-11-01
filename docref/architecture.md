@@ -426,7 +426,7 @@ probe。多个 Aki presence 时以首个有效 Aki 为准。
 - 客户端先调用 `aki.hello`；`aki.health` 可在握手前调用。
 - 方法：`aki.approval.respond`（仅用于 MQTT turn 审批）、
   `aki.memory.status/tokens/tree/read/search`、`aki.fs.writable.*`、
-  `aki.mqtt.*`、`aki.username.get/set`、`aki.conversation.reset`、`aki.status`、
+  `aki.mqtt.*`、`aki.username.get/set`、`aki.conversation.soft_reset`、`aki.status`、
   `aki.admin.zero_initiation_budget`（仅同 UID，且 `source_profile=aki`）。
 - `aki.chat.send/cancel/history` 已移除；真人消息、取消和历史分别走 MQTT
   `kind=message`、`kind=cancel` 与本地频道历史文件。

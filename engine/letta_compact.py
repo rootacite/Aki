@@ -446,6 +446,14 @@ def _reflection_state_path(
     return root / safe(agent_id) / safe(conversation_id) / "state.json"
 
 
+def reflection_transcript_paths(
+    env: Mapping[str, str], agent_id: str, conversation_id: str
+) -> tuple[Path, Path]:
+    """Return ``(transcript.jsonl, state.json)`` for one Letta conversation."""
+    state_path = _reflection_state_path(env, agent_id, conversation_id)
+    return state_path.parent / "transcript.jsonl", state_path
+
+
 def _read_reflection_state(path: Path) -> dict[str, Any]:
     try:
         data = json.loads(path.read_text(encoding="utf-8"))

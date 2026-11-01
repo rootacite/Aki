@@ -13,8 +13,8 @@ from datetime import (
     timezone,
 )
 from typing import Mapping
-from engine.letta_compact import run_letta_compact
-from engine.solo_mode import conversation_directory
+from engine.letta_compact import reflection_transcript_paths, run_letta_compact
+from engine.solo_mode import conversation_directory, solo_conversation_id
 from engine.protocol import (
     ErrorCode,
     RpcError,
@@ -431,33 +431,54 @@ class ConversationMixin:
         return self.config.conversation_id
 
 
-    def _conversation_dir(self) -> Path:
+    def _conversation_dir_for(self, conversation_id: str) -> Path:
         return conversation_directory(
             self.config.backend_dir,
-            self._active_conversation_id(),
+            conversation_id,
             self.config.agent_id,
         )
+
+
+    def _conversation_dir(self) -> Path:
+        return self._conversation_dir_for(self._active_conversation_id())
 
 
     def _conversation_backup_root(self) -> Path:
         return self.config.backend_dir.parent / "backups"
 
 
-    def _backup_conversation(
-        self, conversation_dir: Path, *, suffix: str = "reset"
+    def _reflection_dir_for(self, conversation_id: str) -> Path:
+        _transcript, state = reflection_transcript_paths(
+            os.environ, self.config.agent_id, conversation_id
+        )
+        return state.parent
+
+
+    def _backup_soft_reset(
+        self,
+        conversation_id: str,
+        conversation_dir: Path,
+        reflection_dir: Path,
     ) -> Path:
         root = self._conversation_backup_root()
         root.mkdir(parents=True, exist_ok=True)
         with contextlib.suppress(OSError):
             os.chmod(root, 0o700)
         stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        name = f"aki-{self._active_conversation_id()}-{suffix}-{stamp}"
+        name = f"aki-{conversation_id}-soft-reset-{stamp}"
         candidate = root / name
         counter = 1
         while candidate.exists():
             candidate = root / f"{name}-{counter}"
             counter += 1
-        shutil.copytree(conversation_dir, candidate, symlinks=True)
+        candidate.mkdir(mode=0o700)
+        shutil.copytree(
+            conversation_dir, candidate / "conversation", symlinks=True
+        )
+        if reflection_dir.is_dir():
+            shutil.copytree(
+                reflection_dir, candidate / "reflection", symlinks=True
+            )
         return candidate
 
 
@@ -493,7 +514,43 @@ class ConversationMixin:
         return cleared_bytes
 
 
-    async def _reset_conversation(self) -> dict[str, Any]:
+    def _clear_reflection_artifacts(self, conversation_id: str) -> dict[str, Any]:
+        transcript_path, state_path = reflection_transcript_paths(
+            os.environ, self.config.agent_id, conversation_id
+        )
+        root = state_path.parent
+        cleared_paths: list[str] = []
+        for path in (transcript_path, state_path):
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+                cleared_paths.append(str(path))
+        for path in sorted(root.glob("payload-*.json")):
+            if path.is_file() or path.is_symlink():
+                path.unlink()
+                cleared_paths.append(str(path))
+        payload_dir = root / "multi-reflection-payloads"
+        if payload_dir.is_symlink():
+            payload_dir.unlink()
+            cleared_paths.append(str(payload_dir))
+        elif payload_dir.is_dir():
+            shutil.rmtree(payload_dir)
+            cleared_paths.append(str(payload_dir))
+        return {
+            "transcript_path": str(transcript_path),
+            "state_path": str(state_path),
+            "cleared_paths": cleared_paths,
+        }
+
+
+    async def _soft_reset_conversation(
+        self, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        solo = optional_bool(params, "solo", False)
+        conversation_id = (
+            solo_conversation_id(self.config.agent_id)
+            if solo
+            else self.config.conversation_id
+        )
         async with self._reset_lock:
             if self._compacting or self._recompiling:
                 raise RpcError(
@@ -506,17 +563,20 @@ class ConversationMixin:
             backup_path: Path | None = None
             cleared_bytes = 0
             try:
-                conversation_dir = self._conversation_dir()
+                previous_active = self._active_conversation_id()
+                conversation_dir = self._conversation_dir_for(conversation_id)
                 if not conversation_dir.is_dir():
                     raise RpcError(
                         ErrorCode.RESET_FAILED,
                         "conversation directory not found",
                         {
-                            "conversation_id": self._active_conversation_id(),
+                            "conversation_id": conversation_id,
+                            "solo": solo,
                             "agent_id": self.config.agent_id,
                             "path": str(conversation_dir),
                         },
                     )
+                reflection_dir = self._reflection_dir_for(conversation_id)
 
                 turn = self.active
                 if turn is not None and not turn.end_sent:
@@ -524,7 +584,7 @@ class ConversationMixin:
                     turn.cancelled = True
                     for approval in list(self.approvals.values()):
                         if approval.turn is turn and not approval.future.done():
-                            approval.future.set_result((False, "conversation reset"))
+                            approval.future.set_result((False, "soft reset"))
 
                 queued = list(self.queue)
                 self.queue.clear()
@@ -539,9 +599,9 @@ class ConversationMixin:
                             item,
                             "turn_end",
                             {
-                                "reason": "conversation_reset",
+                                "reason": "soft_reset",
                                 "cancelled": True,
-                                "message": "conversation reset",
+                                "message": "soft reset",
                             },
                         )
 
@@ -551,22 +611,29 @@ class ConversationMixin:
                             turn,
                             "error",
                             {
-                                "code": "CONVERSATION_RESET",
-                                "message": "conversation reset; turn interrupted",
+                                "code": "SOFT_RESET",
+                                "message": "soft reset; turn interrupted",
                             },
                         )
                     await self._finish_turn(
                         turn,
-                        "conversation_reset",
-                        {"interrupted": True, "message": "conversation reset"},
+                        "soft_reset",
+                        {"interrupted": True, "message": "soft reset"},
                     )
 
                 with contextlib.suppress(Exception):
                     await self.backend.stop()
-                backup_path = self._backup_conversation(conversation_dir)
+                backup_path = self._backup_soft_reset(
+                    conversation_id, conversation_dir, reflection_dir
+                )
                 cleared_bytes = self._clear_conversation_messages(conversation_dir)
-                self.last_usage = None
-                self._schedule_status_refresh()
+                reflection = self._clear_reflection_artifacts(conversation_id)
+                if conversation_id == previous_active:
+                    self.last_usage = None
+                    self._schedule_status_refresh()
+                # Letta always starts on the configured group conversation;
+                # restore the previously active conversation after readiness.
+                self._backend_conversation_id = self.config.conversation_id
                 self.backend.start()
                 ready = await self._wait_backend_ready(20.0)
                 if not ready:
@@ -580,27 +647,48 @@ class ConversationMixin:
                             "backend_error": getattr(self.backend, "last_error", None),
                         },
                     )
+                if previous_active != self.config.conversation_id:
+                    restored = await self._switch_backend_conversation(
+                        previous_active
+                    )
+                    if not restored:
+                        raise RpcError(
+                            ErrorCode.RESET_FAILED,
+                            "conversation cleared but the active conversation "
+                            "could not be restored",
+                            {
+                                "backup_path": str(backup_path),
+                                "cleared_messages_bytes": cleared_bytes,
+                                "active_conversation_id": previous_active,
+                                "backend_ready": True,
+                            },
+                        )
                 LOGGER.info(
-                    "conversation reset id=%s backup=%s cleared_bytes=%s",
-                    self._active_conversation_id(),
+                    "conversation soft reset id=%s solo=%s backup=%s cleared_bytes=%s",
+                    conversation_id,
+                    solo,
                     backup_path,
                     cleared_bytes,
                 )
                 return {
-                    "conversation_id": self._active_conversation_id(),
+                    "conversation_id": conversation_id,
+                    "mode": "solo" if solo else "group",
                     "agent_id": self.config.agent_id,
                     "backup_path": str(backup_path),
                     "cleared_messages_bytes": cleared_bytes,
+                    "reflection": reflection,
                     "interrupted_turn_id": interrupted_turn_id,
                     "dropped_turn_ids": dropped_turn_ids,
+                    "active_conversation_id": self._active_conversation_id(),
+                    "preserved": ["channel_history", "solo_memory"],
                     "backend_ready": True,
                 }
             except RpcError:
                 raise
             except Exception as exc:
-                LOGGER.exception("conversation reset failed")
+                LOGGER.exception("conversation soft reset failed")
                 raise RpcError(
-                    ErrorCode.RESET_FAILED, f"conversation reset failed: {exc}"
+                    ErrorCode.RESET_FAILED, f"conversation soft reset failed: {exc}"
                 ) from exc
             finally:
                 self._resetting = False

@@ -10,7 +10,7 @@
 
 - **Unix socket JSON-RPC 网关。** NDJSON，每行一个 JSON 对象，单行上限 1 MiB；
   支持 `aki.hello`、`aki.approval.*`（仅 MQTT turn）、`aki.memory.*`、`aki.fs.writable.*`、
-  `aki.mqtt.*`、`aki.username.*`、`aki.conversation.reset`。
+  `aki.mqtt.*`、`aki.username.*`、`aki.conversation.soft_reset`。
 - **长驻 Letta 监督。** 等待 `system/init` 后 ready；异常退出按 1/2/4/8/16/30 秒退避重启；
   当前 turn 标记失败，队列保留。
 - **多客户端。** 状态、历史和只读记忆共享；实时事件通常只发给该 turn 的发起连接，
@@ -410,21 +410,29 @@ akictl history --solo             # 读独处历史
 
 REPL 命令：`/status`、`/health`、`/history [n]`、`/allow <dir>`、
 `/disallow <dir>`、`/allowlist`、`/memory tree|read|search|tokens|status`、`/username`、
-`/set-username <name>`、`/recompile`、`/reset`、`/quit`。
+`/set-username <name>`、`/recompile`、`/soft_reset [--solo]`、`/quit`。
 CLI 只使用 `~/.aki/identities.json` 中唯一的 `kind=user` 身份；没有或多个真人身份时直接报错。
 `Ctrl-C` 发送 MQTT `kind=cancel`，只允许 turn 发起者取消。`/history` 读取本地
 `~/.aki/channel-history/<channel-key>/<profile>.jsonl`，不再走 `aki.chat.history`。
 使用 `akictl help` 查看总帮助，或 `akictl help model` 查看单个命令帮助。
 
-重置 `default` 会话：
+软重置指定智能体的 turns：
 
 ```bash
-akictl reset
+akictl soft_reset Aki
+akictl soft_reset Aki --solo
 ```
 
-重置会先把旧 transcript 备份到 `~/.letta/backups/aki-default-reset-<timestamp>`，
-然后清空 `messages.jsonl`、`in_context_message_ids`、summary 和 last_message_at，
-并重启 Letta 后端。活跃 turn 会被中断，队列中的 turn 会被取消。
+`<agent name>` 可以是 profile 名、频道显示名或别名。默认清理群聊 conversation；
+`--solo` 清理该 profile 的 solo conversation，不要求当前正处在 solo。重置会先把
+conversation 与 reflection transcript/state 备份到
+`~/.letta/backups/aki-<conversation>-soft-reset-<timestamp>/`，然后清空
+`messages.jsonl`、`in_context_message_ids`、summary、last_message_at，以及对应
+conversation 的 reflection transcript、state 和待复用 payload。
+
+频道记录（`channel-history`，含 `.seen.json`）、solo memory、MemFS 记忆和人格文件都不会
+被修改。活跃 turn 会被中断，队列中的 turn 会被取消；如果原本处于 solo，backend 重启后
+会切回 solo conversation。旧命令 `akictl reset` 已移除。
 
 ---
 
@@ -589,7 +597,8 @@ akictl recompile                  # 从 MemFS 重编译当前会话 prompt
 akictl compact                    # 压缩上下文并触发一次记忆整理
 akictl compact all                # 指定 Letta compaction 模式
 akictl compact all --omit-tool-results  # 压缩和整理成功后省略持久工具结果正文
-akictl reset                      # 重置 default 会话（先备份）
+akictl soft_reset Aki             # 清空群聊 turns（先备份）
+akictl soft_reset Aki --solo      # 清空 solo turns（先备份）
 ```
 
 可写目录、MQTT、MCP 排除列表和上游模型都写在 `~/.aki/aki.conf`（目录 `0700`、文件 `0600`）。
