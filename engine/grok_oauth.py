@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Mapping
 from urllib import error, parse, request
 
+from engine.upstream_proxy import select_upstream_proxy
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - non-Unix fallback
@@ -197,8 +199,13 @@ class GrokOAuthProvider:
         return headers
 
     def _opener(self):
-        if self.upstream_proxy:
-            proxies = {"http": self.upstream_proxy, "https": self.upstream_proxy}
+        proxy = (
+            select_upstream_proxy(self.upstream_proxy)
+            if self.upstream_proxy
+            else ""
+        )
+        if proxy:
+            proxies = {"http": proxy, "https": proxy}
         else:
             proxies = {}
         return request.build_opener(request.ProxyHandler(proxies))

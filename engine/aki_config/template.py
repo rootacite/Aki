@@ -127,7 +127,7 @@ path =
 listen = 127.0.0.1:7721
 # Letta 调用本机代理时的令牌。留空则首次启动生成，之后保持不变。
 token =
-# 访问上游模型用的 HTTP 代理。留空则直连。
+# 访问上游模型用的 HTTP 代理。多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
 
 [upstream.deepseek]
@@ -309,6 +309,7 @@ path = assets/small/haru.jpg
 [proxy]
 listen = 127.0.0.1:7723
 token =
+# 多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
 
 [upstream.cli-proxy-api]
@@ -435,6 +436,7 @@ path = assets/small/natsu.jpg
 [proxy]
 listen = 127.0.0.1:7724
 token =
+# 多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
 
 [upstream.deepseek]

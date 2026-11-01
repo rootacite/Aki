@@ -21,6 +21,10 @@ from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
 from engine.letta_llm import _compat
 from engine.proxy_debug import DebugResponse, ProxyDebugStream, resolve_debug_socket
 from engine.solo_mode import SOLO_REASONING_BUDGET_TOKENS, SOLO_REASONING_EFFORT
+from engine.upstream_proxy import (
+    UPSTREAM_PROXY_PROBE_TIMEOUT,
+    split_upstream_proxy,
+)
 
 LOGGER = logging.getLogger("akid.llm_proxy")
 
@@ -615,30 +619,55 @@ async def _open_upstream(
     upstream_proxy: str,
     ssl_context: ssl.SSLContext | None,
 ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter, str]:
-    attempts = UPSTREAM_CONNECT_ATTEMPTS if upstream_proxy else 1
+    # Route each new upstream connection against the current proxy status.
+    proxies = split_upstream_proxy(upstream_proxy)
+    if not proxies:
+        return await _open_upstream_once(
+            host,
+            port,
+            scheme,
+            path,
+            upstream_proxy="",
+            ssl_context=ssl_context,
+        )
+    attempts = UPSTREAM_CONNECT_ATTEMPTS
+    last_error: OSError | None = None
     for attempt in range(1, attempts + 1):
-        try:
-            return await _open_upstream_once(
-                host,
-                port,
-                scheme,
-                path,
-                upstream_proxy=upstream_proxy,
-                ssl_context=ssl_context,
-            )
-        except OSError as exc:
-            if attempt >= attempts or not _retryable_upstream_connect(exc):
-                raise
-            delay = UPSTREAM_RETRY_DELAYS[min(attempt - 1, len(UPSTREAM_RETRY_DELAYS) - 1)]
-            LOGGER.warning(
-                "upstream connect retry host=%s attempt=%s/%s type=%s error=%s",
-                host,
-                attempt,
-                attempts,
-                type(exc).__name__,
-                exc,
-            )
-            await asyncio.sleep(delay)
+        for index, proxy in enumerate(proxies):
+            try:
+                return await _open_upstream_once(
+                    host,
+                    port,
+                    scheme,
+                    path,
+                    upstream_proxy=proxy,
+                    ssl_context=ssl_context,
+                )
+            except OSError as exc:
+                last_error = exc
+                if index + 1 < len(proxies):
+                    LOGGER.warning(
+                        "upstream proxy unavailable proxy=%s error=%s; trying next",
+                        proxy,
+                        exc,
+                    )
+                    continue
+        if last_error is None:
+            break
+        if attempt >= attempts or not _retryable_upstream_connect(last_error):
+            raise last_error
+        delay = UPSTREAM_RETRY_DELAYS[min(attempt - 1, len(UPSTREAM_RETRY_DELAYS) - 1)]
+        LOGGER.warning(
+            "upstream connect retry host=%s attempt=%s/%s type=%s error=%s",
+            host,
+            attempt,
+            attempts,
+            type(last_error).__name__,
+            last_error,
+        )
+        await asyncio.sleep(delay)
+    if last_error is not None:
+        raise last_error
     raise OSError("upstream connection failed")
 
 
@@ -669,7 +698,7 @@ async def _open_upstream_once(
     proxy_port = proxy.port or 80
     reader, writer = await asyncio.wait_for(
         asyncio.open_connection(proxy_host, proxy_port),
-        timeout=30,
+        timeout=UPSTREAM_PROXY_PROBE_TIMEOUT,
     )
     if not use_tls:
         return reader, writer, f"http://{host}:{port}{path}"

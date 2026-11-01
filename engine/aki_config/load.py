@@ -293,22 +293,31 @@ def _json_object(
 
 
 def parse_upstream_proxy(value: str) -> str:
-    """Return a normalized ``http://host:port`` or an empty string."""
+    """Return normalized ``http://host:port`` proxies joined by ``;``."""
     text = value.strip()
     if not text:
         return ""
-    parsed = urlsplit(text)
-    if parsed.scheme != "http" or not parsed.hostname:
+    proxies: list[str] = []
+    for item in text.split(";"):
+        candidate = item.strip()
+        if not candidate:
+            continue
+        parsed = urlsplit(candidate)
+        if parsed.scheme != "http" or not parsed.hostname:
+            raise ConfigError(
+                "[proxy] upstream_proxy must look like http://host:port"
+            )
+        if parsed.username or parsed.password:
+            raise ConfigError("[proxy] upstream_proxy does not take credentials")
+        if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
+            raise ConfigError("[proxy] upstream_proxy must not include a path")
+        port = parsed.port or 80
+        if not 1 <= port <= 65535:
+            raise ConfigError("[proxy] upstream_proxy port is out of range")
+        proxies.append(f"http://{parsed.hostname}:{port}")
+    if not proxies:
         raise ConfigError("[proxy] upstream_proxy must look like http://host:port")
-    if parsed.username or parsed.password:
-        raise ConfigError("[proxy] upstream_proxy does not take credentials")
-    if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
-        raise ConfigError("[proxy] upstream_proxy must not include a path")
-    port = parsed.port or 80
-    if not 1 <= port <= 65535:
-        raise ConfigError("[proxy] upstream_proxy port is out of range")
-    host = parsed.hostname
-    return f"http://{host}:{port}"
+    return ";".join(proxies)
 
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import socket
 import ssl
 import subprocess
 import tempfile
@@ -19,6 +20,7 @@ from engine.llm_proxy import (
     splice_unclosed_think,
     unclosed_think_reasoning,
 )
+from engine.upstream_proxy import select_upstream_proxy
 
 
 def _route(model: str, upstream: str, url_path: str) -> ModelRoute:
@@ -1150,6 +1152,171 @@ class UpstreamProxyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.seen["connect"], f"CONNECT 127.0.0.1:{self.origin.sockets[0].getsockname()[1]} HTTP/1.1")
         self.assertEqual(self.seen["authorization"], "Bearer upstream-secret")
         self.assertEqual(self.seen["body"]["model"], "upstream-model")
+
+
+def _unused_tcp_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+class UpstreamProxyPriorityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_rechecks_priority_for_each_new_connection(self) -> None:
+        first_seen = asyncio.Event()
+        second_seen = asyncio.Event()
+
+        async def first_proxy(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            del reader
+            first_seen.set()
+            writer.close()
+
+        async def second_proxy(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            del reader
+            second_seen.set()
+            writer.close()
+
+        first_port = _unused_tcp_port()
+        second = await asyncio.start_server(second_proxy, "127.0.0.1", 0)
+        second_port = int(second.sockets[0].getsockname()[1])
+        proxy_value = (
+            f"http://127.0.0.1:{first_port};http://127.0.0.1:{second_port}"
+        )
+        first = None
+        try:
+            reader, writer, _target = await _open_upstream(
+                "example.test",
+                80,
+                "http",
+                "/v1/chat/completions",
+                upstream_proxy=proxy_value,
+                ssl_context=None,
+            )
+            del reader
+            await asyncio.wait_for(second_seen.wait(), timeout=1)
+            self.assertFalse(first_seen.is_set())
+            writer.close()
+            await writer.wait_closed()
+
+            first = await asyncio.start_server(first_proxy, "127.0.0.1", first_port)
+            reader, writer, _target = await _open_upstream(
+                "example.test",
+                80,
+                "http",
+                "/v1/chat/completions",
+                upstream_proxy=proxy_value,
+                ssl_context=None,
+            )
+            del reader
+            await asyncio.wait_for(first_seen.wait(), timeout=1)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            second.close()
+            if first is not None:
+                first.close()
+            await second.wait_closed()
+            if first is not None:
+                await first.wait_closed()
+
+    async def test_uses_first_open_proxy_in_priority_order(self) -> None:
+        first_seen = asyncio.Event()
+        second_seen = asyncio.Event()
+
+        def handler(seen: asyncio.Event):
+            async def proxy(
+                reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+            ) -> None:
+                del reader
+                seen.set()
+                writer.close()
+
+            return proxy
+
+        first = await asyncio.start_server(handler(first_seen), "127.0.0.1", 0)
+        second = await asyncio.start_server(handler(second_seen), "127.0.0.1", 0)
+        first_port = int(first.sockets[0].getsockname()[1])
+        second_port = int(second.sockets[0].getsockname()[1])
+        try:
+            reader, writer, _target = await _open_upstream(
+                "example.test",
+                80,
+                "http",
+                "/v1/chat/completions",
+                upstream_proxy=(
+                    f"http://127.0.0.1:{first_port};"
+                    f"http://127.0.0.1:{second_port}"
+                ),
+                ssl_context=None,
+            )
+            del reader
+            await asyncio.wait_for(first_seen.wait(), timeout=1)
+            self.assertFalse(second_seen.is_set())
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            first.close()
+            second.close()
+            await first.wait_closed()
+            await second.wait_closed()
+
+    async def test_skips_closed_proxy_and_uses_next_one(self) -> None:
+        connected = asyncio.Event()
+
+        async def proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            del reader
+            connected.set()
+            writer.close()
+
+        server = await asyncio.start_server(proxy, "127.0.0.1", 0)
+        port = int(server.sockets[0].getsockname()[1])
+        closed_port = _unused_tcp_port()
+        try:
+            reader, writer, target = await _open_upstream(
+                "example.test",
+                80,
+                "http",
+                "/v1/chat/completions",
+                upstream_proxy=(
+                    f"http://127.0.0.1:{closed_port};"
+                    f"http://127.0.0.1:{port}"
+                ),
+                ssl_context=None,
+            )
+            del reader
+            self.assertEqual(target, "http://example.test:80/v1/chat/completions")
+            await asyncio.wait_for(connected.wait(), timeout=1)
+            writer.close()
+            await writer.wait_closed()
+        finally:
+            server.close()
+            await server.wait_closed()
+
+    async def test_sync_selector_returns_first_open_proxy(self) -> None:
+        connected = asyncio.Event()
+
+        async def proxy(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            del reader
+            connected.set()
+            writer.close()
+
+        server = await asyncio.start_server(proxy, "127.0.0.1", 0)
+        port = int(server.sockets[0].getsockname()[1])
+        closed_port = _unused_tcp_port()
+        try:
+            selected = await asyncio.to_thread(
+                select_upstream_proxy,
+                f"http://127.0.0.1:{closed_port};http://127.0.0.1:{port}",
+                timeout=1,
+            )
+            self.assertEqual(selected, f"http://127.0.0.1:{port}")
+            await asyncio.wait_for(connected.wait(), timeout=1)
+        finally:
+            server.close()
+            await server.wait_closed()
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

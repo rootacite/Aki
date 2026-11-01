@@ -133,7 +133,9 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 
 每个 profile 的 Letta 只连接自己的 `[proxy] listen` 地址。`akid-proxy@<profile>.service`
 是独立进程，按请求里的模型把调用转到该 profile 的 `[upstream.*]`，并换上对应密钥。
-`[proxy] upstream_proxy` 非空时，访问上游先走这台 HTTP 代理（HTTPS 用 CONNECT）；
+`[proxy] upstream_proxy` 非空时，访问上游先走 HTTP 代理（HTTPS 用 CONNECT）。可以用 `;`
+配置多个代理，akid 会在每次新建上游连接时按顺序检查端口并选择第一个开放的代理，例如
+`http://192.168.50.100:7890;http://192.168.3.2:7890`；全部不可达时请求失败，不会绕过代理直连。
 单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连。聊天客户端仍然只走 Unix socket。
 
 ### 复用 Grok Build 的 xAI OAuth

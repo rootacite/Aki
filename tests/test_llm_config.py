@@ -94,6 +94,29 @@ class AkiConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             parse_upstream_proxy("socks5://127.0.0.1:1080")
 
+    def test_upstream_proxy_priority_list(self) -> None:
+        self.assertEqual(
+            parse_upstream_proxy(
+                " http://192.168.50.100:7890 ; http://192.168.3.2:7890 "
+            ),
+            "http://192.168.50.100:7890;http://192.168.3.2:7890",
+        )
+        with self.assertRaises(ConfigError):
+            parse_upstream_proxy(
+                "http://192.168.50.100:7890;socks5://192.168.3.2:7890"
+            )
+        atomic_write(self.path, template_text())
+        set_key(
+            self.path,
+            "proxy",
+            "upstream_proxy",
+            "http://192.168.50.100:7890;http://192.168.3.2:7890",
+        )
+        self.assertEqual(
+            load_config(self.path).upstream_proxy,
+            "http://192.168.50.100:7890;http://192.168.3.2:7890",
+        )
+
     def test_listen_must_be_loopback(self) -> None:
         atomic_write(self.path, template_text())
         set_key(self.path, "proxy", "listen", "0.0.0.0:7721")

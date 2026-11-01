@@ -21,6 +21,7 @@ import uuid
 from pathlib import Path
 
 from engine.tokifactor import detect_image_mime
+from engine.upstream_proxy import select_upstream_proxy
 
 MAX_PROMPT_CHARS = 1500
 MAX_IMAGES = 4
@@ -211,10 +212,16 @@ def generate_minimax_images(
         },
     )
     handlers: list[urllib.request.BaseHandler] = [_NoRedirect()]
+    proxy = ""
     if use_proxy and upstream_proxy:
+        try:
+            proxy = select_upstream_proxy(upstream_proxy)
+        except OSError as exc:
+            raise ImageGenerationError(f"image API request failed: {exc}") from exc
+    if proxy:
         handlers.append(
             urllib.request.ProxyHandler(
-                {"http": upstream_proxy, "https": upstream_proxy}
+                {"http": proxy, "https": proxy}
             )
         )
     else:
