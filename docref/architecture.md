@@ -142,8 +142,10 @@ turn 的 guidance、initiation budget、execution responder、`wait_other` 目�
 `system_append`、易变 tail 通过 `user_message_prefix` 进入实际 API 请求，不写回 agent record
 或 `system-prompt.json`，也不写入持久 user message。`# solo-memories` 在群聊和独处都放进
 `system_append`。群聊 user-role overlay 固定为
-`# channel-transcript → # live-context / # runtime-context → # turn-control → # format-guard`，其中 `# format-guard`
-永远最后；关闭桌面实况时仍由 `# runtime-context` 提供 MemFS 与 MCP 信息。akid 只接受带
+`# channel-transcript → # live-context / # runtime-context → # turn-control → # format-guard`；独处为
+`# live-context / # runtime-context → # format-guard → # wait-user`。两种模式都只注入一个
+`# format-guard`，独处直接在同一个块名下使用宽松格式规则。关闭桌面实况时仍由
+`# runtime-context` 提供 MemFS 与 MCP 信息。akid 只接受带
 `aki_bridge` 的定制 Letta；
 否则启动直接报错退出。bridge 模式下
 `<channel-context>` 成员表作为稳定 system overlay 注入实际 API 请求，不写入持久 user message。

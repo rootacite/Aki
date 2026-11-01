@@ -28,7 +28,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-wake-routing></channel-wake-routing>\n"
             "<channel-identity></channel-identity>\n"
             "<channel-context></channel-context>\n"
-            "# Format Guard"
+            "# solo-memories\n\n"
         )
         payloads = [
             (
@@ -60,8 +60,7 @@ class PromptCacheAuditTests(unittest.TestCase):
                         "<channel-wake-routing></channel-wake-routing>"
                         "<channel-identity></channel-identity>"
                         "<channel-context></channel-context>"
-                        "# Format Guard"
-                        "# turn-control\n\n"
+                        "# Format Guard\n\n"
                     ),
                 }
             ]
@@ -76,8 +75,9 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-policy></channel-policy>"
             "<channel-wake-routing></channel-wake-routing>"
             "<channel-identity></channel-identity>"
-            "<channel-context></channel-context>"
-            "# Format Guard"
+            "<channel-context></channel-context>\n"
+            "# solo-memories\n\n"
+            "# format-guard\n\n"
             "# turn-control\n\n"
         )
         payload = {
@@ -88,7 +88,8 @@ class PromptCacheAuditTests(unittest.TestCase):
         }
         normalized = audit._normalize_debug_payload(payload)
         self.assertEqual(normalized["messages"][0]["role"], "system")
-        self.assertIn("# Format Guard", normalized["messages"][0]["content"])
+        self.assertNotIn("# format-guard", normalized["messages"][0]["content"])
+        self.assertIn("# format-guard", normalized["messages"][1]["content"])
         self.assertNotIn("# turn-control", normalized["messages"][0]["content"])
         self.assertIn("# turn-control", normalized["messages"][1]["content"])
 
@@ -100,7 +101,7 @@ class PromptCacheAuditTests(unittest.TestCase):
             "<channel-wake-routing></channel-wake-routing>"
             "<channel-identity></channel-identity>"
             "<channel-context></channel-context>"
-            "# Format Guard"
+            "# solo-memories\n\n"
         )
         payload = {
             "messages": [

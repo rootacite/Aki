@@ -26,14 +26,13 @@ BLOCK_ORDER = (
     "solo-transcript",
     "context",
     "turn-control",
-    "solo-format-guard",
     "format-guard",
     "wait-user",
 )
 
 _BLOCK_RE = re.compile(
     r"(?m)^# (solo-mode|solo-memories|channel-transcript|solo-transcript|"
-    r"live-context|runtime-context|turn-control|solo-format-guard|format-guard|"
+    r"live-context|runtime-context|turn-control|format-guard|"
     r"wait-user)\b[^\n]*$"
 )
 _SEQ_RE = re.compile(r"(?m)^seq:[ \t]*(\d+)[ \t]*$")
@@ -44,7 +43,7 @@ _OLD_ATTR_RE = re.compile(
 )
 _OLD_ENVELOPE_RE = re.compile(
     r"<(?:turn-control|channel-transcript|solo-memories|solo-mode|"
-    r"solo-transcript|live-context|runtime-context|solo-format-guard|format-guard)\b"
+    r"solo-transcript|live-context|runtime-context|format-guard)\b"
 )
 
 
@@ -163,7 +162,9 @@ def _balanced(text: str, tag: str) -> bool:
     return opens == closes and opens > 0
 
 
-def _validate_block(name: str, block: str, errors: list[str]) -> None:
+def _validate_block(
+    name: str, block: str, errors: list[str], *, solo: bool
+) -> None:
     if name == "context":
         if "## MemFS" not in block:
             errors.append("live/runtime context is missing ## MemFS")
@@ -194,28 +195,31 @@ def _validate_block(name: str, block: str, errors: list[str]) -> None:
         if "<wait-other" in block and not _balanced(block, "wait-other"):
             errors.append("turn-control has malformed <wait-other> boundaries")
     elif name == "format-guard":
-        if (
+        if solo:
+            if (
+                "SHORT SENTENCES BY DEFAULT" not in block
+                or "BUBBLE SPLITTING" not in block
+                or "ZERO MARKDOWN BLOAT" not in block
+                or "HIDDEN SPAN" not in block
+            ):
+                errors.append("solo format-guard body is missing")
+            for forbidden in (
+                "real-time IM chatroom",
+                "CONVERSATIONAL BREVITY (CRITICAL)",
+                "IM BUBBLE SPLITTING",
+                "2 or 3",
+                "overrides the static Format Guard",
+            ):
+                if forbidden in block:
+                    errors.append(f"solo format-guard still contains {forbidden!r}")
+        elif (
             "CONVERSATIONAL BREVITY (CRITICAL)" not in block
             or "IM BUBBLE SPLITTING" not in block
+            or "break them into a few short message bubbles" not in block
             or "ZERO MARKDOWN BLOAT" not in block
             or "HIDDEN SPAN" not in block
         ):
-            errors.append("format-guard body is missing")
-    elif name == "solo-format-guard":
-        if (
-            "SHORT SENTENCES BY DEFAULT" not in block
-            or "BUBBLE SPLITTING" not in block
-            or "ZERO MARKDOWN BLOAT" not in block
-            or "HIDDEN SPAN" not in block
-        ):
-            errors.append("solo-format-guard body is missing")
-        for forbidden in (
-            "real-time IM chatroom",
-            "CONVERSATIONAL BREVITY (CRITICAL)",
-            "2 or 3",
-        ):
-            if forbidden in block:
-                errors.append(f"solo-format-guard still contains {forbidden!r}")
+            errors.append("group format-guard body is missing")
 
 
 def analyze_request(
@@ -233,6 +237,8 @@ def analyze_request(
     prompt, seq = channel
     prefix, blocks, parse_errors = parse_overlay(prompt)
     errors = list(parse_errors)
+    all_text = "\n".join(content_text(message.get("content")) for message in messages)
+    solo = "<solo-policy" in all_text
     if not request_id:
         errors.append("request_id is missing")
     if request_id and request_id not in terminal_ids:
@@ -245,15 +251,18 @@ def analyze_request(
         errors.append(f"overlay block order is invalid: {names}")
     if names.count("context") != 1:
         errors.append("live-context/runtime-context must appear exactly once")
-    all_text = "\n".join(content_text(message.get("content")) for message in messages)
-    solo = "<solo-policy" in all_text
+    guard_headings = re.findall(
+        r"(?im)^[ \t]*#\s+(?:solo[- ])?format[- ]?guard\b[^\n]*$", all_text
+    )
+    if len(guard_headings) != 1:
+        errors.append("Format Guard must appear exactly once across the request")
     if solo:
-        if "turn-control" in names or "format-guard" in names:
-            errors.append("solo overlay still has group turn-control or format-guard")
-        if "solo-format-guard" not in names:
-            errors.append("solo-format-guard is missing")
-        elif len(names) < 2 or names[-2] != "solo-format-guard":
-            errors.append("solo-format-guard must be the second-last solo block")
+        if "turn-control" in names:
+            errors.append("solo overlay still has group turn-control")
+        if "format-guard" not in names:
+            errors.append("solo format-guard is missing")
+        elif len(names) < 2 or names[-2] != "format-guard":
+            errors.append("format-guard must be the second-last solo block")
         if "solo-transcript" in names:
             errors.append("solo overlay duplicates the solo conversation")
         if "# channel-transcript" not in all_text:
@@ -289,7 +298,7 @@ def analyze_request(
     if envelope is not None:
         errors.append(f"overlay contains legacy XML envelope {envelope.group(0)!r}")
     for name, block in blocks:
-        _validate_block(name, block, errors)
+        _validate_block(name, block, errors, solo=solo)
     for marker in SUPPRESSED_REMINDER_MARKERS:
         if marker in all_text:
             errors.append(f"suppressed Letta reminder is present: {marker}")

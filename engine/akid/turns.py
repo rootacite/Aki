@@ -9,7 +9,6 @@ from pathlib import Path
 from engine.letta_process import BackendUnavailable
 from engine.live_context import (
     render_channel_roster,
-    render_solo_format_guard,
     render_user_format_guard,
 )
 from engine.nighttalk import render_nighttalk_overlay
@@ -262,7 +261,9 @@ class TurnsMixin:
             mid_parts.append(live_block)
 
         if solo:
-            mid_parts.append(render_solo_format_guard(self.config.username))
+            mid_parts.append(
+                render_user_format_guard(self.config.username, solo=True)
+            )
             mid_parts.append(self._solo_wait_user_block(turn))
         else:
             turn_control = await self._refresh_turn_control(turn)

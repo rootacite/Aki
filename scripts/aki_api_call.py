@@ -9,8 +9,8 @@ The request mirrors akid's current prompt architecture:
 The dynamic prefix is assembled in the same order as
 ``engine/akid/turns.py::_build_turn_overlay``:
 
-  solo-memories, channel-transcript, solo-mode, solo-transcript,
-  live-context, turn-control, format-guard
+  solo-memories, channel-transcript, solo-mode, solo-transcript, live-context,
+  then group: turn-control, format-guard; solo: format-guard, wait-user
 
 Clock values are pinned to 22:00 local time so repeated runs are comparable.
 By default the turn starts from the real Letta conversation and the real group
@@ -786,6 +786,7 @@ def build_overlay(
     )
 
     if mode == "solo":
+        mid_parts.append(render_user_format_guard(username, solo=True))
         mid_parts.append(render_solo_wait_user(user_name=username))
     else:
         mid_parts.append(

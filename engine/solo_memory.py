@@ -62,7 +62,7 @@ _COMPLETE_FRAMEWORK_BLOCK_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _MARKDOWN_RUNTIME_BLOCK_RE = re.compile(
-    r"(?ms)^# (?:turn-control|solo-format-guard|format-guard|solo-mode|solo-transcript|"
+    r"(?ms)^# (?:turn-control|format-guard|solo-mode|solo-transcript|"
     r"solo-memories|channel-transcript|live-context|runtime-context)"
     r"\b[^\n]*\n.*?(?=^# [^\n]+[ \t]*$|\Z)"
 )

@@ -450,8 +450,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 隐藏段：`~[text]` 不画进 Tokifactor 聊天气泡、图片说明、成员最近消息和系统通知预览。
   第一个 `]` 结束该段，段内可以换行；没闭合的 `~[` 保持原样。行内代码和围栏代码里的
   写法保持字面量。只含隐藏段的消息或段落不生成气泡。原文仍留在频道记录里，其他成员
-  读到的 transcript 包含这段文字。群聊 `<channel-policy>`、独处 `<solo-policy>`、基础
-  Format Guard 和群聊 user-role `format-guard` 都写明这条规则。桌面气泡在拆段前去掉
+  读到的 transcript 包含这段文字。群聊 `<channel-policy>`、独处 `<solo-policy>` 和两种模式共用的
+  user-role `format-guard` 都写明这条规则。桌面气泡在拆段前去掉
   同一段，避免隐藏文字从通知里漏出来。
 - 独处模式：`akictl solo <成员>` 通过群 control 握手。目标成员切换到由群 magic 与
   memberId 派生的 solo magic，但保持 MQTT session/client id 与订阅不变；其他成员继续
@@ -539,14 +539,15 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
     <solo-policy> → # solo-mode → # solo-memories → 冻结的 # channel-transcript`。
     `solo-policy` 保留表情、发图、执行锁、隐私、历史搜索和 `~[text]` 隐藏段；不包含花名册、唤醒路由和
     `@` 交接。冻结群聊记录最多 16K token。
-  - base prompt 的 `# Format Guard` 只保留跨模式规则：短句为主且不设固定长度、
-    `\n\n` 分气泡、禁止 Markdown、`~[text]` 隐藏段；不得写死 IM 定位或气泡数量。
-  - 群聊在 user-role overlay 末尾追加严格 `# format-guard`（含 IM、2–3 气泡和 wake
-    tag 检查）。独处改追加宽松 `# solo-format-guard`，不设固定长度或气泡数量。
+  - base prompt 不包含任何 `Format Guard`；每次请求只由 user-role overlay 注入一个
+    `# format-guard`。
+  - 群聊在 user-role overlay 末尾追加严格 `# format-guard`（含 IM、a few 气泡和 wake
+    tag 检查）。独处复用同一个块名，直接替换为宽松规则，不设固定长度或气泡数量，也不得
+    再引入 `solo-format-guard` 或“覆盖静态 Format Guard”的表述。
   - 群聊 user prefix：`# channel-transcript →
     # live-context / # runtime-context → # turn-control → # format-guard`。
     独处 user prefix 只留会变的
-    `# live-context / # runtime-context → # solo-format-guard → # wait-user`。当前独处原文在 `solo`
+    `# live-context / # runtime-context → # format-guard → # wait-user`。当前独处原文在 `solo`
     conversation 里，不再另贴 `# solo-transcript`。
   - environment、agent-info、MCP、permission-mode 四类 Letta reminder 不再生成；
     Bridge 只兜底剥离这四类旧 `<system-reminder>`，agent-message、memory maintenance、

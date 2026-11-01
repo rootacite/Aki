@@ -415,8 +415,28 @@ def render_turn_control(
     return "\n".join(lines)
 
 
-def render_user_format_guard(user_name: str) -> str:
+def render_user_format_guard(user_name: str, *, solo: bool = False) -> str:
     name = _sanitize(user_name, single_line=True) or "Master"
+    if solo:
+        return "\n".join(
+            [
+                f"# {FORMAT_GUARD_TAG}",
+                "",
+                f"1. **SHORT SENTENCES BY DEFAULT (短句为主)**: Prefer short, natural "
+                f"sentences and match {name}'s rhythm. There is no fixed reply-length "
+                f"limit; continue naturally when {name} wants detail.",
+                "2. **BUBBLE SPLITTING (`\\n\\n`)**: Use `'\\n\\n'` when a distinct "
+                "thought, emotional beat, or action deserves its own bubble. Do not "
+                "cap the number of bubbles.",
+                "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. Strictly "
+                "NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO "
+                "tables. Weave requested key points into natural sentences.",
+                "4. **HIDDEN SPAN (`~[text]`)**: Text inside `~[text]` is not shown in "
+                "the Tokifactor window. `]` ends the span. Write the span as plain "
+                "text, not in backticks or a code block. The raw span stays in the "
+                "published message.",
+            ]
+        )
     return "\n".join(
         [
             f"# {FORMAT_GUARD_TAG} (STRICT ENFORCEMENT)",
@@ -428,7 +448,7 @@ def render_user_format_guard(user_name: str) -> str:
             f"unless {name} explicitly asks for a detailed breakdown. Never give background lectures or unsolicited long advice.",
             "2. **IM BUBBLE SPLITTING (`\\n\\n`)**: Real people in IM don't pack multiple thoughts into one giant wall of text. "
             "Whenever your reply has more than one sentence or shifts from an emotional reaction to a question/action, "
-            "**break them into 2 or 3 short message bubbles using `'\\n\\n'` (two newlines)**. "
+            "**break them into a few short message bubbles using `'\\n\\n'` (two newlines)**. "
             "Each block separated by `'\\n\\n'` is sent as a separate chat bubble.",
             "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. "
             "Strictly NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO tables. "
@@ -441,6 +461,7 @@ def render_user_format_guard(user_name: str) -> str:
             "backticks or a code block. The raw span stays in the published message.",
         ]
     )
+
 
 def render_channel_roster(
     *,

@@ -15,7 +15,6 @@ from engine.live_context import (
     ProcessInfo,
     render_channel_transcript,
     render_live_context,
-    render_solo_format_guard,
     render_solo_mode,
     render_solo_policy,
     render_solo_wait_user,
@@ -69,7 +68,7 @@ def request_event(seq: int, *, request_id: str | None = None) -> dict:
         "request_id": request_id or f"req-{seq}",
         "payload": {
             "messages": [
-                {"role": "system", "content": "# Format Guard"},
+                {"role": "system", "content": "Base system prompt"},
                 {"role": "user", "content": overlay(seq)},
             ]
         },
@@ -99,7 +98,7 @@ def solo_prompt(seq: int) -> str:
             transcript,
             mode,
             live,
-            render_solo_format_guard("Master"),
+            render_user_format_guard("Master", solo=True),
             render_solo_wait_user(user_name="Master"),
             f"[akid MQTT channel message]\nseq: {seq}\n"
             "sender: Master\nsource: user\nphase: final\n\nhello",
@@ -121,7 +120,7 @@ class LiveAcceptanceAnalyzerTests(unittest.TestCase):
         self.assertEqual(report["received_turns"], 5)
         self.assertEqual(report["user_seqs"], [1, 2, 3, 4, 5])
 
-    def test_accepts_solo_overlay_with_relaxed_format_guard(self) -> None:
+    def test_accepts_solo_overlay_with_mode_specific_format_guard(self) -> None:
         event = {
             "event": "request",
             "request_id": "req-solo",
@@ -129,8 +128,7 @@ class LiveAcceptanceAnalyzerTests(unittest.TestCase):
                 "messages": [
                     {
                         "role": "system",
-                        "content": "# Format Guard\n\n"
-                        + render_solo_policy(user_name="Master")
+                        "content": render_solo_policy(user_name="Master")
                         + "\n\n# channel-transcript\nfrozen",
                     },
                     {"role": "user", "content": solo_prompt(1)},
@@ -139,6 +137,33 @@ class LiveAcceptanceAnalyzerTests(unittest.TestCase):
         }
         report = analyze_events([event, terminal("req-solo")], expected_turns=1)
         self.assertEqual(report["status"], "PASS", report)
+
+    def test_rejects_group_format_guard_in_solo_overlay(self) -> None:
+        prompt = solo_prompt(1).replace(
+            render_user_format_guard("Master", solo=True),
+            render_user_format_guard("Master"),
+        )
+        event = {
+            "event": "request",
+            "request_id": "req-solo-group-guard",
+            "payload": {
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": render_solo_policy(user_name="Master")
+                        + "\n\n# channel-transcript\nfrozen",
+                    },
+                    {"role": "user", "content": prompt},
+                ]
+            },
+        }
+        report = analyze_events(
+            [event, terminal("req-solo-group-guard")], expected_turns=1
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any("solo format-guard" in error for error in report["errors"])
+        )
 
     def test_detects_duplicate_and_missing_blocks(self) -> None:
         events = [request_event(1), terminal("req-1")]
@@ -170,6 +195,16 @@ class LiveAcceptanceAnalyzerTests(unittest.TestCase):
         self.assertEqual(missing["status"], "FAIL")
         self.assertTrue(
             any("format-guard" in error for error in missing["errors"])
+        )
+
+        static_guard = request_event(3)
+        static_guard["payload"]["messages"][0]["content"] = "# Format Guard"
+        static_report = analyze_events(
+            [static_guard, terminal("req-3")], expected_turns=1
+        )
+        self.assertEqual(static_report["status"], "FAIL")
+        self.assertTrue(
+            any("exactly once" in error for error in static_report["errors"])
         )
 
     def test_detects_malformed_json_and_pending_requests(self) -> None:

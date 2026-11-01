@@ -19,7 +19,6 @@ from engine.live_context import (
     latest_solo_session_id,
     render_solo_memories,
     render_solo_mode,
-    render_user_format_guard,
 )
 from engine.solo_memory import SOLO_MEMORY_BUDGET_TOKENS
 from engine.solo_mode import load_solo_scene

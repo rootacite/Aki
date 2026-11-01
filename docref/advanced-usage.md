@@ -300,8 +300,8 @@ wake routing → identity → roster`；易变 per-turn tail 为
    execution guidance、专属域规则和输出规则。
 7. `<channel-wake-routing>`：英文 overlay 块，包含 `@成员`、`^成员` 的最终回复唤醒规则，以及“只回复用户时
    使用 `@<username>`”和 `^` 排除提示；每个 turn 按 profile username 重新渲染。
-8. `# format-guard`：静态 base 中保留 `# Format Guard`（含 `~[text]` 隐藏段）；每个 turn 在 user-role overlay
-   末尾完整重复一次，使用各自 username 渲染。
+8. `# format-guard`：基础 prompt 不再保存 `Format Guard`；每个 turn 只在 user-role overlay
+   中注入一次这个块，使用各自 username 渲染。群聊为严格规则，独处为同一块名下的宽松规则。
 9. `# live-context` / `# runtime-context`：桌面时间、焦点窗口、进程、zsh 历史、截图路径、
    Aki 生活账本，以及 MemFS 绝对路径和 MCP 信息；关闭桌面实况时使用 `# runtime-context`。
 10. `# turn-control`：当前频道 turn 的 guidance、initiation budget、execution responder、
@@ -321,8 +321,8 @@ solo 模式仍显示真实内容。分类失败按 NSFW 隐藏并在下次启动
 `search_chat_history` 不返回这些会话的正文；独处模式下可以搜到。
 
 群聊 user-role overlay 顺序固定为 `# channel-transcript → # live-context / # runtime-context →
-# turn-control → # format-guard`。独处 user-role overlay 只留 `# live-context /
-# runtime-context → # wait-user`。`# format-guard` 只重复在群聊 user 前缀末尾，不落盘。
+# turn-control → # format-guard`。独处 user-role overlay 为 `# live-context /
+# runtime-context → # format-guard → # wait-user`。两种模式都只有一个 `# format-guard`，且不落盘。
 
 ### Aki 专属工具与触发器
 

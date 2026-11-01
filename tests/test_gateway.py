@@ -1622,10 +1622,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             mid_text.index("# turn-control"), mid_text.index("# format-guard")
         )
         self.assertIn("# format-guard (STRICT ENFORCEMENT)", mid_text)
+        self.assertEqual(mid_text.count("# format-guard"), 1)
+        self.assertIn("WAKE TAG CHECK", mid_text)
         self.assertTrue(
-            mid_text.rstrip().endswith(
-                "so you do NOT accidentally wake every other agent in the room."
-            )
+            mid_text.rstrip().endswith("published message.")
         )
         self.assertNotIn("current only", mid_text)
         self.assertIn("history only", mid_text)

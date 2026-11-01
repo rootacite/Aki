@@ -40,6 +40,7 @@ DYNAMIC_TAGS = (
     "# live-context",
     "# runtime-context",
     "# format-guard",
+    "# Format Guard",
     "<wait-user",
     "<wait-other",
 )
@@ -50,7 +51,6 @@ STABLE_TAGS = (
     "<channel-identity",
     "<channel-context>",
     "# solo-memories",
-    "# Format Guard",
 )
 
 

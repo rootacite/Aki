@@ -7,13 +7,11 @@ from .transcript import _compact_history_line, render_channel_transcript
 from .types import (
     DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS,
     SOLO_MEMORIES_TAG,
-    SOLO_FORMAT_GUARD_TAG,
     SOLO_MODE_TAG,
     SOLO_TRANSCRIPT_TAG,
     _FORMAT_GUARD_RE,
     _LIVE_CONTEXT_RE,
     _SOLO_MEMORIES_RE,
-    _SOLO_FORMAT_GUARD_RE,
     _SOLO_MODE_RE,
     _SOLO_TRANSCRIPT_RE,
     _apply_dynamic_block,
@@ -28,32 +26,6 @@ NSFW_SOLO_PLACEHOLDER = (
     "[This solo session contains NSFW content, which is omitted in the group "
     "chat context but becomes visible once you return to solo mode.]"
 )
-
-
-def render_solo_format_guard(user_name: str) -> str:
-    name = _sanitize(user_name, single_line=True) or "Master"
-    return "\n".join(
-        [
-            f"# {SOLO_FORMAT_GUARD_TAG}",
-            "",
-            "This private solo session overrides the static Format Guard for "
-            "this turn.",
-            f"1. **SHORT SENTENCES BY DEFAULT (短句为主)**: Prefer short, natural "
-            f"sentences and match {name}'s rhythm. There is no fixed reply-length "
-            f"limit; continue naturally when {name} wants detail.",
-            "2. **BUBBLE SPLITTING (`\\n\\n`)**: Use `'\\n\\n'` when a distinct "
-            "thought, emotional beat, or action deserves its own bubble. Do not "
-            "cap the number of bubbles.",
-            "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. Strictly "
-            "NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO "
-            "tables. Weave requested key points into natural sentences.",
-            "4. **HIDDEN SPAN (`~[text]`)**: Text inside `~[text]` is not shown in "
-            "the Tokifactor window. `]` ends the span. Write the span as plain "
-            "text, not in backticks or a code block. The raw span stays in the "
-            "published message.",
-        ]
-    )
-
 
 
 def render_solo_mode(
@@ -115,7 +87,6 @@ def apply_solo_mode(system: str, block: str) -> str:
             _SOLO_MEMORIES_RE,
             _LIVE_CONTEXT_RE,
             _TURN_CONTROL_RE,
-            _SOLO_FORMAT_GUARD_RE,
             _FORMAT_GUARD_RE,
         ),
     )
@@ -127,7 +98,7 @@ def apply_solo_transcript(system: str, block: str) -> str:
         system,
         block,
         _SOLO_TRANSCRIPT_RE,
-        (_LIVE_CONTEXT_RE, _TURN_CONTROL_RE, _SOLO_FORMAT_GUARD_RE, _FORMAT_GUARD_RE),
+        (_LIVE_CONTEXT_RE, _TURN_CONTROL_RE, _FORMAT_GUARD_RE),
     )
 
 
