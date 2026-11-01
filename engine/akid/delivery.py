@@ -6,6 +6,11 @@ import asyncio
 import re
 import time
 from pathlib import Path
+from engine.image_compress import (
+    IMAGE_COMPRESS_THRESHOLD_BYTES,
+    ImageCompressionError,
+    compress_channel_image,
+)
 from engine.letta_process import (
     BackendProtocolError,
     BackendUnavailable,
@@ -14,6 +19,7 @@ from engine.tokifactor import (
     MAX_ATTACHMENT_NAME_CHARS,
     MAX_FILE_BYTES,
     MAX_IMAGE_BYTES,
+    MAX_IMAGE_SOURCE_BYTES,
     ImageEnvelope,
     detect_image_mime,
 )
@@ -65,12 +71,24 @@ class DeliveryMixin:
         size = path.stat().st_size
         if size <= 0:
             raise ValueError("image file is empty")
-        if size > MAX_IMAGE_BYTES:
-            raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes")
+        if size > MAX_IMAGE_SOURCE_BYTES:
+            raise ValueError(f"image exceeds {MAX_IMAGE_SOURCE_BYTES} bytes before compression")
         data = await asyncio.to_thread(path.read_bytes)
         mime = detect_image_mime(data)
         if mime is None:
             raise ValueError("unsupported image format (png/jpeg/gif/webp only)")
+        if len(data) > IMAGE_COMPRESS_THRESHOLD_BYTES:
+            try:
+                data, mime = await asyncio.to_thread(
+                    compress_channel_image,
+                    data,
+                    mime,
+                    MAX_IMAGE_BYTES,
+                )
+            except ImageCompressionError as exc:
+                raise ValueError(
+                    f"cannot compress image below {MAX_IMAGE_BYTES} bytes"
+                ) from exc
         name = (caption or path.name)[:MAX_ATTACHMENT_NAME_CHARS]
         published = await channel.publish_message(
             "",
@@ -177,9 +195,7 @@ class DeliveryMixin:
                 size = path.stat().st_size
             except OSError:
                 continue
-            if size <= 0 or size > MAX_IMAGE_BYTES:
-                continue
-            if total_bytes + size > MAX_CHANNEL_ATTACHMENT_TOTAL_BYTES:
+            if size <= 0 or size > MAX_IMAGE_SOURCE_BYTES:
                 continue
             if load_data:
                 try:
@@ -187,6 +203,19 @@ class DeliveryMixin:
                 except OSError:
                     continue
                 mime = detect_image_mime(data)
+                if mime is None:
+                    continue
+                if len(data) > IMAGE_COMPRESS_THRESHOLD_BYTES:
+                    try:
+                        data, mime = await asyncio.to_thread(
+                            compress_channel_image,
+                            data,
+                            mime,
+                            MAX_IMAGE_BYTES,
+                        )
+                    except ImageCompressionError:
+                        continue
+                size = len(data)
             else:
                 try:
                     with path.open("rb") as handle:
@@ -195,6 +224,8 @@ class DeliveryMixin:
                     continue
                 mime = detect_image_mime(data)
             if mime is None:
+                continue
+            if total_bytes + size > MAX_CHANNEL_ATTACHMENT_TOTAL_BYTES:
                 continue
             name = path.name.strip()[:MAX_ATTACHMENT_NAME_CHARS] or f"图片{len(images) + 1}"
             base = name

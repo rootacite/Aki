@@ -57,14 +57,16 @@ NONCE_BYTES = 12
 TAG_BITS = 128
 TEXT_CHUNK_THRESHOLD_BYTES = 4 * 1024
 TEXT_CHUNK_BYTES = 8 * 1024
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_SOURCE_BYTES = 64 * 1024 * 1024
 MAX_INBOUND_CHUNKS = 512
+MAX_INBOUND_PICTURE_CHUNKS = (MAX_IMAGE_BYTES + TEXT_CHUNK_BYTES - 1) // TEXT_CHUNK_BYTES
 MAX_INBOUND_CHUNK_BYTES = 2 * 1024 * 1024
 INCOMPLETE_TIMEOUT_S = 5.0
 PICTURE_TOPIC = "tokifactor/picture"
 FILE_TOPIC = "tokifactor/file"
 AVATAR_TOPIC = "tokifactor/avatar"
 CONTROL_TOPIC = "tokifactor/control"
-MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_MESSAGE_IMAGE_BYTES = 16 * 1024 * 1024
 MAX_MESSAGE_ATTACHMENTS = 4
 MAX_ATTACHMENT_NAME_CHARS = 64
@@ -825,7 +827,7 @@ class ImageChunkAssembler:
             return None
         index = int(chunk.get("index", 0))
         total = int(chunk.get("total", 0))
-        if total <= 0 or total > MAX_INBOUND_CHUNKS or index < 0 or index >= total:
+        if total <= 0 or total > MAX_INBOUND_PICTURE_CHUNKS or index < 0 or index >= total:
             return None
         transfer = self._transfers.get(transfer_id)
         if transfer is None:

@@ -174,7 +174,7 @@ user role，历史图片仍需 `ViewImage`。纯图片消息只入历史，不�
 因此该 turn user role 中的多模态 base64、assistant/tool 消息会一起消失。
 
 Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同一消息的附件；akid 会
-校验路径、格式和大小，移除指令、先上传图片再提交正文。需要在一条消息中内嵌图片时不应调用
+校验路径和格式，移除指令，把超过 2 MiB 的图片按原格式优先压缩到 2 MiB 以下再上传，最后提交正文。需要在一条消息中内嵌图片时不应调用
 `tokifactor_send_image`；该工具保留用于纯图片消息。
 
 `tokifactor_send_file` 使用 `tokifactor/file` 分片发布本地文件，路径限制与发图相同。

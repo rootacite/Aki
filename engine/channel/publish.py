@@ -9,6 +9,11 @@ import time
 import uuid
 from pathlib import Path
 from typing import Any, Mapping
+from engine.image_compress import (
+    IMAGE_COMPRESS_THRESHOLD_BYTES,
+    ImageCompressionError,
+    compress_channel_image,
+)
 from engine.tokifactor import (
     CONTROL_TOPIC,
     FILE_CHUNK_BYTES,
@@ -181,11 +186,21 @@ class PublishMixin:
         client = self._client
         if client is None or not self._connected:
             raise ChannelUnavailable("channel is not connected")
-        if len(data) > MAX_IMAGE_BYTES:
-            raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes")
         detected = mime or detect_image_mime(data)
         if detected is None:
             raise ValueError("unsupported image format (png/jpeg/gif/webp only)")
+        if len(data) > IMAGE_COMPRESS_THRESHOLD_BYTES:
+            try:
+                data, detected = await asyncio.to_thread(
+                    compress_channel_image,
+                    data,
+                    detected,
+                    MAX_IMAGE_BYTES,
+                )
+            except ImageCompressionError as exc:
+                raise ValueError(f"cannot compress image below {MAX_IMAGE_BYTES} bytes") from exc
+        if len(data) > MAX_IMAGE_BYTES:
+            raise ValueError(f"image exceeds {MAX_IMAGE_BYTES} bytes")
         transfer_id, payloads = encode_picture_payloads(
             data,
             self.magic,
@@ -320,12 +335,34 @@ class PublishMixin:
         """Publish one logical message, uploading images before the text commit."""
         if len(images) > MAX_MESSAGE_ATTACHMENTS:
             raise ValueError("a channel message may contain at most 4 images")
-        if sum(len(bytes(image.get("data") or b"")) for image in images) > MAX_MESSAGE_IMAGE_BYTES:
+        prepared: list[dict[str, Any]] = []
+        for image in images:
+            item = dict(image)
+            data = bytes(item.get("data") or b"")
+            detected = str(item.get("mime") or "") or detect_image_mime(data)
+            if len(data) > IMAGE_COMPRESS_THRESHOLD_BYTES:
+                if detected is None:
+                    raise ValueError("unsupported image format (png/jpeg/gif/webp only)")
+                try:
+                    data, detected = await asyncio.to_thread(
+                        compress_channel_image,
+                        data,
+                        detected,
+                        MAX_IMAGE_BYTES,
+                    )
+                except ImageCompressionError as exc:
+                    raise ValueError(
+                        f"cannot compress image below {MAX_IMAGE_BYTES} bytes"
+                    ) from exc
+                item["data"] = data
+                item["mime"] = detected
+            prepared.append(item)
+        if sum(len(bytes(image.get("data") or b"")) for image in prepared) > MAX_MESSAGE_IMAGE_BYTES:
             raise ValueError("channel message images exceed the size limit")
         message_id = str(uuid.uuid4())
         results: list[dict[str, Any]] = []
         total = len(images)
-        for index, image in enumerate(images):
+        for index, image in enumerate(prepared):
             result = await self.publish_image(
                 bytes(image["data"]),
                 caption=str(image.get("name") or ""),

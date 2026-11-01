@@ -9,8 +9,12 @@ from pathlib import Path
 from engine.tokifactor import (
     AvatarEnvelope,
     FileChunkAssembler,
+    ImageChunkAssembler,
+    MAX_IMAGE_BYTES,
+    MAX_INBOUND_PICTURE_CHUNKS,
     TextChunkAssembler,
     TextEnvelope,
+    TEXT_CHUNK_BYTES,
     decode_envelope,
     decode_single_payload,
     detect_image_mime,
@@ -343,6 +347,33 @@ class TokifactorWireTests(unittest.TestCase):
         self.assertIsNotNone(chunk)
         assert chunk is not None
         self.assertTrue(chunk["text_commit"])
+
+    def test_picture_assembler_accepts_image_above_old_chunk_cap(self) -> None:
+        data = PNG_1X1 + b"\0" * (4 * 1024 * 1024)
+        transfer_id, payloads = encode_picture_payloads(
+            data,
+            MAGIC,
+            sender="Haru",
+            sender_id="haru-1",
+            message_id="message-large",
+        )
+        self.assertGreater(len(payloads), 512)
+        self.assertEqual(
+            MAX_INBOUND_PICTURE_CHUNKS,
+            (MAX_IMAGE_BYTES + TEXT_CHUNK_BYTES - 1) // TEXT_CHUNK_BYTES,
+        )
+        assembler = ImageChunkAssembler(MAGIC)
+        result = None
+        for payload in payloads:
+            chunk = parse_text_chunk(payload)
+            self.assertIsNotNone(chunk)
+            assert chunk is not None
+            result = assembler.add(chunk)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.transfer_id, transfer_id)
+        self.assertEqual(result.message_id, "message-large")
+        self.assertEqual(result.data, data)
 
     def test_file_payload_round_trip_with_path_metadata(self) -> None:
         data = b"file body\x00\xff" + b"x" * (150 * 1024)

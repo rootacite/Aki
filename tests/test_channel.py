@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from PIL import Image
+
 from engine.channel import TokifactorChannel
+from engine.image_compress import IMAGE_COMPRESS_THRESHOLD_BYTES
 from engine.mqtt_client import MqttClient
 from engine.tokifactor import (
     AVATAR_TOPIC,
@@ -15,6 +20,7 @@ from engine.tokifactor import (
     FILE_TOPIC,
     FileEnvelope,
     PICTURE_TOPIC,
+    MAX_IMAGE_BYTES,
     decrypt_bytes,
     decode_single_payload,
     encode_avatar_have,
@@ -409,6 +415,27 @@ class ChannelTransportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.channel.health()["images_sent"], 1)
         await asyncio.sleep(0.2)
         self.assertEqual(self.peer_messages, [])
+
+    async def test_publish_image_compresses_oversized_input(self) -> None:
+        await self.channel.start()
+        await wait_until(lambda: self.channel.connected)
+        image = Image.frombytes(
+            "RGB",
+            (2048, 2048),
+            os.urandom(2048 * 2048 * 3),
+        )
+        output = io.BytesIO()
+        image.save(output, "PNG", compress_level=0)
+        data = output.getvalue()
+        self.assertGreater(len(data), MAX_IMAGE_BYTES)
+
+        result = await self.channel.publish_image(
+            data,
+            caption="oversized",
+            mime="image/png",
+        )
+        self.assertEqual(result["mime"], "image/png")
+        self.assertLessEqual(result["bytes"], IMAGE_COMPRESS_THRESHOLD_BYTES)
 
     async def test_mixed_message_uploads_images_before_text_commit(self) -> None:
         await self.channel.start()

@@ -848,7 +848,9 @@ Natsu 的 `~/.aki/natsu.conf` 使用 `[mcp] native_tools = true` 且 `excluded` 
 
 tokifactor 现在支持一条消息同时包含正文和最多 4 张图片。输入区选图后可以先编辑每张图的
 消息内名称（默认 `图片1`、`图片2`），再连同正文一起发送；正文直接提到名称即可指代。
-单图最大 8 MiB，单条消息总计最大 16 MiB。接收端按 `messageId` 聚合图片和正文，频道历史
+单图传输上限 8 MiB，单条消息总计最大 16 MiB；超过 2 MiB 的源图会在发送前按原格式优先压缩到
+2 MiB 以下（源文件上限 64 MiB），确实压不下去时保留 8 MiB 以内的原图，超过 8 MiB 且压缩失败
+则拒绝。接收端按 `messageId` 聚合图片和正文，频道历史
 只保存名称与本地路径。带图消息触发智能体时，图片按名称顺序作为当前 turn 的多模态输入；
 历史图片不会重复嵌入，system prompt 只保留 `{"name":"…","path":"…"}`。纯图片只记录、
 不唤醒智能体。由其他智能体唤醒的临时 turn 回滚时，多模态 user 消息和该 turn 的后续消息
@@ -889,7 +891,7 @@ akid 通过 Letta external tool 协议注册独立工具 `tokifactor_send_image`
 {"path": "/tmp/example.png", "caption": "图片名称（可选）"}
 ```
 
-- 只接受 PNG、JPEG、GIF、WebP，最大 8 MiB。
+- 只接受 PNG、JPEG、GIF、WebP；超过 2 MiB 的图优先压缩到 2 MiB 以下，原始文件最大 64 MiB。
 - 图片路径必须在 `/tmp`、`~/.local/share/tmp` 或用户已注册的可写目录内。
 - 使用 tokifactor `PictureChunk` 协议加密分片发布到 `tokifactor/picture`。
 - 可选 caption 会加密为这张图片的名称，并作为纯图片消息写入发送者自己的频道历史。
