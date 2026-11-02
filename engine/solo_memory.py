@@ -18,9 +18,13 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 from engine.aki_config import atomic_write, state_dir
-from engine.live_context import estimate_tokens, render_solo_memories
+from engine.live_context import (
+    DEFAULT_SOLO_MEMORY_BUDGET_TOKENS,
+    estimate_tokens,
+    render_solo_memories,
+)
 
-SOLO_MEMORY_BUDGET_TOKENS = 64 * 1024
+SOLO_MEMORY_BUDGET_TOKENS = DEFAULT_SOLO_MEMORY_BUDGET_TOKENS
 SOLO_SUMMARY_TIMEOUT_SECONDS = 200.0
 SOLO_NSFW_TIMEOUT_SECONDS = 120.0
 SOLO_NSFW_MAX_TOKENS = 32 * 1024

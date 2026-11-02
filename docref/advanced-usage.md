@@ -308,8 +308,9 @@ wake routing → identity → roster`；易变 per-turn tail 为
     `wait_user` / `wait_other`；不复制消息正文。临时拼在当前 user role 消息开头。
 11. `# channel-transcript`：群聊时临时拼在 user-role 前缀。独处时冻结后放进
     system_append，估算最多 16K token。`# solo-memories` 在群聊和独处都放进
-    system_append；群聊给最近一次结束的会话标 `just_ended`。`# solo-mode` 只在独处的
-    system_append 里。当前独处原文在 solo conversation，不再另贴 `# solo-transcript`。
+    system_append，预算 32K token；超出时从旧到新整段淘汰 solo 会话，不截断单个会话。
+    群聊给最近一次结束的会话标 `just_ended`。`# solo-mode` 只在独处的 system_append 里。
+    当前独处原文在 solo conversation，不再另贴 `# solo-transcript`。
 
 退出独处时先写 summary，再用第二次独立 API call 和专用 system prompt 判断本次会话是否
 包含明确的性行为或裸露；调用不带人格或智能体上下文，并且只允许走 solo 模型路由，
@@ -800,6 +801,29 @@ idle_timeout = 900
 `idle_timeout` 秒内没有活动，akid 会向进程组发送 SIGINT 并关闭服务；下一条消息
 重新拉起。端点已由非 akid 进程占用时会报错，不会接管。未配置 `startup_script`
 时独处继续使用群聊模型。旧 `[solo] model` 已移除，残留会报配置错误。
+
+需要测量“现在立刻发起一个 solo turn 时，第一个 API call 有多快”时，可以运行：
+
+```bash
+python3 scripts/local-benchmark.py --profile aki
+python3 scripts/local-benchmark.py --profile aki --case coding-merge-intervals --repeat 3
+python3 scripts/local-benchmark.py --profile aki --json /tmp/aki-benchmark.json
+```
+
+脚本只读当前的 agent record `system`、MemFS `HEAD`、solo conversation、solo memory、
+冻结群聊记录和 live context，按运行时顺序重新注入当前 core memory 并拼出 `system_append` 与
+`user_message_prefix`，然后对 `[solo]` 本地模型做一次流式 API 调用。它不会发送
+频道消息，也不会写 conversation、频道历史或 solo memory。后端未运行时，脚本会用
+临时状态目录启动一个独立进程并在退出时关闭；`--backend existing` 可强制只使用
+已运行的后端。默认样例包括一个生成任务和两个编码任务，报告 TTFT、总耗时、
+token/s、代码产出和隔离测试结果。默认带 profile/akid 可枚举的工具 schema；如果只想测
+纯文本生成，可加 `--tools none`。精确的 MCP/客户端工具集合仍取决于运行时状态，脚本不会
+为了基准测试去注册或调用真实工具。
+
+每个 case 会打印各区块的 `estimate_tokens` 占比表（system/base、各个 overlay、历史、
+当前 user、tool schema）和测试用例定义，但不会打印完整 system prompt 或 tool 列表。
+请求期间正文 delta 会实时输出；需要同时看 reasoning 时加 `--stream-reasoning`。自动化
+场景可用 `--no-stream-output` 关闭流式输出；需要原始请求时用 `--dump-request-dir` 写入文件。
 
 独处模式下，目标成员不需要用户先用 `@` 指派执行者，就可以直接获取整机执行锁；
 网关会把该 turn 的授权来源标记为 `solo-mode`，`<solo-mode>` 与独处 turn guidance

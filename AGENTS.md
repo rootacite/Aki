@@ -465,8 +465,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   loopback LLM proxy 生成，超时 200 秒。正文为空时用和频道 turn 相同的规则从
   reasoning 里抽出回复再解析 JSON；仍然失败才写入确定性 fallback，并在下次 solo
   backend 启动时重试。
-  历史独处会话以 `<solo-memories budget_tokens="65536">` 只注入本 Agent；超预算时由
-  独立人格 API 批量选择淘汰，原文归档到 MemFS `solo/<session_id>.md` 并提交 git。
+  历史独处会话以 `<solo-memories budget_tokens="32768">` 只注入本 Agent；超预算时按
+  从旧到新的顺序整段淘汰 solo 会话，绝不截断单个会话，原文归档到 MemFS
+  `solo/<session_id>.md` 并提交 git。
   API/JSON/ID 校验失败或淘汰后仍超预算时，不修改 active 存储，当前 prompt 只渲染预算内
   最新内容。`<solo-memories>` 同时注入独处和群聊请求；最近一次结束的会话
   标 `just_ended`。摘要走 solo 的运行时模型；未配置 solo 启动脚本时使用群聊模型。

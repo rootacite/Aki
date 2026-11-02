@@ -25,6 +25,7 @@ from engine.solo_memory import (
     SOLO_NSFW_REASONING_BUDGET_TOKENS,
     SOLO_NSFW_SYSTEM_PROMPT,
     SOLO_NSFW_TIMEOUT_SECONDS,
+    SOLO_MEMORY_BUDGET_TOKENS,
     SOLO_SUMMARY_TIMEOUT_SECONDS,
     SoloMemoryEntry,
     SoloMemoryManager,
@@ -204,6 +205,56 @@ class SoloMemoryStoreTests(unittest.TestCase):
         )
         self.assertTrue(failed.nsfw)
 
+    def test_solo_memory_budget_is_32k(self) -> None:
+        self.assertEqual(SOLO_MEMORY_BUDGET_TOKENS, 32 * 1024)
+
+    def test_render_budget_drops_old_sessions_whole_never_partial(self) -> None:
+        old = SoloMemorySession(
+            session_id="old",
+            started_at="2026-10-24T10:00:00Z",
+            ended_at="2026-10-24T10:10:00Z",
+            summary="OLD SESSION SUMMARY",
+            entries=[
+                entry(1, "OLD_ONE " + "旧" * 2000),
+                entry(2, "OLD_TWO " + "旧" * 2000),
+            ],
+        )
+        newest = SoloMemorySession(
+            session_id="newest",
+            started_at="2026-10-26T10:00:00Z",
+            ended_at="2026-10-26T10:10:00Z",
+            summary="NEWEST SESSION SUMMARY",
+            entries=[entry(3, "NEWEST_ONE"), entry(4, "NEWEST_TWO")],
+        )
+        newest_only = estimate_tokens(
+            render_solo_memories([newest], budget_tokens=10**9)
+        )
+        rendered = render_solo_memories(
+            [old, newest],
+            budget_tokens=max(1024, newest_only + 1),
+        )
+        self.assertIn("NEWEST_ONE", rendered)
+        self.assertIn("NEWEST_TWO", rendered)
+        self.assertNotIn("OLD_ONE", rendered)
+        self.assertNotIn("OLD_TWO", rendered)
+        self.assertNotIn("OLD SESSION SUMMARY", rendered)
+
+    def test_render_budget_drops_oversized_session_whole(self) -> None:
+        huge = SoloMemorySession(
+            session_id="huge",
+            started_at="2026-10-26T10:00:00Z",
+            ended_at="2026-10-26T10:10:00Z",
+            summary="HUGE SESSION SUMMARY",
+            entries=[
+                entry(1, "HUGE_ONE " + "大" * 5000),
+                entry(2, "HUGE_TWO " + "大" * 5000),
+            ],
+        )
+        self.assertEqual(
+            render_solo_memories([huge], budget_tokens=1024),
+            "",
+        )
+
     def test_memory_prompt_keeps_core_blocks_and_ignores_inline_tool_reference(
         self,
     ) -> None:
@@ -326,7 +377,7 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.api.stop()
         self.tempdir.cleanup()
 
-    def manager(self, budget: int = 64 * 1024) -> SoloMemoryManager:
+    def manager(self, budget: int = SOLO_MEMORY_BUDGET_TOKENS) -> SoloMemoryManager:
         return SoloMemoryManager(
             profile="aki",
             path=self.root / "solo-memory.json",

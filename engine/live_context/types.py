@@ -51,6 +51,11 @@ DEFAULT_CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 32 * 1024
 
 DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS = 64 * 1024
 
+# Archived solo sessions injected into either group or solo prompts. Keep this
+# separate from the solo transcript budget; memories are always evicted as
+# whole sessions.
+DEFAULT_SOLO_MEMORY_BUDGET_TOKENS = 32 * 1024
+
 # Frozen group history injected during solo. Measured with estimate_tokens.
 SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 16 * 1024
 

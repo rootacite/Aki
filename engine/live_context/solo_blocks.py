@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from .transcript import _compact_history_line, render_channel_transcript
 from .types import (
+    DEFAULT_SOLO_MEMORY_BUDGET_TOKENS,
     DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS,
     SOLO_MEMORIES_TAG,
     SOLO_MODE_TAG,
@@ -188,7 +189,7 @@ def _solo_memory_session_lines(
 def render_solo_memories(
     sessions: Iterable[Any],
     *,
-    budget_tokens: int = DEFAULT_SOLO_TRANSCRIPT_BUDGET_TOKENS,
+    budget_tokens: int = DEFAULT_SOLO_MEMORY_BUDGET_TOKENS,
     just_ended_session_id: str = "",
     group_context: bool = False,
 ) -> str:
@@ -235,26 +236,18 @@ def render_solo_memories(
     if estimate_tokens(selector) <= budget:
         return selector
 
-    # Keep the newest content that fits.  This is a view-only fallback; it
-    # never mutates the active store.
-    from dataclasses import replace
-
-    working = [
-        replace(session, entries=list(getattr(session, "entries", ()) or ()))
-        for session in ordered
-    ]
-    block = build(working)
-    while estimate_tokens(block) > budget and working:
-        dropped = False
-        for session in working:
-            if session.entries:
-                session.entries.pop(0)
-                dropped = True
-                break
-        if not dropped:
-            working.pop(0)
+    # Keep the newest whole sessions that fit. This is a view-only fallback; it
+    # never mutates the active store. A session is either rendered in full or
+    # removed in full, even when the newest session alone exceeds the budget.
+    working = list(ordered)
+    while working:
+        working.pop(0)
+        if not working:
+            break
         block = build(working)
-    return block if estimate_tokens(block) <= budget else ""
+        if estimate_tokens(block) <= budget:
+            return block
+    return ""
 
 
 
