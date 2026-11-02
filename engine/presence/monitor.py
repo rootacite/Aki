@@ -50,6 +50,7 @@ class PresenceMonitor:
         night_start: str = DEFAULT_NIGHT_START,
         night_end: str = DEFAULT_NIGHT_END,
         night_history_days: int = DEFAULT_NIGHT_HISTORY_DAYS,
+        late_night_enabled: bool = False,
         return_idle_seconds: int = DEFAULT_RETURN_IDLE_SECONDS,
         return_debounce_seconds: int = DEFAULT_RETURN_DEBOUNCE_SECONDS,
         logger: logging.Logger | None = None,
@@ -63,6 +64,7 @@ class PresenceMonitor:
         self.night_start = parse_clock(night_start, DEFAULT_NIGHT_START)
         self.night_end = parse_clock(night_end, DEFAULT_NIGHT_END)
         self.night_history_days = max(1, int(night_history_days))
+        self.late_night_enabled = bool(late_night_enabled)
         self.return_idle_seconds = max(60, int(return_idle_seconds))
         self.return_debounce_seconds = max(0, int(return_debounce_seconds))
         self.logger = logger or logging.getLogger("akid.presence")
@@ -247,37 +249,38 @@ class PresenceMonitor:
                     next_threshold += self.work_repeat_seconds
                 previous["next_work_threshold"] = next_threshold
 
-            cycle = self._night_cycle(clock)
-            dates = list(previous.get("late_night_dates") or [])
-            if cycle and cycle not in dates:
-                prior = [item for item in dates if item != cycle]
-                cutoff = (
-                    datetime.fromtimestamp(clock).astimezone().date()
-                    - timedelta(days=self.night_history_days)
-                )
-                prior = [item for item in prior if _date_key(item) >= cutoff]
-                triggers.append(
-                    PresenceTrigger(
-                        "late_night",
-                        {
-                            "current_time": datetime.fromtimestamp(clock)
-                            .astimezone()
-                            .isoformat(timespec="seconds"),
-                            "cycle_date": cycle,
-                            "night_work_count": len(set(prior)),
-                            "history_days": self.night_history_days,
-                        },
+            if self.late_night_enabled:
+                cycle = self._night_cycle(clock)
+                dates = list(previous.get("late_night_dates") or [])
+                if cycle and cycle not in dates:
+                    prior = [item for item in dates if item != cycle]
+                    cutoff = (
+                        datetime.fromtimestamp(clock).astimezone().date()
+                        - timedelta(days=self.night_history_days)
                     )
-                )
-                dates.append(cycle)
-                dates = [
-                    item
-                    for item in dates
-                    if _date_key(item)
-                    >= datetime.fromtimestamp(clock).astimezone().date()
-                    - timedelta(days=self.night_history_days)
-                ]
-                previous["late_night_dates"] = sorted(set(dates))
+                    prior = [item for item in prior if _date_key(item) >= cutoff]
+                    triggers.append(
+                        PresenceTrigger(
+                            "late_night",
+                            {
+                                "current_time": datetime.fromtimestamp(clock)
+                                .astimezone()
+                                .isoformat(timespec="seconds"),
+                                "cycle_date": cycle,
+                                "night_work_count": len(set(prior)),
+                                "history_days": self.night_history_days,
+                            },
+                        )
+                    )
+                    dates.append(cycle)
+                    dates = [
+                        item
+                        for item in dates
+                        if _date_key(item)
+                        >= datetime.fromtimestamp(clock).astimezone().date()
+                        - timedelta(days=self.night_history_days)
+                    ]
+                    previous["late_night_dates"] = sorted(set(dates))
         else:
             if initialized_before and not previous.get("last_idle_started_at"):
                 previous["last_idle_started_at"] = float(sample.idle_since or clock)
@@ -390,6 +393,7 @@ class PresenceMonitor:
             "valid": sample.valid if sample is not None else None,
             "last_sample_at": self._state.get("last_sample_at"),
             "last_trigger": self._state.get("last_trigger"),
+            "late_night_enabled": self.late_night_enabled,
             "late_night_dates": list(self._state.get("late_night_dates") or []),
             "last_error": self.last_error,
         }

@@ -117,6 +117,15 @@ class AkiConfigTests(unittest.TestCase):
             "http://192.168.50.100:7890;http://192.168.3.2:7890",
         )
 
+    def test_late_night_trigger_defaults_off_and_can_be_enabled(self) -> None:
+        atomic_write(self.path, template_text())
+        self.assertFalse(load_config(self.path).presence_late_night_enabled)
+        set_key(self.path, "presence", "late_night", "true")
+        self.assertTrue(load_config(self.path).presence_late_night_enabled)
+        set_key(self.path, "presence", "late_night", "maybe")
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
     def test_listen_must_be_loopback(self) -> None:
         atomic_write(self.path, template_text())
         set_key(self.path, "proxy", "listen", "0.0.0.0:7721")

@@ -35,6 +35,7 @@ class PresenceTests(unittest.TestCase):
             night_start="00:30",
             night_end="05:30",
             night_history_days=30,
+            late_night_enabled=True,
         )
 
     def tearDown(self) -> None:
@@ -100,6 +101,18 @@ class PresenceTests(unittest.TestCase):
         noon = local_epoch(2026, 10, 24, 12, 0)
         triggers = self.monitor.process_sample(active(noon), now=noon)
         self.assertFalse([item for item in triggers if item.kind == "late_night"])
+
+    def test_late_night_is_off_by_default(self) -> None:
+        monitor = PresenceMonitor(
+            Path(self.tempdir.name) / "late-night-off.json",
+            night_start="00:30",
+            night_end="05:30",
+        )
+        first = local_epoch(2026, 10, 24, 1, 0)
+        triggers = monitor.process_sample(active(first), now=first)
+        self.assertFalse([item for item in triggers if item.kind == "late_night"])
+        self.assertFalse(monitor.status()["late_night_enabled"])
+        self.assertEqual(monitor.status()["late_night_dates"], [])
 
     def test_return_requires_debounce(self) -> None:
         start = local_epoch(2026, 10, 24, 8, 0)

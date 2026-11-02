@@ -343,6 +343,7 @@ def build_config_from_env(profile: str | None = None) -> GatewayConfig:
         presence_night_start=aki.presence_night_start,
         presence_night_end=aki.presence_night_end,
         presence_night_history_days=aki.presence_night_history_days,
+        presence_late_night_enabled=aki.presence_late_night_enabled,
         presence_return_idle_seconds=aki.presence_return_idle_seconds,
         presence_return_debounce_seconds=aki.presence_return_debounce_seconds,
         solo_state=(

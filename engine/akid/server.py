@@ -340,6 +340,7 @@ class ServerMixin:
             night_start=config.presence_night_start,
             night_end=config.presence_night_end,
             night_history_days=config.presence_night_history_days,
+            late_night_enabled=config.presence_late_night_enabled,
             return_idle_seconds=config.presence_return_idle_seconds,
             return_debounce_seconds=config.presence_return_debounce_seconds,
         )

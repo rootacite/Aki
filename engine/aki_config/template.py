@@ -103,6 +103,8 @@ work_repeat_seconds = 3600
 night_start = 00:30
 night_end = 05:30
 night_history_days = 30
+# 深夜仍活跃时的熬夜提醒；默认关闭。
+late_night = false
 return_idle_seconds = 2700
 return_debounce_seconds = 10
 
@@ -287,6 +289,8 @@ work_repeat_seconds = 3600
 night_start = 00:30
 night_end = 05:30
 night_history_days = 30
+# 深夜仍活跃时的熬夜提醒；默认关闭。
+late_night = false
 return_idle_seconds = 2700
 return_debounce_seconds = 10
 
@@ -413,6 +417,8 @@ work_repeat_seconds = 3600
 night_start = 00:30
 night_end = 05:30
 night_history_days = 30
+# 深夜仍活跃时的熬夜提醒；默认关闭。
+late_night = false
 return_idle_seconds = 2700
 return_debounce_seconds = 10
 

@@ -257,6 +257,7 @@ class AkiConfig:
     presence_night_start: str = "00:30"
     presence_night_end: str = "05:30"
     presence_night_history_days: int = 30
+    presence_late_night_enabled: bool = False
     presence_return_idle_seconds: int = 2700
     presence_return_debounce_seconds: int = 10
     solo_transcript_budget_tokens: int = 64 * 1024

@@ -677,6 +677,9 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         presence_night_history_days=_int_or(
             parser, "presence", "night_history_days", 30, minimum=1
         ),
+        presence_late_night_enabled=_bool_or(
+            parser, "presence", "late_night", False
+        ),
         presence_return_idle_seconds=_int_or(
             parser, "presence", "return_idle_seconds", 2700, minimum=60
         ),
