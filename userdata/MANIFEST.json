@@ -1,13 +1,13 @@
 {
   "source": "~/.letta/lc-local-backend/memfs/agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc/memory",
-  "memfs_commit": "bd9388100c8047987542ebcb648123ba21a12e70",
+  "memfs_commit": "539fc989ef2779ffaafde105a8f7f1b2599dd9d0",
   "username": "Master",
   "placeholder": "{{USERNAME}}",
-  "synced_at": "2026-11-02T18:05:16.391305Z",
+  "synced_at": "2026-11-02T23:11:51.230047Z",
   "templates": {
     "persona.md": {
-      "sha256": "dfc1422b793dd1968bcbd522dc9f62119bd7714f89c96da35ed7c3e4fb0ee029",
-      "bytes": 5695
+      "sha256": "0adace7f7bde12b9f637fe2bdd5a74a13ab726c8bcc7a45af8715a40da43d44e",
+      "bytes": 5953
     },
     "memory-policy.md": {
       "sha256": "692786a5ecd9967ff7985081aea6e3a125655501814d563e25914bb110a73320",
@@ -18,8 +18,8 @@
       "bytes": 568
     },
     "character/voice.md": {
-      "sha256": "682d97511e3d3dad8056bcba3def19821c6569b423b6de4ff09162507cf5187b",
-      "bytes": 3427
+      "sha256": "c51635d4ef45f75561fb7139943139ec5ea8f3e865dc8e074e3da974abbf0350",
+      "bytes": 3697
     },
     "character/relationship.md": {
       "sha256": "58f271a1aab5bd0e599fc1f57a64178eb3016694d778c290799607e6d37a8a6c",
@@ -30,14 +30,14 @@
       "bytes": 1174
     },
     "character/examples.md": {
-      "sha256": "7768eff220a73d0416a736d5efeac7f9ae0cb17f9bc97b9db0926df0b830efe5",
-      "bytes": 3016
+      "sha256": "dd6740544e1f77c2b9168b851b5a2d93cceaa160a66b8a3733f5d279b1897d1a",
+      "bytes": 3007
     }
   },
   "rendered": {
     "persona.md": {
-      "sha256": "7e6be3b9ebf60c12511814ff88db57962a0f652dbb7da2a168c8755a7c04e4de",
-      "bytes": 5611
+      "sha256": "f932fb572ef412b4a5acb0e52e9203f923f2bbf0000109ce340c608ca8843004",
+      "bytes": 5869
     },
     "memory-policy.md": {
       "sha256": "7bdcbaf92f5768843aa15db4d5fe7977a208ff4e2780a35af88b5c88e0259844",
@@ -48,8 +48,8 @@
       "bytes": 568
     },
     "character/voice.md": {
-      "sha256": "5df52af9f5b047505d7e4ec70c7523d8c24b9708b2e4f020cd017db20a8bfc59",
-      "bytes": 3409
+      "sha256": "cb6b86d2c32cb6a957b87a1b621c50d05a3d1ffbfad9e5278473e361ad3cf7ee",
+      "bytes": 3679
     },
     "character/relationship.md": {
       "sha256": "f693b913da1e586ec1a75f73c382e5254614b0b2c6e8bbb535a27b22edd6f9b7",
@@ -60,8 +60,8 @@
       "bytes": 1174
     },
     "character/examples.md": {
-      "sha256": "7768eff220a73d0416a736d5efeac7f9ae0cb17f9bc97b9db0926df0b830efe5",
-      "bytes": 3016
+      "sha256": "dd6740544e1f77c2b9168b851b5a2d93cceaa160a66b8a3733f5d279b1897d1a",
+      "bytes": 3007
     }
   },
   "excluded": [
