@@ -62,7 +62,7 @@
   },
   "215": {
     "inputs": {
-      "text": "1girl, large breasts, hair ornament, solo, shy, open eyes, blush, from above, sitting, cleavage, looking at viewer, bedroom, indoors, bed, night, warm light, best quality, newest, highres",
+      "text": "aki_character, 1girl, large breasts, hair ornament, solo, shy, open eyes, blush, from above, sitting, cleavage, looking at viewer, bedroom, indoors, bed, night, warm light, best quality, newest, highres",
       "clip": [
         "207:219",
         1
@@ -115,7 +115,7 @@
   },
   "224": {
     "inputs": {
-      "seed": 712539060003119
+      "seed": 1059822493852672
     },
     "class_type": "SeedNode",
     "_meta": {
@@ -151,9 +151,9 @@
   },
   "207:219": {
     "inputs": {
-      "lora_name": "Asumi.safetensors",
-      "strength_model": 0.6,
-      "strength_clip": 0.6,
+      "lora_name": "Aki.safetensors",
+      "strength_model": 0.95,
+      "strength_clip": 0.95,
       "model": [
         "207:266",
         0
@@ -202,7 +202,7 @@
   "198:196": {
     "inputs": {
       "upscale_by": 2,
-      "seed": 1101326571581140,
+      "seed": 583852015191314,
       "steps": 18,
       "cfg": 5.2,
       "sampler_name": "euler_ancestral",
@@ -310,7 +310,7 @@
       "guide_size": 384,
       "guide_size_for": true,
       "max_size": 512,
-      "seed": 974021680117518,
+      "seed": 724850542374675,
       "steps": 28,
       "cfg": 5.2,
       "sampler_name": "euler_ancestral",
