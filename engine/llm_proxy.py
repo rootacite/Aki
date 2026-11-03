@@ -99,6 +99,17 @@ class ContentFilterRetryPolicy:
         return self.attempts > 1 and self.budget_s > 0
 
 
+def content_filter_retry_policy(route: ModelRoute) -> ContentFilterRetryPolicy:
+    evidence = route.content_filter_evidence_dir.strip()
+    return ContentFilterRetryPolicy(
+        attempts=route.content_filter_retry,
+        budget_s=route.content_filter_retry_budget_s,
+        buffer_limit=route.content_filter_retry_buffer_limit,
+        evidence_dir=Path(evidence).expanduser() if evidence else None,
+        evidence_max_bytes=route.content_filter_evidence_max_bytes,
+    )
+
+
 @dataclass
 class _BufferedResponse:
     status: int
@@ -153,7 +164,6 @@ class LlmProxy:
         debug_socket: str | os.PathLike[str] | None = None,
         solo_runtime_path: str | os.PathLike[str] | None = None,
         solo_activity_path: str | os.PathLike[str] | None = None,
-        content_filter_retry: ContentFilterRetryPolicy | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -163,7 +173,6 @@ class LlmProxy:
         self._configured_routes: dict[str, ModelRoute] = {}
         self.routes: dict[str, ModelRoute] = {}
         self.profile = profile
-        self.content_filter_retry = content_filter_retry or ContentFilterRetryPolicy()
         self.solo_runtime_path = (
             Path(solo_runtime_path).expanduser()
             if solo_runtime_path is not None
@@ -316,13 +325,16 @@ class LlmProxy:
             sorted(self.routes),
             via,
         )
-        if self.content_filter_retry.enabled:
-            LOGGER.info(
-                "content-filter retry enabled attempts=%s budget_s=%s evidence=%s",
-                self.content_filter_retry.attempts,
-                self.content_filter_retry.budget_s,
-                self.content_filter_retry.evidence_dir,
-            )
+        for model_id, route in sorted(self.routes.items()):
+            policy = content_filter_retry_policy(route)
+            if policy.enabled:
+                LOGGER.info(
+                    "content-filter retry enabled model=%s attempts=%s budget_s=%s evidence=%s",
+                    model_id,
+                    policy.attempts,
+                    policy.budget_s,
+                    policy.evidence_dir,
+                )
 
     async def stop(self) -> None:
         server = self._server
@@ -498,7 +510,7 @@ class LlmProxy:
                     and "continue_final_message" not in payload
                 ),
                 request_payload=payload,
-                content_filter_retry=self.content_filter_retry,
+                content_filter_retry=content_filter_retry_policy(route),
             )
         except OSError as exc:
             LOGGER.warning(
@@ -799,7 +811,7 @@ async def _forward_with_content_filter_retry(
             )
             break
 
-        if response.status == 200 and _is_content_filter_response(response):
+        if _is_content_filter_response(response):
             filtered.append(response)
             last_response = response
             evidence.record_filtered(attempt, response, request_header_map)
@@ -864,6 +876,16 @@ async def _forward_with_content_filter_retry(
                     evidence.bundle,
                 )
                 evidence.finish_upstream_error(response, filtered)
+            await _write_buffered_response(client, response)
+            _debug_response(
+                debug,
+                request_id,
+                response.status,
+                _forwarded_response_headers(response),
+                response.body,
+            )
+            return response.status
+
         await _write_buffered_response(client, response)
         _debug_response(
             debug,

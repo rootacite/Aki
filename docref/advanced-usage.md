@@ -140,14 +140,15 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 
 ### content_filter 透明重试
 
-`akid-proxy` 可以拦截上游 SSE 终止帧里的 `finish_reason: content_filter`（以及
-`native_finish_reason` 为安全类原因）并在代理内部重放同一请求。重试对上层透明：失败
-attempt 的内容不会写入 Letta；只有第一个非 content-filter 的完整响应会转发给上层。
-为了做到这一点，代理会完整缓冲每次 attempt，因此正常回复的逐 token 显示会推迟到该
-attempt 结束。
+`akid-proxy` 可以拦截上游响应里的 `finish_reason: content_filter`（以及
+`native_finish_reason` 为安全类原因）并在代理内部重放同一请求。判定不要求 HTTP 200：
+只要响应体中的 `choices[].finish_reason` 或 `choices[].native_finish_reason` 命中，就会
+重试，包括 4xx/5xx 响应。重试对上层透明：失败 attempt 的内容不会写入 Letta；只有第一个
+非 content-filter 的完整响应会转发给上层。为了做到这一点，代理会完整缓冲每次 attempt，
+因此正常回复的逐 token 显示会推迟到该 attempt 结束。
 
 ```ini
-[proxy]
+[model.gemini-3.8-flash]
 # 总尝试次数，包含原始请求。1 表示关闭。
 content_filter_retry = 5
 content_filter_retry_budget_s = 240
@@ -155,6 +156,9 @@ content_filter_retry_buffer_limit = 33554432
 content_filter_evidence_dir = ~/.aki/evidence/content-filter
 content_filter_evidence_max_bytes = 268435456
 ```
+
+重试策略按模型路由独立配置，不再属于 profile 级 `[proxy]`。只有配置了
+`content_filter_retry > 1` 的模型会重试，其他模型不受影响。
 
 发生 content-filter 时，代理把精确的 upstream request body、脱敏后的请求头、每个失败
 attempt 的原始响应、`summary.json` 和 `SHA256SUMS` 写入 evidence 目录（`0700`/`0600`）。

@@ -120,26 +120,28 @@ class AkiConfigTests(unittest.TestCase):
     def test_content_filter_retry_defaults_and_override(self) -> None:
         atomic_write(self.path, template_text())
         config = load_config(self.path)
-        self.assertEqual(config.content_filter_retry, 1)
-        self.assertEqual(config.content_filter_retry_budget_s, 240.0)
-        self.assertEqual(config.content_filter_retry_buffer_limit, 32 * 1024 * 1024)
-        self.assertEqual(config.content_filter_evidence_dir, "")
-        self.assertEqual(
-            config.content_filter_evidence_max_bytes, 256 * 1024 * 1024
-        )
-        set_key(self.path, "proxy", "content_filter_retry", "5")
+        route = next(model for model in config.models if model.model_id == "gemini-2.5-flash")
+        self.assertEqual(route.content_filter_retry, 1)
+        self.assertEqual(route.content_filter_retry_budget_s, 240.0)
+        self.assertEqual(route.content_filter_retry_buffer_limit, 32 * 1024 * 1024)
+        self.assertEqual(route.content_filter_evidence_dir, "")
+        self.assertEqual(route.content_filter_evidence_max_bytes, 256 * 1024 * 1024)
+        set_key(self.path, "model.gemini-2.5-flash", "content_filter_retry", "5")
         set_key(
             self.path,
-            "proxy",
+            "model.gemini-2.5-flash",
             "content_filter_evidence_dir",
             "~/.aki/evidence/content-filter",
         )
         config = load_config(self.path)
-        self.assertEqual(config.content_filter_retry, 5)
+        route = next(model for model in config.models if model.model_id == "gemini-2.5-flash")
+        other = next(model for model in config.models if model.model_id == "deepseek-flash")
+        self.assertEqual(route.content_filter_retry, 5)
+        self.assertEqual(other.content_filter_retry, 1)
         self.assertEqual(
-            config.content_filter_evidence_dir, "~/.aki/evidence/content-filter"
+            route.content_filter_evidence_dir, "~/.aki/evidence/content-filter"
         )
-        set_key(self.path, "proxy", "content_filter_retry", "11")
+        set_key(self.path, "model.gemini-2.5-flash", "content_filter_retry", "11")
         with self.assertRaises(ConfigError):
             load_config(self.path)
 

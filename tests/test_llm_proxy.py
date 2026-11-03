@@ -15,7 +15,6 @@ from unittest import mock
 from engine.aki_config import ModelRoute
 from engine.grok_oauth import GrokCredentials
 from engine.llm_proxy import (
-    ContentFilterRetryPolicy,
     LlmProxy,
     ProxyBindError,
     _open_upstream,
@@ -1327,6 +1326,7 @@ class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
         self.tempdir = tempfile.TemporaryDirectory()
         self.evidence_root = Path(self.tempdir.name) / "evidence"
         self.filtered_count = 1
+        self.filter_status = 200
         self.gzip_responses = True
         self.first_tool_call = False
         self.bodies: list[bytes] = []
@@ -1363,9 +1363,14 @@ class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
                 payload = self._sse("clean", "stop", "stop")
             if self.gzip_responses:
                 payload = gzip.compress(payload)
-            response_head = (
+            status_line = (
                 b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: text/event-stream\r\n"
+                if self.filter_status == 200 or attempt > self.filtered_count
+                else b"HTTP/1.1 400 Bad Request\r\n"
+            )
+            response_head = (
+                status_line
+                + b"Content-Type: text/event-stream\r\n"
                 + (b"Content-Encoding: gzip\r\n" if self.gzip_responses else b"")
                 + b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
             )
@@ -1391,19 +1396,29 @@ class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
             inputs=("text",),
             url=f"http://127.0.0.1:{port}/chat/completions",
             api_key="upstream-secret",
+            content_filter_retry=5,
+            content_filter_retry_budget_s=30.0,
+            content_filter_retry_buffer_limit=1024 * 1024,
+            content_filter_evidence_dir=str(self.evidence_root),
+            content_filter_evidence_max_bytes=16 * 1024 * 1024,
+        )
+        plain_route = ModelRoute(
+            model_id="plain-model",
+            upstream_name="fake",
+            upstream_model="upstream-model",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=1000,
+            max_tokens=100,
+            inputs=("text",),
+            url=f"http://127.0.0.1:{port}/chat/completions",
+            api_key="upstream-secret",
         )
         self.proxy = LlmProxy(
             "127.0.0.1",
             0,
             "loopback-token",
-            (route,),
-            content_filter_retry=ContentFilterRetryPolicy(
-                attempts=5,
-                budget_s=30.0,
-                buffer_limit=1024 * 1024,
-                evidence_dir=self.evidence_root,
-                evidence_max_bytes=16 * 1024 * 1024,
-            ),
+            (route, plain_route),
         )
         await self.proxy.start()
 
@@ -1457,10 +1472,10 @@ class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
             + "data: [DONE]\n\n"
         ).encode()
 
-    async def _post(self) -> tuple[dict[str, str], bytes]:
+    async def _post(self, model: str = "local-model") -> tuple[dict[str, str], bytes]:
         reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
         body = json.dumps(
-            {"model": "local-model", "messages": [], "stream": True}
+            {"model": model, "messages": [], "stream": True}
         ).encode()
         writer.write(
             (
@@ -1553,6 +1568,25 @@ class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
         self.filtered_count = 0
         _headers, payload = await self._post()
         self.assertIn(b"clean", payload)
+        self.assertEqual(len(self.bodies), 1)
+
+    async def test_content_filter_is_retried_on_non_200_status(self) -> None:
+        self.filtered_count = 1
+        self.filter_status = 400
+        with self.assertLogs("akid.llm_proxy", level="WARNING") as logs:
+            _headers, payload = await self._post()
+        self.assertIn(b"clean", payload)
+        self.assertNotIn(b"partial", payload)
+        self.assertEqual(len(self.bodies), 2)
+        self.assertTrue(
+            any("content-filter retry succeeded" in line for line in logs.output)
+        )
+
+    async def test_retry_policy_is_bound_to_the_model_route(self) -> None:
+        self.filtered_count = 1
+        self.gzip_responses = False
+        _headers, payload = await self._post("plain-model")
+        self.assertIn(b"partial", payload)
         self.assertEqual(len(self.bodies), 1)
 
 
