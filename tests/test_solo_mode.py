@@ -700,6 +700,7 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
             started_at="2026-10-28T10:00:00Z",
             group_magic="group-magic",
         )
+        self.server._active_model_is_local = lambda: True
         solo_overlay = await self.overlay_text(self.server)
         self.server._solo_session = None
         self.assertIn("这是独处里说的秘密", solo_overlay)

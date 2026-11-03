@@ -31,7 +31,13 @@ from engine.akid import (
     _normalize_mcp_result,
     unique_capture_path,
 )
-from engine.aki_config import ImageGeneration
+from engine.aki_config import (
+    ImageGeneration,
+    atomic_write,
+    load_config,
+    set_key,
+    template_text,
+)
 from engine.channel_history import read_channel_history
 from engine.letta_process import LettaProcess
 from engine.execution_policy import WAIT_OTHER_TOOL, WAIT_USER_TOOL as POLICY_WAIT_USER_TOOL
@@ -46,6 +52,7 @@ from engine.live_context import (
 from engine.protocol import ErrorCode, MAX_LINE_BYTES, RpcError, make_event
 from engine.tokifactor import FileEnvelope, ImageEnvelope, TextEnvelope
 from engine.member_identity import legacy_member_id
+from engine.solo_mode import SoloSession, conversation_directory, solo_conversation_id
 from tests.fake_mqtt_broker import FakeMqttBroker
 from tests.test_image_generation import FakeMiniMaxImageAPI
 
@@ -797,6 +804,129 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved["model_settings"]["max_tokens"], 32_768)
         with self.assertRaises(RpcError):
             await client.call("aki.model.set", {"model": "grok-4.7"})
+
+    async def test_solo_model_set_persists_without_changing_group_model(self) -> None:
+        conf = self.root / "aki.conf"
+        atomic_write(conf, template_text())
+        set_key(conf, "proxy", "token", "loopback-token")
+        set_key(conf, "upstream.deepseek", "api_key", "secret")
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True)
+        agent_path = agents / "test-agent.json"
+        agent_path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "model": "aki/gemini-3.8-flash",
+                    "model_settings": {"provider_type": "aki"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = await self.start_server()
+        server.config.aki = load_config(conf)
+        client = await self.client()
+        await client.hello()
+
+        before = await client.call("aki.model.get", {})
+        self.assertEqual(before["solo_model"], "")
+        changed = await client.call(
+            "aki.model.set", {"model": "deepseek-flash", "solo": True}
+        )
+        self.assertTrue(changed["changed"])
+        self.assertEqual(changed["solo_model"], "deepseek-flash")
+        self.assertEqual(changed["solo_handle"], "aki/deepseek-flash")
+        self.assertEqual(changed["model"], "aki/gemini-3.8-flash")
+        self.assertEqual(load_config(conf).solo_model, "deepseek-flash")
+        saved = json.loads(agent_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["model"], "aki/gemini-3.8-flash")
+
+        solo_dir = conversation_directory(
+            self.root / "backend",
+            solo_conversation_id("test-agent"),
+            "test-agent",
+        )
+        solo = json.loads(
+            (solo_dir / "conversation.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(solo["model"], "aki/deepseek-flash")
+
+        cleared = await client.call(
+            "aki.model.set", {"model": "auto", "solo": True}
+        )
+        self.assertTrue(cleared["changed"])
+        self.assertEqual(cleared["solo_model"], "")
+        self.assertEqual(load_config(conf).solo_model, "")
+
+    async def test_nsfw_model_scope_uses_route_not_solo_mode(self) -> None:
+        from types import SimpleNamespace
+
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True)
+        agent_path = agents / "test-agent.json"
+        agent_path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "model": "aki/cloud-model",
+                    "model_settings": {"provider_type": "aki"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        server = await self.start_server()
+        cloud = SimpleNamespace(
+            model_id="cloud-model",
+            url="http://127.0.0.1:8317/v1/chat/completions",
+            upstream_name="cli-proxy-api",
+            upstream_model="gemini-3.8-flash",
+            solo=False,
+            local=None,
+        )
+        local = SimpleNamespace(
+            model_id="local-model",
+            url="http://127.0.0.1:10000/v1/chat/completions",
+            upstream_name="qwen-local",
+            upstream_model="/opt/models/qwen.gguf",
+            solo=False,
+            local=None,
+        )
+        server.config.aki = SimpleNamespace(
+            models=(cloud, local),
+            enabled_models=(cloud, local),
+            solo_model="",
+        )
+        self.assertFalse(server._active_model_is_local())
+
+        saved = json.loads(agent_path.read_text(encoding="utf-8"))
+        saved["model"] = "aki/local-model"
+        agent_path.write_text(json.dumps(saved), encoding="utf-8")
+        self.assertTrue(server._active_model_is_local())
+
+        server._solo_session = SoloSession(
+            session_id="solo-cloud",
+            target_id="test-agent",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-11-03T00:00:00Z",
+            group_magic="magic",
+        )
+        server.config.aki.solo_model = "cloud-model"
+        self.assertFalse(server._active_model_is_local())
+        server.config.aki.solo_model = "local-model"
+        self.assertTrue(server._active_model_is_local())
+
+        server.config.aki.solo_model = ""
+        server.solo_backend = SimpleNamespace(
+            configured=True,
+            last_route=lambda: SimpleNamespace(
+                model_id="Qwen-Local",
+                endpoint="http://127.0.0.1:10000/v1",
+                path="/chat/completions",
+                upstream_model="/opt/models/qwen.gguf",
+            ),
+        )
+        self.assertTrue(server._active_model_is_local())
 
     async def test_reasoning_set_persists_and_restarts(self) -> None:
         agents = self.root / "backend" / "agents"

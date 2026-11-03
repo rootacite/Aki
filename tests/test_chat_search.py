@@ -146,7 +146,7 @@ class ChatSearchRenderTests(unittest.TestCase):
         self.assertIn("Found 50 matches", capped)
         self.assertLessEqual(len(capped), SEARCH_MAX_RESULT_CHARS)
 
-    def test_group_context_omits_nsfw_solo_and_keeps_other_hits(self) -> None:
+    def test_cloud_model_omits_nsfw_solo_and_keeps_other_hits(self) -> None:
         group = [row(1, "Master", "phrase in group", "2026-10-28T09:00:00Z")]
         solo = [
             row(8, "Master", "phrase leading [NO_REPLY]", "2026-10-27T10:00:08Z"),
@@ -184,7 +184,7 @@ class ChatSearchRenderTests(unittest.TestCase):
             group_entries=group,
             solo_entries=solo,
             solo_memory_sessions=[nsfw, safe],
-            group_context=True,
+            local_model=False,
         )
         self.assertIn("phrase in group", hidden)
         self.assertIn("phrase safe solo", hidden)
@@ -200,6 +200,7 @@ class ChatSearchRenderTests(unittest.TestCase):
             group_entries=group,
             solo_entries=solo,
             solo_memory_sessions=[nsfw, safe],
+            local_model=True,
         )
         self.assertIn("phrase explicit", visible)
         self.assertIn("phrase explicit later", visible)
@@ -208,7 +209,7 @@ class ChatSearchRenderTests(unittest.TestCase):
         self.assertIn("phrase trailing", visible)
         self.assertIn("phrase safe solo", visible)
 
-    def test_group_context_hides_pending_error_and_keeps_legacy(self) -> None:
+    def test_cloud_model_hides_pending_error_and_keeps_legacy(self) -> None:
         pending = SoloMemorySession(
             session_id="pending",
             started_at="2026-10-27T10:00:00Z",
@@ -240,13 +241,13 @@ class ChatSearchRenderTests(unittest.TestCase):
         text = search_chat_history(
             query="secret",
             solo_memory_sessions=[pending, failed, legacy],
-            group_context=True,
+            local_model=False,
         )
         self.assertIn("legacy secret", text)
         self.assertNotIn("pending secret", text)
         self.assertNotIn("failed secret", text)
 
-    def test_group_context_uses_redaction_after_session_is_gone(self) -> None:
+    def test_cloud_model_uses_redaction_after_session_is_gone(self) -> None:
         gone = SoloMemorySession(
             session_id="gone",
             started_at="2026-10-26T10:00:00Z",
@@ -285,7 +286,7 @@ class ChatSearchRenderTests(unittest.TestCase):
             solo_entries=solo,
             solo_memory_sessions=[safe],
             nsfw_redactions=[redaction],
-            group_context=True,
+            local_model=False,
         )
         self.assertEqual(hidden, "No matches (scope=all).")
         kept = search_chat_history(
@@ -293,7 +294,7 @@ class ChatSearchRenderTests(unittest.TestCase):
             solo_entries=solo,
             solo_memory_sessions=[safe],
             nsfw_redactions=[redaction],
-            group_context=True,
+            local_model=False,
         )
         self.assertIn("later safe", kept)
         solo_mode = search_chat_history(
@@ -301,18 +302,19 @@ class ChatSearchRenderTests(unittest.TestCase):
             solo_entries=solo,
             solo_memory_sessions=[safe],
             nsfw_redactions=[redaction],
+            local_model=True,
         )
         self.assertIn("evicted explicit", solo_mode)
         self.assertIn("evicted trailing", solo_mode)
 
-    def test_prompts_describe_the_group_and_solo_search_boundary(self) -> None:
+    def test_prompts_describe_the_cloud_and_local_search_boundary(self) -> None:
         group = render_channel_policy(user_name="Master")
         solo = render_solo_policy(user_name="Master")
-        self.assertIn("solo sessions marked NSFW are omitted", group)
-        self.assertIn("including solo sessions marked NSFW", solo)
+        self.assertIn("active model is a cloud model", group)
+        self.assertIn("Cloud models omit solo sessions marked NSFW", solo)
         description = str(SEARCH_CHAT_HISTORY_TOOL["description"])
         self.assertIn("omitted from results", description)
-        self.assertIn("solo mode", description)
+        self.assertIn("local models", description)
 
 
 class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
@@ -387,7 +389,7 @@ class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("solo needle", text)
         self.assertIn("archived needle", text)
 
-    async def test_handler_hides_nsfw_solo_in_group_and_shows_it_in_solo(self) -> None:
+    async def test_handler_hides_nsfw_solo_on_cloud_and_shows_it_on_local(self) -> None:
         backend = DummyBackend()
         server = make_server(self.root / "nsfw-search", profile="aki", backend=backend)
         server.group_channel_history_path.parent.mkdir(parents=True, exist_ok=True)
@@ -446,6 +448,7 @@ class ChatSearchToolTests(unittest.IsolatedAsyncioTestCase):
             started_at="2026-10-28T12:00:00Z",
             group_magic="magic",
         )
+        server._active_model_is_local = lambda: True
         solo_text = await run("solo")
         self.assertIn("live phrase", solo_text)
 

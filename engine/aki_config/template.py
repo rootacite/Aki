@@ -112,6 +112,10 @@ return_debounce_seconds = 10
 transcript_budget_tokens = 65536
 # 留空则使用 prompts/<profile>-solo.md
 prompt_file =
+# 可选：独处使用哪个 [model.*] 路由。留空时使用 startup_script 托管的本地
+# 模型；没有 startup_script 时沿用群聊模型。可用
+# `akictl model set <id> --solo` 修改，`akictl model set auto --solo` 清除。
+model =
 # 可选：solo 独立本地 OpenAI 兼容服务。留空则沿用群聊模型。
 # startup_script = ~/llama-bin/llama-server --host 127.0.0.1 --port 10000 -m /path/model.gguf
 startup_script =

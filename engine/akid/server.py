@@ -33,7 +33,6 @@ from engine.solo_backend import SoloBackendManager
 from engine.solo_mode import (
     default_solo_state_path,
     derive_solo_magic,
-    ensure_solo_conversation,
     load_solo_session,
 )
 from engine.life_ledger import LifeLedger
@@ -429,31 +428,12 @@ class ServerMixin:
         aki = self.config.aki
         if aki is None:
             return
-        route = self.solo_backend.last_route()
-        if not self.solo_backend.configured:
-            ensure_solo_conversation(
-                backend_dir=self.config.backend_dir,
-                agent_id=self.config.agent_id,
-                cwd=self.config.cwd,
-                model="",
+        self._sync_solo_conversation_model(
+            managed_route=(
+                self.solo_backend.last_route()
+                if self.solo_backend.configured
+                else None
             )
-            return
-        if route is None:
-            ensure_solo_conversation(
-                backend_dir=self.config.backend_dir,
-                agent_id=self.config.agent_id,
-                cwd=self.config.cwd,
-                update_model=False,
-            )
-            return
-        ensure_solo_conversation(
-            backend_dir=self.config.backend_dir,
-            agent_id=self.config.agent_id,
-            cwd=self.config.cwd,
-            model=f"{aki.provider_id}/{route.model_id}",
-            provider_type=aki.provider_id,
-            context_window=route.context_window,
-            max_tokens=route.max_tokens,
         )
 
 

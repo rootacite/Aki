@@ -106,6 +106,7 @@ HELP_TEXT = (
     "  akictl mcp local on|off    enable/disable local recon tools as native tools\n"
     "  akictl model               list the active model and configured models\n"
     "  akictl model set ID        switch model and restart the backend\n"
+    "  akictl model set ID --solo set the solo model; auto restores the default\n"
     "  akictl reasoning           show reasoning_effort (default low)\n"
     "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
     "  akictl avatar              show Aki's avatar asset status\n"
@@ -256,7 +257,7 @@ def _model(args: argparse.Namespace, profile: str = "aki") -> int:
         return 1
     try:
         rest = ([args.model_command] if args.model_command else []) + args.model_values
-        _print_json(_model_call(client, rest))
+        _print_json(_model_call(client, rest, solo=bool(args.solo)))
         return 0
     except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
         _print_error(exc)
@@ -379,6 +380,11 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     _add_common(parser)
     parser.add_argument("model_command", nargs="?")
     parser.add_argument("model_values", nargs="*")
+    parser.add_argument(
+        "--solo",
+        action="store_true",
+        help="configure the solo model instead of the group model",
+    )
     parsers["model"] = parser
     parser = argparse.ArgumentParser(prog="akictl avatar")
     _add_common(parser)

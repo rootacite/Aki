@@ -143,7 +143,7 @@ class SoloMemoryStoreTests(unittest.TestCase):
         )
         self.assertNotIn("<message ", rendered)
 
-    def test_group_redacts_nsfw_session_but_solo_keeps_real_content(self) -> None:
+    def test_cloud_redacts_nsfw_session_but_local_model_keeps_real_content(self) -> None:
         session = SoloMemorySession(
             session_id="solo-nsfw",
             started_at="2026-10-27T10:00:00Z",
@@ -153,22 +153,22 @@ class SoloMemoryStoreTests(unittest.TestCase):
             nsfw_status=NSFW_READY_STATUS,
             entries=[entry(1, "explicit body")],
         )
-        group = render_solo_memories(
-            [session], group_context=True, just_ended_session_id="solo-nsfw"
+        cloud = render_solo_memories(
+            [session], local_model=False, just_ended_session_id="solo-nsfw"
         )
-        self.assertIn(NSFW_SOLO_PLACEHOLDER, group)
-        self.assertIn('just_ended="true"', group)
-        self.assertNotIn("explicit summary", group)
-        self.assertNotIn("explicit body", group)
-        self.assertNotIn("Master (user", group)
-        self.assertIn("body: ", group)
+        self.assertIn(NSFW_SOLO_PLACEHOLDER, cloud)
+        self.assertIn('just_ended="true"', cloud)
+        self.assertNotIn("explicit summary", cloud)
+        self.assertNotIn("explicit body", cloud)
+        self.assertNotIn("Master (user", cloud)
+        self.assertIn("body: ", cloud)
 
-        solo = render_solo_memories([session])
-        self.assertIn("explicit summary", solo)
-        self.assertIn("explicit body", solo)
-        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, solo)
+        local = render_solo_memories([session], local_model=True)
+        self.assertIn("explicit summary", local)
+        self.assertIn("explicit body", local)
+        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, local)
 
-    def test_legacy_session_without_nsfw_field_remains_visible_in_group(self) -> None:
+    def test_legacy_session_without_nsfw_field_remains_visible_on_cloud(self) -> None:
         session = SoloMemorySession.from_dict(
             {
                 "session_id": "legacy",
@@ -190,10 +190,10 @@ class SoloMemoryStoreTests(unittest.TestCase):
         )
         self.assertFalse(session.nsfw)
         self.assertEqual(session.nsfw_status, NSFW_LEGACY_STATUS)
-        group = render_solo_memories([session], group_context=True)
-        self.assertIn("legacy summary", group)
-        self.assertIn("legacy body", group)
-        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, group)
+        cloud = render_solo_memories([session], local_model=False)
+        self.assertIn("legacy summary", cloud)
+        self.assertIn("legacy body", cloud)
+        self.assertNotIn(NSFW_SOLO_PLACEHOLDER, cloud)
 
         failed = SoloMemorySession.from_dict(
             {
@@ -584,7 +584,7 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(manager.last_eviction_at)
         self.assertEqual(manager.nsfw_redactions, [])
 
-    async def test_eviction_keeps_nsfw_session_unsearchable_in_group(self) -> None:
+    async def test_eviction_keeps_nsfw_session_unsearchable_on_cloud_models(self) -> None:
         old, middle, newest = self.sessions_for_eviction()
         old.nsfw = True
         old.nsfw_status = NSFW_READY_STATUS
@@ -614,7 +614,7 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
             solo_entries=[live],
             solo_memory_sessions=reloaded.sessions,
             nsfw_redactions=reloaded.nsfw_redactions,
-            group_context=True,
+            local_model=False,
         )
         self.assertEqual(hidden, "No matches (scope=all).")
         shown = search_chat_history(
@@ -622,6 +622,7 @@ class SoloMemoryManagerTests(unittest.IsolatedAsyncioTestCase):
             solo_entries=[live],
             solo_memory_sessions=reloaded.sessions,
             nsfw_redactions=reloaded.nsfw_redactions,
+            local_model=True,
         )
         self.assertIn("OLD_ONE", shown)
 

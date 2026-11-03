@@ -50,6 +50,11 @@ class SoloMixin:
             "known_solo_targets": sorted(self._solo_targets),
             "group_transcript_frozen": session is not None,
             "solo_history_path": str(self.solo_channel_history_path),
+            "configured_model": (
+                str(getattr(self.config.aki, "solo_model", "") or "")
+                if self.config.aki is not None
+                else ""
+            ),
             "memory": self.solo_memory.status(),
             "backend": self.solo_backend.status(),
         }
@@ -103,6 +108,7 @@ class SoloMixin:
             ),
         )
         await self._cancel_mqtt_turns_for_solo()
+        self._sync_solo_conversation_model()
         if self.active is not None or not await self._switch_backend_conversation(
             solo_conversation_id(self.config.agent_id)
         ):

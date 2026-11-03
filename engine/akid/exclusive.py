@@ -225,7 +225,7 @@ class ExclusiveMixin:
             solo_memory_sessions=(
                 self.solo_memory.sessions if searching_solo else []
             ),
-            group_context=self._solo_session is None,
+            local_model=self._active_model_is_local(),
             nsfw_redactions=(
                 self.solo_memory.nsfw_redactions if searching_solo else ()
             ),

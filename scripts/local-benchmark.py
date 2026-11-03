@@ -998,7 +998,7 @@ def build_request(
         # A benchmark simulates a current solo turn, not a group turn after one
         # ended, so it must not mark a session as just_ended.
         just_ended_session_id="",
-        group_context=False,
+        local_model=True,
     )
     if memories:
         stable_parts.append(("system/solo-memories", memories))

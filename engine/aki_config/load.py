@@ -97,6 +97,19 @@ def _bool_or(parser: configparser.ConfigParser, section: str, key: str, default:
     raise ConfigError(f"[{section}] {key} must be true or false")
 
 
+def _optional_bool(
+    parser: configparser.ConfigParser, section: str, key: str
+) -> bool | None:
+    raw = parser.get(section, key, fallback="").strip().lower()
+    if not raw:
+        return None
+    if raw == "true":
+        return True
+    if raw == "false":
+        return False
+    raise ConfigError(f"[{section}] {key} must be true or false")
+
+
 
 def _require(parser: configparser.ConfigParser, section: str, key: str) -> str:
     if not parser.has_section(section) or not parser.has_option(section, key):
@@ -231,11 +244,6 @@ def _solo_endpoint(parser: configparser.ConfigParser) -> str:
 
 
 def _solo_backend(parser: configparser.ConfigParser) -> SoloBackend:
-    if parser.has_option("solo", "model"):
-        raise ConfigError(
-            "[solo] model is no longer supported; remove it and configure "
-            "startup_script/endpoint instead"
-        )
     script = parser.get("solo", "startup_script", fallback="").strip()
     endpoint = _solo_endpoint(parser)
     if endpoint and not script:
@@ -421,6 +429,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
                     "extra_body",
                     reserved=_EXTRA_BODY_RESERVED,
                 ),
+                local=_optional_bool(parser, section, "local"),
                 content_filter_retry=_int_or(
                     parser, section, "content_filter_retry", 1, minimum=1, maximum=10
                 ),
@@ -620,6 +629,16 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
     aliases = _list(parser.get("channel", "aliases", fallback=""))
     if channel_name and channel_name not in aliases:
         aliases = (channel_name, *aliases)
+    solo_model = parser.get("solo", "model", fallback="").strip()
+    if solo_model:
+        if "/" in solo_model:
+            raise ConfigError(
+                "[solo] model must be a configured model id without a provider prefix"
+            )
+        if solo_model not in {route.model_id for route in models}:
+            raise ConfigError(
+                f"[solo] model {solo_model} is not defined by any [model.*] section"
+            )
     return AkiConfig(
         path=path,
         profile=resolved_profile,
@@ -718,6 +737,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
             parser, "solo", "transcript_budget_tokens", 64 * 1024, minimum=1024
         ),
         solo_prompt_file=parser.get("solo", "prompt_file", fallback="").strip(),
+        solo_model=solo_model,
         solo_compaction_ratio=_float_or(
             parser, "solo", "compaction_ratio", 0.85, minimum=0.0, maximum=1.0
         ),

@@ -709,6 +709,7 @@ def build_overlay(
     snapshot: LiveContextSnapshot,
     session_id: str,
     username: str,
+    local_model: bool = False,
 ) -> tuple[str, str]:
     self_view = self_member(runtime)
     members = [self_view, *load_identity_members(runtime)]
@@ -733,7 +734,9 @@ def build_overlay(
                 scene=scene,
             ),
         ]
-        memories = render_solo_memories(solo_sessions, group_context=False)
+        memories = render_solo_memories(
+            solo_sessions, local_model=local_model
+        )
         if memories:
             stable_parts.append(memories)
         frozen = render_channel_transcript(
@@ -758,7 +761,7 @@ def build_overlay(
             solo_sessions,
             budget_tokens=SOLO_MEMORY_BUDGET_TOKENS,
             just_ended_session_id=latest_solo_session_id(solo_sessions),
-            group_context=True,
+            local_model=local_model,
         )
         if memories:
             stable_parts.append(memories)
@@ -846,6 +849,7 @@ def build_turn(
     reasoning_budget_message: str,
     stream: bool,
     seq_base: int = 0,
+    local_model: bool = False,
 ) -> Turn:
     fixed_at = fixed_clock()
     sent_at_ms = int(fixed_at.timestamp() * 1000)
@@ -869,6 +873,7 @@ def build_turn(
         snapshot=snapshot,
         session_id=session_id,
         username=runtime.username,
+        local_model=local_model,
     )
     system_prompt = append_block(load_system_prompt(runtime), system_append)
     envelope = render_envelope(
@@ -1378,6 +1383,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--no-stream", action="store_true")
     parser.add_argument("--show-reasoning", action="store_true")
     parser.add_argument("--show-prefix", action="store_true")
+    parser.add_argument(
+        "--local-model",
+        action="store_true",
+        help="treat the active model as local for NSFW solo-memory rendering",
+    )
     parser.add_argument("--dump-request", type=Path)
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temperature", type=float, default=0.7)
@@ -1454,6 +1464,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             seq_base=(
                 solo_seq_base if args.mode == "solo" else group_seq_base
             ),
+            local_model=bool(args.local_model),
         )
 
     def execute(message: str) -> None:

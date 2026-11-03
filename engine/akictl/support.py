@@ -122,12 +122,19 @@ def _parse_mqtt_server(values: list[str]) -> tuple[str, int]:
 
 
 
-def _model_call(client: GatewayClient, rest: list[str]) -> Any:
+def _model_call(client: GatewayClient, rest: list[str], *, solo: bool = False) -> Any:
+    solo = solo or "--solo" in rest
+    rest = [item for item in rest if item != "--solo"]
     if not rest or rest[0] == "status":
         return _rpc_call(client, "aki.model.get")
     if rest[0] != "set" or len(rest) < 2:
-        raise ValueError("usage: /model [status] | /model set <id>")
-    return _rpc_call(client, "aki.model.set", {"model": rest[1]})
+        raise ValueError(
+            "usage: /model [status] | /model set <id> [--solo]"
+        )
+    params: dict[str, Any] = {"model": rest[1]}
+    if solo:
+        params["solo"] = True
+    return _rpc_call(client, "aki.model.set", params)
 
 
 

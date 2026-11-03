@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Iterable, Mapping, Sequence
 
 from engine.live_context import _sanitize
-from engine.solo_memory import session_hidden_in_group, solo_text_fingerprint
+from engine.solo_memory import session_hidden_from_cloud, solo_text_fingerprint
 
 
 SEARCH_CHAT_HISTORY_TOOL_NAME = "search_chat_history"
@@ -234,7 +234,7 @@ def _group_solo_blocker(
         session_id = str(getattr(session, "session_id", "") or "")
         if session_id:
             active_ids.add(session_id)
-        hidden = session_hidden_in_group(session)
+        hidden = session_hidden_from_cloud(session)
         bounds = _session_seq_bounds(session)
         if bounds is not None:
             intervals.append((bounds[0], bounds[1], hidden))
@@ -330,14 +330,14 @@ def search_chat_history(
     group_entries: Sequence[Mapping[str, Any]] = (),
     solo_entries: Sequence[Mapping[str, Any]] = (),
     solo_memory_sessions: Sequence[Any] = (),
-    group_context: bool = False,
+    local_model: bool = False,
     nsfw_redactions: Sequence[Any] = (),
 ) -> str:
     """Return a compact, newest-first search result for one profile.
 
-    In group chat, solo sessions marked NSFW are omitted. That includes the
-    archived body and the copy still sitting in the solo history file. Solo
-    mode passes ``group_context=False`` and can search those sessions.
+    Cloud models must not see solo sessions marked NSFW. That includes the
+    archived body and the copy still sitting in the solo history file. Local
+    models pass ``local_model=True`` and can search those sessions.
     """
     needle = str(query or "").strip().casefold()
     scope = str(scope or "all").strip().lower()
@@ -349,7 +349,7 @@ def search_chat_history(
     if scope in ("all", "solo"):
         solo_rows: Sequence[Mapping[str, Any]] = solo_entries
         memory_rows: Sequence[Any] = solo_memory_sessions
-        if group_context:
+        if not local_model:
             blocked = _group_solo_blocker(solo_memory_sessions, nsfw_redactions)
             solo_rows = [
                 row
@@ -359,7 +359,7 @@ def search_chat_history(
             memory_rows = [
                 session
                 for session in solo_memory_sessions
-                if not session_hidden_in_group(session)
+                if not session_hidden_from_cloud(session)
             ]
         _append_solo_history(candidates, solo_rows)
         _append_solo_memory(candidates, memory_rows)

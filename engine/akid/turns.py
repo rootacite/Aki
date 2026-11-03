@@ -13,7 +13,7 @@ from engine.live_context import (
 )
 from engine.nighttalk import render_nighttalk_overlay
 from engine.solo_backend import SoloBackendError
-from engine.solo_mode import ensure_solo_conversation, solo_conversation_id
+from engine.solo_mode import solo_conversation_id
 from engine.tokifactor import (
     MAX_IMAGE_BYTES,
     detect_image_mime,
@@ -114,7 +114,7 @@ class TurnsMixin:
                 )
                 await self._finish_turn(turn, "bridge_unavailable")
                 return
-            if self._solo_session is not None and self.solo_backend.configured:
+            if self._solo_session is not None and self._solo_uses_managed_backend():
                 try:
                     await self._prepare_managed_solo_turn()
                 except SoloBackendError as exc:
@@ -177,15 +177,7 @@ class TurnsMixin:
         route = await self.solo_backend.start(
             reserved_model_ids={item.model_id for item in aki.enabled_models}
         )
-        ensure_solo_conversation(
-            backend_dir=self.config.backend_dir,
-            agent_id=self.config.agent_id,
-            cwd=self.config.cwd,
-            model=f"{aki.provider_id}/{route.model_id}",
-            provider_type=aki.provider_id,
-            context_window=route.context_window,
-            max_tokens=route.max_tokens,
-        )
+        self._sync_solo_conversation_model(managed_route=route)
         try:
             await self.backend.reload_conversation(
                 conversation_id=expected,

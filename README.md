@@ -391,7 +391,7 @@ Haru/Natsu 精简版把 Letta 上下文架构压缩成更角色化的段落：
 | `<exclusive-domain-guidance>` | 不调用/不模拟别人的专属工具；被点名做别人的任务时一行 handoff；没人点名就 `[NO_REPLY]` |
 | `<output-rules>` | 最终文本直接发到频道，不要用工具发文本；沉默输出 `[NO_REPLY]` |
 | `<privacy-rules>` | solo 内容严格私密，不得在群聊转述、引用、总结或暗示 |
-| `<chat-history-search>` | 隐藏工具 `search_chat_history(query, limit=8)`，scope 可选 `all` / `group` / `solo`；不得泄露 solo 结果，不得向用户提这个工具；群聊模式下不返回标记为 nsfw 的独处会话正文 |
+| `<chat-history-search>` | 隐藏工具 `search_chat_history(query, limit=8)`，scope 可选 `all` / `group` / `solo`；不得泄露 solo 结果，不得向用户提这个工具；云端模型下不返回标记为 nsfw 的独处会话正文，本地模型可见原文 |
 | `<image-rules>` | 当前回合图片已经作为多模态输入；旧图用 `ViewImage`；发图用 `#[/absolute/path]` |
 | `<hidden-span>` | `~[text]` 不画进 Tokifactor 窗口；第一个 `]` 结束；原文仍留在已发布消息里 |
 | `<emoji-catalog>` | 可选；用 `#[name:desc]`，必须匹配目录，tag 必须独立成句 |
@@ -473,8 +473,8 @@ sender (source, at timestamp, seq=N): "JSON-escaped text" attachments=[...]
 `solo-transcript` 与 `channel-transcript` 结构相同，但 Note 改为私密 solo 会话，只对当前模型和用户可见。
 
 退出独处时会生成 summary，并追加一次独立的 NSFW 分类调用。被标记为 NSFW 的 solo
-session 在群聊里只显示固定占位符，summary 和正文都不会注入群聊模型；分类调用只走
-solo 模型路由，不会回退到群聊模型。回到 solo 后恢复真实内容。
+session 在云端模型里只显示固定占位符，summary 和正文都不会注入云端上下文；当前模型
+是本地模型时显示原文。分类调用只走 solo 模型路由，不会回退到群聊模型。
 
 `live-context` 固定段：
 

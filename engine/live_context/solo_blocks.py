@@ -24,8 +24,8 @@ from .types import (
 )
 
 NSFW_SOLO_PLACEHOLDER = (
-    "[This solo session contains NSFW content, which is omitted in the group "
-    "chat context but becomes visible once you return to solo mode.]"
+    "[This solo session contains NSFW content. It is withheld from cloud "
+    "models; a local model can read the original text.]"
 )
 
 
@@ -153,7 +153,7 @@ def latest_solo_session_id(sessions: Iterable[Any]) -> str:
 
 
 def _solo_memory_session_lines(
-    session: Any, *, just_ended: bool = False, group_context: bool = False
+    session: Any, *, just_ended: bool = False, local_model: bool = False
 ) -> list[str]:
     entries = list(getattr(session, "entries", ()) or ())
     archived = bool(getattr(session, "archived", False))
@@ -166,7 +166,7 @@ def _solo_memory_session_lines(
         + ">",
         "summary: " + json.dumps(
             NSFW_SOLO_PLACEHOLDER
-            if group_context and nsfw
+            if not local_model and nsfw
             else str(getattr(session, "summary", "") or ""),
             ensure_ascii=False,
         ),
@@ -176,7 +176,7 @@ def _solo_memory_session_lines(
             "status: 刚刚结束。这是最近一次结束的独处；用户问起刚才私下聊了什么时，"
             "以这次为准，不要用更早的群聊回合代替。"
         )
-    if group_context and nsfw:
+    if not local_model and nsfw:
         lines.append("body: " + json.dumps(NSFW_SOLO_PLACEHOLDER, ensure_ascii=False))
     else:
         for entry in entries:
@@ -191,7 +191,7 @@ def render_solo_memories(
     *,
     budget_tokens: int = DEFAULT_SOLO_MEMORY_BUDGET_TOKENS,
     just_ended_session_id: str = "",
-    group_context: bool = False,
+    local_model: bool = False,
 ) -> str:
     """Render historical solo sessions newest-first within a token budget."""
     budget = max(1024, int(budget_tokens))
@@ -227,7 +227,7 @@ def render_solo_memories(
                     session,
                     just_ended=str(getattr(session, "session_id", "") or "")
                     == just_ended_id,
-                    group_context=group_context,
+                    local_model=local_model,
                 )
             )
         return "\n".join(lines)

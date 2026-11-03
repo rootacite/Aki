@@ -245,8 +245,8 @@ def solo_text_fingerprint(text: str) -> str:
     return hashlib.sha256(str(text or "").strip().encode("utf-8")).hexdigest()
 
 
-def session_hidden_in_group(session: Any) -> bool:
-    """Group chat must not reveal this session's body.
+def session_hidden_from_cloud(session: Any) -> bool:
+    """Cloud models must not reveal this session's body.
 
     Pending and failed classification stay hidden, the same rule as
     SoloMemorySession.from_dict. Legacy records without an nsfw field stay visible.
@@ -258,12 +258,12 @@ def session_hidden_in_group(session: Any) -> bool:
 
 
 def nsfw_redaction_for_session(session: SoloMemorySession) -> dict[str, Any] | None:
-    """Fingerprint a hidden session so group search can drop it after eviction.
+    """Fingerprint a hidden session so cloud search can drop it after eviction.
 
     The record stores seq, sender, timestamp, and a text hash. It does not store
     the message body.
     """
-    if not session_hidden_in_group(session):
+    if not session_hidden_from_cloud(session):
         return None
     keys: list[dict[str, Any]] = []
     for entry in session.entries:
@@ -757,7 +757,7 @@ class SoloMemoryManager:
             session.nsfw = nsfw
             session.nsfw_status = NSFW_READY_STATUS
         except Exception as exc:
-            # Privacy first: an unclassified session must not reach group context.
+            # Privacy first: an unclassified session must not reach cloud models.
             session.nsfw = True
             session.nsfw_status = NSFW_ERROR_STATUS
             self.last_error = str(exc)
@@ -820,7 +820,7 @@ class SoloMemoryManager:
         api: str,
         route_path: str,
         just_ended_session_id: str = "",
-        group_context: bool = False,
+        local_model: bool = False,
     ) -> str:
         visible = [
             session
@@ -840,7 +840,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
-                group_context=group_context,
+                local_model=local_model,
             )
 
         # Budget eviction is deterministic: archive the oldest whole sessions
@@ -868,7 +868,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
-                group_context=group_context,
+                local_model=local_model,
             )
 
         pending_archive = {
@@ -887,7 +887,7 @@ class SoloMemoryManager:
             return render_solo_memories(
                 visible, budget_tokens=self.budget_tokens,
                 just_ended_session_id=just_ended_session_id,
-                group_context=group_context,
+                local_model=local_model,
             )
 
         # Preserve an in-progress session while replacing the older sessions.
@@ -921,7 +921,7 @@ class SoloMemoryManager:
         return render_solo_memories(
             working, budget_tokens=self.budget_tokens,
             just_ended_session_id=just_ended_session_id,
-            group_context=group_context,
+            local_model=local_model,
         )
 
     def _archive_entries(

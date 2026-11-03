@@ -56,6 +56,13 @@ class AkiConfigTests(unittest.TestCase):
             load_config(self.path)
         set_key(self.path, "solo", "compaction_ratio", "0.85")
         set_key(self.path, "solo", "model", "deepseek-flash")
+        config = load_config(self.path)
+        self.assertEqual(config.solo_model, "deepseek-flash")
+        set_key(self.path, "model.deepseek-flash", "local", "true")
+        self.assertIs(load_config(self.path).solo_route.local, True)
+        set_key(self.path, "model.deepseek-flash", "local", "false")
+        self.assertIs(load_config(self.path).solo_route.local, False)
+        set_key(self.path, "solo", "model", "missing-model")
         with self.assertRaises(ConfigError):
             load_config(self.path)
 

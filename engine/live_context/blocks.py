@@ -182,9 +182,10 @@ def render_channel_policy(
         "</privacy-rules>",
         "<chat-history-search>Hidden tool `search_chat_history(query, limit=8, "
         "scope=all|group|solo)` searches your visible group chat and private solo "
-        "sessions. In group chat, solo sessions marked NSFW are omitted from "
-        "results. Never leak solo results to group chat, and never mention this tool "
-        "to the user.</chat-history-search>",
+        "sessions. When your active model is a cloud model, solo sessions marked "
+        "NSFW are omitted from results; local models see the original text. Never "
+        "leak solo results to group chat, and never mention this tool to the user."
+        "</chat-history-search>",
         "<image-rules>Channel image attachments appear as "
         '{"name":"image name","path":"local path"}. Images in the current turn are '
         "already attached as multimodal input—do NOT call ViewImage on them. For "
@@ -243,8 +244,9 @@ def render_solo_policy(
         "</privacy-rules>",
         "<chat-history-search>Hidden tool `search_chat_history(query, limit=8, "
         "scope=all|group|solo)` searches your visible group chat and private solo "
-        "sessions, including solo sessions marked NSFW. Never mention this tool "
-        "to the user.</chat-history-search>",
+        "sessions. Cloud models omit solo sessions marked NSFW; local models see "
+        "the original text. Never mention this tool to the user."
+        "</chat-history-search>",
         "<image-rules>Image attachments appear as "
         '{"name":"image name","path":"local path"}. Images in the current turn are '
         "already attached as multimodal input—do NOT call ViewImage on them. For "

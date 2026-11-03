@@ -477,14 +477,20 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   分类请求的输出上限为 32K tokens，避免推理型本地模型在输出 JSON 前被截断。
   分类请求同时携带 15K tokens 的思考预算；proxy 在 solo 路由上优先使用请求显式预算，
   未提供时才回落到默认 1536。
-  `nsfw=true` 的会话在群聊 `<solo-memories>` 里把 summary 和正文替换为固定占位符，
-  在 solo 中仍显示真实内容；分类失败按 NSFW 隐藏并在下次启动重试。分类完成前新 session
-  不写入 `solo-memory`，因此群聊不会看到未分类内容。旧记录缺字段时按 SFW 兼容。
-  群聊模式下 `search_chat_history` 同样不返回这些会话的正文，包括仍留在
+  NSFW 隔离按当前生效模型判定，而不是群聊/独处模式：只要当前请求调用云端模型，
+  `nsfw=true` 的会话在 `<solo-memories>` 里把 summary 和正文替换为固定占位符；
+  当前模型是本地模型时显示原文。分类失败按 NSFW 隐藏并在下次启动重试。分类完成前新
+  session 不写入 `solo-memory`。旧记录缺字段时按 SFW 兼容。云端模型下的
+  `search_chat_history` 同样不返回这些会话的正文，包括仍留在
   `<profile>.solo.jsonl` 里、序号落在该会话范围内的记录；分类未完成或失败的会话也排除。
-  独处模式下可以搜到。会话因预算被淘汰后，群聊搜索仍按不含正文的指纹排除这些记录。
+  本地模型下可以搜到。会话因预算被淘汰后，云端搜索仍按不含正文的指纹排除这些记录。
   新的独处消息写入
-  `solo` conversation，不进入群聊 `default` conversation。频道状态在独处期间
+  `solo` conversation，不进入群聊 `default` conversation。独处模型可用
+  `akictl model set <id> --solo` 选择任意已配置的 `[model.*]` 路由，写入
+  `[solo] model`；`akictl model set auto --solo` 清除选择。未设置时沿用
+  `[solo] startup_script` 托管的本地模型，没有启动脚本时沿用群聊模型。
+  选择的静态路由若与 solo endpoint 相同，仍由 akid 托管启停该本地服务。
+  频道状态在独处期间
   发布独处模型，reasoning effort 固定为 `medium`。loopback proxy 对
   solo 动态路由的请求写入 `reasoning_effort=medium` 和
   `reasoning_budget_tokens=1536`，盖过群聊 agent 上的 effort 和该路由的
@@ -519,8 +525,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   并写回这条 assistant 消息。这两层都是兜底，不改变模型提前停止的原因。
   最后一次请求或 turn 结束后
   `idle_timeout`（默认 900 秒）无活动则关闭进程，下一条消息重新拉起。状态文件在
-  `~/.aki/solo/<profile>.backend.json`，代理据此发布动态路由。旧 `[solo] model`
-  已移除，配置中残留会直接报错；`[solo] endpoint` 可显式指定，留空则从启动脚本的
+  `~/.aki/solo/<profile>.backend.json`，代理据此发布动态路由。`[solo] model`
+  可固定选择已配置模型；`[solo] endpoint` 可显式指定，留空则从启动脚本的
   `--host/--port` 推导。端点已被非 akid 进程占用时拒绝启动。
   唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，

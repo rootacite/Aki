@@ -170,6 +170,7 @@ class ModelRoute:
     auth: str = ""
     extra_body: dict[str, object] = field(default_factory=dict)
     solo: bool = False
+    local: bool | None = None
     content_filter_retry: int = 1
     content_filter_retry_budget_s: float = 240.0
     content_filter_retry_buffer_limit: int = 32 * 1024 * 1024
@@ -267,6 +268,7 @@ class AkiConfig:
     presence_return_debounce_seconds: int = 10
     solo_transcript_budget_tokens: int = 64 * 1024
     solo_prompt_file: str = ""
+    solo_model: str = ""
     solo_compaction_ratio: float = 0.85
     solo_backend: SoloBackend = field(default_factory=SoloBackend)
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
@@ -287,6 +289,15 @@ class AkiConfig:
     @property
     def provider_mod_name(self) -> str:
         return f"aki-proxy-{self.profile}.ts"
+
+    @property
+    def solo_route(self) -> ModelRoute | None:
+        if not self.solo_model:
+            return None
+        for route in self.models:
+            if route.model_id == self.solo_model:
+                return route
+        return None
 
 
 

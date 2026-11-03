@@ -195,6 +195,7 @@ refresh token 续期，并在 `auth.json.lock` 保护下把轮换后的 refresh 
 ```bash
 akictl model set grok-4.6
 akictl reasoning set low
+akictl model set gemini-3.8-flash --solo
 ```
 
 Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和 7722 proxy
@@ -341,11 +342,11 @@ wake routing → identity → roster`；易变 per-turn tail 为
 退出独处时先写 summary，再用第二次独立 API call 和专用 system prompt 判断本次会话是否
 包含明确的性行为或裸露；调用不带人格或智能体上下文，并且只允许走 solo 模型路由，
 绝不回退到群聊模型。分类请求输出上限为 32K tokens，思考预算为 15K tokens；proxy 在
-solo 路由上优先使用请求显式预算。结果保存在 solo session 的 `nsfw` 字段。群聊 `# solo-memories`
-对 NSFW 会话隐藏 summary 与正文，只保留固定占位符；
-solo 模式仍显示真实内容。分类失败按 NSFW 隐藏并在下次启动重试，分类完成前新 session
-不会进入群聊上下文。旧记录缺少 `nsfw` 字段时按 SFW 兼容。群聊模式下
-`search_chat_history` 不返回这些会话的正文；独处模式下可以搜到。
+solo 路由上优先使用请求显式预算。结果保存在 solo session 的 `nsfw` 字段。隔离按当前
+生效模型判定：云端模型的 `# solo-memories` 对 NSFW 会话隐藏 summary 与正文，只保留固定
+占位符；本地模型显示真实内容。分类失败按 NSFW 隐藏并在下次启动重试，分类完成前新 session
+不会进入上下文。旧记录缺少 `nsfw` 字段时按 SFW 兼容。云端模型下
+`search_chat_history` 不返回这些会话的正文；本地模型下可以搜到。
 
 群聊 user-role overlay 顺序固定为 `# channel-transcript → # live-context / # runtime-context →
 # turn-control → # format-guard`。独处 user-role overlay 为 `# live-context /
@@ -809,7 +810,7 @@ system prompt 额外包含 `<solo-mode>` 与 `<solo-transcript>`，后者使用
 `@` 会被移除。其他成员如果在此期间 `@` 独处目标，不会产生目标 turn；发起方会收到
 一次临时系统提示 turn。
 
-独处可以配置独立本地模型，不再复用群聊模型路由：
+独处可以配置独立本地模型，也可以固定选择任意已配置的 `[model.*]` 路由：
 
 ```ini
 [solo]
@@ -826,7 +827,9 @@ idle_timeout = 900
 `/v1/models` 与 `/props`，不在配置中写死。最后一次请求或 turn 结束后的
 `idle_timeout` 秒内没有活动，akid 会向进程组发送 SIGINT 并关闭服务；下一条消息
 重新拉起。端点已由非 akid 进程占用时会报错，不会接管。未配置 `startup_script`
-时独处继续使用群聊模型。旧 `[solo] model` 已移除，残留会报配置错误。
+时独处继续使用群聊模型。`[solo] model` 可固定独处路由，例如
+`akictl model set deepseek-flash --solo`；`akictl model set auto --solo` 清除选择。
+选择的本地静态路由若与 `[solo] endpoint` 相同，akid 仍会托管启停该服务。
 
 需要测量“现在立刻发起一个 solo turn 时，第一个 API call 有多快”时，可以运行：
 
