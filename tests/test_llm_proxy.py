@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
+import hashlib
 import json
 import socket
 import ssl
@@ -13,6 +15,7 @@ from unittest import mock
 from engine.aki_config import ModelRoute
 from engine.grok_oauth import GrokCredentials
 from engine.llm_proxy import (
+    ContentFilterRetryPolicy,
     LlmProxy,
     ProxyBindError,
     _open_upstream,
@@ -1317,6 +1320,240 @@ class UpstreamProxyPriorityTests(unittest.IsolatedAsyncioTestCase):
         finally:
             server.close()
             await server.wait_closed()
+
+
+class ContentFilterRetryProxyTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.evidence_root = Path(self.tempdir.name) / "evidence"
+        self.filtered_count = 1
+        self.gzip_responses = True
+        self.first_tool_call = False
+        self.bodies: list[bytes] = []
+
+        async def upstream(
+            reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+        ) -> None:
+            data = b""
+            while b"\r\n\r\n" not in data:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    return
+                data += chunk
+            head, rest = data.split(b"\r\n\r\n", 1)
+            headers: dict[str, str] = {}
+            for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            length = int(headers.get("content-length", "0"))
+            while len(rest) < length:
+                rest += await reader.read(length - len(rest))
+            body = rest[:length]
+            self.bodies.append(body)
+            attempt = len(self.bodies)
+            if attempt <= self.filtered_count:
+                payload = self._sse(
+                    "partial",
+                    "content_filter",
+                    "prohibited_content",
+                    tool_call=self.first_tool_call and attempt == 1,
+                )
+            else:
+                payload = self._sse("clean", "stop", "stop")
+            if self.gzip_responses:
+                payload = gzip.compress(payload)
+            response_head = (
+                b"HTTP/1.1 200 OK\r\n"
+                b"Content-Type: text/event-stream\r\n"
+                + (b"Content-Encoding: gzip\r\n" if self.gzip_responses else b"")
+                + b"Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            )
+            writer.write(response_head)
+            midpoint = max(1, len(payload) // 2)
+            for chunk in (payload[:midpoint], payload[midpoint:]):
+                writer.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+            writer.write(b"0\r\n\r\n")
+            await writer.drain()
+            writer.close()
+            await writer.wait_closed()
+
+        self.upstream = await asyncio.start_server(upstream, "127.0.0.1", 0)
+        port = int(self.upstream.sockets[0].getsockname()[1])
+        route = ModelRoute(
+            model_id="local-model",
+            upstream_name="fake",
+            upstream_model="upstream-model",
+            api="openai-completions",
+            path="/chat/completions",
+            context_window=1000,
+            max_tokens=100,
+            inputs=("text",),
+            url=f"http://127.0.0.1:{port}/chat/completions",
+            api_key="upstream-secret",
+        )
+        self.proxy = LlmProxy(
+            "127.0.0.1",
+            0,
+            "loopback-token",
+            (route,),
+            content_filter_retry=ContentFilterRetryPolicy(
+                attempts=5,
+                budget_s=30.0,
+                buffer_limit=1024 * 1024,
+                evidence_dir=self.evidence_root,
+                evidence_max_bytes=16 * 1024 * 1024,
+            ),
+        )
+        await self.proxy.start()
+
+    async def asyncTearDown(self) -> None:
+        await self.proxy.stop()
+        self.upstream.close()
+        await self.upstream.wait_closed()
+        self.tempdir.cleanup()
+
+    @staticmethod
+    def _sse(
+        content: str,
+        finish: str,
+        native: str,
+        *,
+        tool_call: bool = False,
+    ) -> bytes:
+        delta: dict[str, object] = {"role": "assistant", "content": content}
+        if tool_call:
+            delta = {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "id": "call_failed",
+                        "index": 0,
+                        "type": "function",
+                        "function": {"name": "Bash", "arguments": "{\"command\":\"true\"}"},
+                    }
+                ],
+            }
+        events = [
+            {
+                "id": "upstream-response",
+                "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
+            },
+            {
+                "id": "upstream-response",
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": finish,
+                        "native_finish_reason": native,
+                    }
+                ],
+                "usage": {"completion_tokens": 2, "total_tokens": 3},
+            },
+        ]
+        return (
+            "".join(f"data: {json.dumps(event)}\n\n" for event in events)
+            + "data: [DONE]\n\n"
+        ).encode()
+
+    async def _post(self) -> tuple[dict[str, str], bytes]:
+        reader, writer = await asyncio.open_connection("127.0.0.1", self.proxy.port)
+        body = json.dumps(
+            {"model": "local-model", "messages": [], "stream": True}
+        ).encode()
+        writer.write(
+            (
+                "POST /v1/chat/completions HTTP/1.1\r\n"
+                f"Host: 127.0.0.1:{self.proxy.port}\r\n"
+                "Authorization: Bearer loopback-token\r\n"
+                "Content-Type: application/json\r\n"
+                f"Content-Length: {len(body)}\r\n\r\n"
+            ).encode()
+            + body
+        )
+        await writer.drain()
+        raw = b""
+        while True:
+            chunk = await asyncio.wait_for(reader.read(65536), timeout=5)
+            if not chunk:
+                break
+            raw += chunk
+        writer.close()
+        await writer.wait_closed()
+        head, payload = raw.split(b"\r\n\r\n", 1)
+        headers: dict[str, str] = {}
+        for line in head.decode("iso-8859-1").split("\r\n")[1:]:
+            if ":" in line:
+                name, value = line.split(":", 1)
+                headers[name.strip().lower()] = value.strip()
+        if headers.get("content-encoding", "").lower() == "gzip":
+            payload = gzip.decompress(payload)
+        return headers, payload
+
+    def _bundles(self) -> list[Path]:
+        if not self.evidence_root.exists():
+            return []
+        return sorted(path for path in self.evidence_root.iterdir() if path.is_dir())
+
+    async def test_returns_only_first_success_and_saves_evidence(self) -> None:
+        with self.assertLogs("akid.llm_proxy", level="WARNING") as logs:
+            headers, payload = await self._post()
+        self.assertEqual(headers.get("content-type"), "text/event-stream")
+        self.assertIn(b"clean", payload)
+        self.assertNotIn(b"partial", payload)
+        self.assertEqual(len(self.bodies), 2)
+        self.assertEqual(self.bodies[0], self.bodies[1])
+        self.assertTrue(
+            any("content-filter retry succeeded" in line for line in logs.output)
+        )
+        bundles = self._bundles()
+        self.assertEqual(len(bundles), 1)
+        bundle = bundles[0]
+        self.assertEqual((bundle / "request-body.bin").read_bytes(), self.bodies[0])
+        self.assertEqual(
+            (bundle / "attempt-1.response.bin").read_bytes()[:8], b"HTTP/1.1"
+        )
+        summary = json.loads((bundle / "summary.json").read_text())
+        self.assertEqual(summary["outcome"], "success")
+        self.assertEqual(summary["success_attempt"], 2)
+        headers = json.loads((bundle / "request-headers.json").read_text())
+        self.assertEqual(headers.get("authorization"), "[redacted]")
+        self.assertNotIn("upstream-secret", json.dumps(headers))
+        self.assertEqual(bundle.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(
+            (bundle / "request-body.bin").stat().st_mode & 0o777, 0o600
+        )
+        self.assertTrue((bundle / "SHA256SUMS").is_file())
+
+    async def test_all_filtered_returns_last_filtered_response(self) -> None:
+        self.filtered_count = 5
+        with self.assertLogs("akid.llm_proxy", level="WARNING") as logs:
+            _headers, payload = await self._post()
+        self.assertIn(b"partial", payload)
+        self.assertIn(b"content_filter", payload)
+        self.assertEqual(len(self.bodies), 5)
+        self.assertTrue(
+            any("content-filter retry exhausted" in line for line in logs.output)
+        )
+        summary = json.loads(
+            (self._bundles()[0] / "summary.json").read_text()
+        )
+        self.assertEqual(summary["outcome"], "exhausted")
+        self.assertEqual(summary["filtered_attempts"], 5)
+
+    async def test_failed_tool_call_is_not_forwarded(self) -> None:
+        self.first_tool_call = True
+        _headers, payload = await self._post()
+        self.assertIn(b"clean", payload)
+        self.assertNotIn(b"tool_calls", payload)
+        self.assertNotIn(b"call_failed", payload)
+
+    async def test_stop_is_not_retried(self) -> None:
+        self.filtered_count = 0
+        _headers, payload = await self._post()
+        self.assertIn(b"clean", payload)
+        self.assertEqual(len(self.bodies), 1)
 
 
 async def _pipe(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:

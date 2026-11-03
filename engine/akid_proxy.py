@@ -17,7 +17,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from engine.aki_config import ConfigError, ensure_proxy_token, load_config, resolve_config_path
-from engine.llm_proxy import LlmProxy
+from engine.llm_proxy import ContentFilterRetryPolicy, LlmProxy
 from engine.solo_backend import default_activity_path, default_state_path
 
 LOGGER = logging.getLogger("akid.proxy")
@@ -47,6 +47,18 @@ def _build(config, debug_socket: str = "") -> LlmProxy:
         debug_socket=debug_socket,
         solo_runtime_path=default_state_path(config.profile),
         solo_activity_path=default_activity_path(config.profile),
+        content_filter_retry=_content_filter_retry_policy(config),
+    )
+
+
+def _content_filter_retry_policy(config) -> ContentFilterRetryPolicy:
+    evidence = config.content_filter_evidence_dir.strip()
+    return ContentFilterRetryPolicy(
+        attempts=config.content_filter_retry,
+        budget_s=config.content_filter_retry_budget_s,
+        buffer_limit=config.content_filter_retry_buffer_limit,
+        evidence_dir=Path(evidence).expanduser() if evidence else None,
+        evidence_max_bytes=config.content_filter_evidence_max_bytes,
     )
 
 
@@ -114,6 +126,7 @@ async def _reload_loop(
             LOGGER.warning("proxy listen/token changed; restart akid-proxy@%s", profile)
         proxy.set_configured_routes(config.enabled_models)
         proxy.upstream_proxy = config.upstream_proxy
+        proxy.content_filter_retry = _content_filter_retry_policy(config)
         proxy.solo_runtime_path = default_state_path(config.profile)
         proxy.solo_activity_path = default_activity_path(config.profile)
         proxy._refresh_solo_route(force=True)

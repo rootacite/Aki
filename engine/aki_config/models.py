@@ -267,6 +267,11 @@ class AkiConfig:
     tool_policy: ToolPolicy = field(default_factory=ToolPolicy)
     image: ImageGeneration | None = None
     comfyui: ComfyUI | None = None
+    content_filter_retry: int = 1
+    content_filter_retry_budget_s: float = 240.0
+    content_filter_retry_buffer_limit: int = 32 * 1024 * 1024
+    content_filter_evidence_dir: str = ""
+    content_filter_evidence_max_bytes: int = 256 * 1024 * 1024
 
     @property
     def enabled_models(self) -> tuple[ModelRoute, ...]:

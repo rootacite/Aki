@@ -131,6 +131,12 @@ listen = 127.0.0.1:7721
 token =
 # 访问上游模型用的 HTTP 代理。多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
+# content_filter 总尝试次数（包含原请求；1 表示关闭透明重试）。
+content_filter_retry = 1
+content_filter_retry_budget_s = 240
+content_filter_retry_buffer_limit = 33554432
+content_filter_evidence_dir =
+content_filter_evidence_max_bytes = 268435456
 
 [upstream.deepseek]
 base_url = https://api.deepseek.com
@@ -315,6 +321,12 @@ listen = 127.0.0.1:7723
 token =
 # 多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
+# content_filter 总尝试次数（包含原请求；1 表示关闭透明重试）。
+content_filter_retry = 1
+content_filter_retry_budget_s = 240
+content_filter_retry_buffer_limit = 33554432
+content_filter_evidence_dir =
+content_filter_evidence_max_bytes = 268435456
 
 [upstream.cli-proxy-api]
 base_url = http://127.0.0.1:8317/v1
@@ -444,6 +456,12 @@ listen = 127.0.0.1:7724
 token =
 # 多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
 upstream_proxy = http://192.168.3.2:7890
+# content_filter 总尝试次数（包含原请求；1 表示关闭透明重试）。
+content_filter_retry = 1
+content_filter_retry_budget_s = 240
+content_filter_retry_buffer_limit = 33554432
+content_filter_evidence_dir =
+content_filter_evidence_max_bytes = 268435456
 
 [upstream.deepseek]
 base_url = https://api.deepseek.com

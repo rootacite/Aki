@@ -9,7 +9,7 @@ import random
 import time
 import uuid
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from engine.aki_config import discover_profiles, load_config
 from engine.live_context import CHANNEL_WAKE_USER
@@ -327,6 +327,44 @@ class ProactiveMixin:
             "this instruction block. Do not @ other agents. Your final assistant "
             "text is delivered to the user on the normal channel/bubble path.\n\n"
             + "\n\n".join(blocks)
+            + "\n\n"
+            + self._proactive_time_anchor()
+        )
+
+
+    def _proactive_time_anchor(self, *, now: datetime | None = None) -> str:
+        current = now.astimezone() if now is not None else datetime.now().astimezone()
+        current_text = current.strftime("%Y-%m-%d %H:%M:%S %Z")
+        last_text = "none"
+        entries = getattr(self, "_channel_history", None) or []
+        if entries:
+            entry = entries[-1]
+            sent_at = int(getattr(entry, "sent_at", 0) or 0)
+            timestamp = str(getattr(entry, "timestamp", "") or "")
+            if sent_at > 0:
+                try:
+                    last = datetime.fromtimestamp(
+                        sent_at / 1000.0, tz=timezone.utc
+                    ).astimezone()
+                    last_text = last.strftime("%Y-%m-%d %H:%M:%S %Z")
+                except (OSError, OverflowError, ValueError):
+                    last_text = timestamp or "unknown"
+            elif timestamp:
+                try:
+                    last = datetime.fromisoformat(
+                        timestamp.replace("Z", "+00:00")
+                    ).astimezone()
+                    last_text = last.strftime("%Y-%m-%d %H:%M:%S %Z")
+                except (OverflowError, ValueError):
+                    last_text = timestamp
+        return (
+            "<time-anchor>\n"
+            f"current_local_time: {current_text}\n"
+            f"last_channel_message_at: {last_text}\n"
+            "note: Earlier channel transcript entries are historical. Only the "
+            "trigger above describes the current event. Never describe older "
+            "transcript entries as \"just now\".\n"
+            "</time-anchor>"
         )
 
 

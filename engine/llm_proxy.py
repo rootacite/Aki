@@ -5,13 +5,19 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import copy
+import datetime
+import gzip
+import hashlib
 import hmac
 import json
 import logging
 import os
+import shutil
 import ssl
 import time
 import uuid
+import zlib
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 from urllib.parse import urlsplit
@@ -33,6 +39,27 @@ MAX_HEADER_BYTES = 64 * 1024
 UPSTREAM_CONNECT_ATTEMPTS = 5
 UPSTREAM_RETRY_DELAYS = (0.2, 0.4, 0.8, 1.2)
 SOLO_ACTIVITY_HEARTBEAT_SECONDS = 60.0
+DEFAULT_CONTENT_FILTER_BUFFER_LIMIT = 32 * 1024 * 1024
+DEFAULT_CONTENT_FILTER_EVIDENCE_MAX_BYTES = 256 * 1024 * 1024
+CONTENT_FILTER_NATIVE_REASONS = frozenset(
+    {
+        "prohibited_content",
+        "safety",
+        "recitation",
+        "blocklist",
+        "spii",
+        "image_safety",
+    }
+)
+CONTENT_FILTER_RETRY_DELAYS = (0.25, 0.5, 1.0, 1.0)
+_EVIDENCE_REDACTED_HEADERS = {
+    "authorization",
+    "proxy-authorization",
+    "cookie",
+    "set-cookie",
+    "x-api-key",
+    "api-key",
+}
 _HOP_BY_HOP = {
     "host",
     "authorization",
@@ -51,6 +78,37 @@ _HOP_BY_HOP = {
 
 class ProxyBindError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class ContentFilterRetryPolicy:
+    """Retry policy for upstream content-filter terminal responses.
+
+    ``attempts`` is the total number of upstream attempts, including the
+    original request.  Values <= 1 disable retrying.
+    """
+
+    attempts: int = 1
+    budget_s: float = 240.0
+    buffer_limit: int = DEFAULT_CONTENT_FILTER_BUFFER_LIMIT
+    evidence_dir: Path | None = None
+    evidence_max_bytes: int = DEFAULT_CONTENT_FILTER_EVIDENCE_MAX_BYTES
+
+    @property
+    def enabled(self) -> bool:
+        return self.attempts > 1 and self.budget_s > 0
+
+
+@dataclass
+class _BufferedResponse:
+    status: int
+    head: bytes
+    headers: dict[str, str]
+    body: bytes
+    finish_reason: str | None = None
+    native_finish_reason: str | None = None
+    response_id: str | None = None
+    usage: Mapping[str, object] | None = None
 
 
 def _status_json(status: int, message: str, error_type: str = "proxy") -> bytes:
@@ -95,6 +153,7 @@ class LlmProxy:
         debug_socket: str | os.PathLike[str] | None = None,
         solo_runtime_path: str | os.PathLike[str] | None = None,
         solo_activity_path: str | os.PathLike[str] | None = None,
+        content_filter_retry: ContentFilterRetryPolicy | None = None,
     ) -> None:
         if host != "127.0.0.1":
             raise ProxyBindError("LLM proxy refuses to bind anything except 127.0.0.1")
@@ -104,6 +163,7 @@ class LlmProxy:
         self._configured_routes: dict[str, ModelRoute] = {}
         self.routes: dict[str, ModelRoute] = {}
         self.profile = profile
+        self.content_filter_retry = content_filter_retry or ContentFilterRetryPolicy()
         self.solo_runtime_path = (
             Path(solo_runtime_path).expanduser()
             if solo_runtime_path is not None
@@ -256,6 +316,13 @@ class LlmProxy:
             sorted(self.routes),
             via,
         )
+        if self.content_filter_retry.enabled:
+            LOGGER.info(
+                "content-filter retry enabled attempts=%s budget_s=%s evidence=%s",
+                self.content_filter_retry.attempts,
+                self.content_filter_retry.budget_s,
+                self.content_filter_retry.evidence_dir,
+            )
 
     async def stop(self) -> None:
         server = self._server
@@ -431,6 +498,7 @@ class LlmProxy:
                     and "continue_final_message" not in payload
                 ),
                 request_payload=payload,
+                content_filter_retry=self.content_filter_retry,
             )
         except OSError as exc:
             LOGGER.warning(
@@ -531,6 +599,7 @@ async def _forward(
     request_id: str = "",
     solo_think_close: bool = False,
     request_payload: dict | None = None,
+    content_filter_retry: ContentFilterRetryPolicy | None = None,
 ) -> int:
     host = parsed.hostname
     if not host:
@@ -540,6 +609,23 @@ async def _forward(
     path = parsed.path or "/"
     if parsed.query:
         path = f"{path}?{parsed.query}"
+    retry_policy = content_filter_retry or ContentFilterRetryPolicy()
+    if retry_policy.enabled and not solo_think_close:
+        return await _forward_with_content_filter_retry(
+            parsed,
+            request_headers,
+            body,
+            api_key,
+            client,
+            upstream_proxy=upstream_proxy,
+            ssl_context=ssl_context,
+            use_proxy=use_proxy,
+            extra_headers=extra_headers,
+            debug=debug,
+            request_id=request_id,
+            request_payload=request_payload,
+            policy=retry_policy,
+        )
     upstream_reader, upstream_writer, request_target = await _open_upstream(
         host,
         port,
@@ -549,24 +635,16 @@ async def _forward(
         ssl_context=ssl_context,
     )
     try:
-        header_lines = [
-            f"POST {request_target} HTTP/1.1",
-            f"Host: {host if port in (80, 443) else f'{host}:{port}'}",
-            "Content-Type: application/json",
-            f"Content-Length: {len(body)}",
-            "Connection: close",
-        ]
-        if api_key:
-            header_lines.append(f"Authorization: Bearer {api_key}")
-        extra_headers = extra_headers or {}
-        for name, value in extra_headers.items():
-            header_lines.append(f"{name}: {value}")
-        reserved = {name.lower() for name in extra_headers}
-        for name, value in request_headers.items():
-            if name in _HOP_BY_HOP or name in reserved or name == "content-type":
-                continue
-            header_lines.append(f"{name}: {value}")
-        upstream_writer.write(("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1"))
+        request_head, _request_header_map = _upstream_request_head(
+            host,
+            port,
+            request_target,
+            body,
+            api_key,
+            request_headers,
+            extra_headers,
+        )
+        upstream_writer.write(request_head)
         upstream_writer.write(body)
         await upstream_writer.drain()
         if solo_think_close and isinstance(request_payload, dict):
@@ -594,6 +672,578 @@ async def _forward(
         upstream_writer.close()
         with contextlib.suppress(Exception):
             await upstream_writer.wait_closed()
+
+
+def _upstream_request_head(
+    host: str,
+    port: int,
+    request_target: str,
+    body: bytes,
+    api_key: str,
+    request_headers: Mapping[str, str],
+    extra_headers: Mapping[str, str] | None,
+) -> tuple[bytes, dict[str, str]]:
+    header_lines = [
+        f"POST {request_target} HTTP/1.1",
+        f"Host: {host if port in (80, 443) else f'{host}:{port}'}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+    ]
+    if api_key:
+        header_lines.append(f"Authorization: Bearer {api_key}")
+    extra_headers = extra_headers or {}
+    for name, value in extra_headers.items():
+        header_lines.append(f"{name}: {value}")
+    reserved = {name.lower() for name in extra_headers}
+    for name, value in request_headers.items():
+        if name in _HOP_BY_HOP or name in reserved or name == "content-type":
+            continue
+        header_lines.append(f"{name}: {value}")
+    header_map: dict[str, str] = {}
+    for line in header_lines[1:]:
+        if ":" not in line:
+            continue
+        name, value = line.split(":", 1)
+        header_map[name.strip().lower()] = value.strip()
+    return ("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1"), header_map
+
+
+async def _forward_with_content_filter_retry(
+    parsed,
+    request_headers: Mapping[str, str],
+    body: bytes,
+    api_key: str,
+    client: asyncio.StreamWriter,
+    *,
+    upstream_proxy: str,
+    ssl_context: ssl.SSLContext | None,
+    use_proxy: bool,
+    extra_headers: Mapping[str, str] | None,
+    debug: ProxyDebugStream | None,
+    request_id: str,
+    request_payload: dict | None,
+    policy: ContentFilterRetryPolicy,
+) -> int:
+    host = parsed.hostname
+    if not host:
+        raise OSError("missing upstream host")
+    scheme = parsed.scheme
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    model = ""
+    if isinstance(request_payload, dict):
+        model = str(request_payload.get("model") or "")
+    evidence = _ContentFilterEvidence(
+        policy,
+        request_id,
+        model,
+        parsed.geturl(),
+        body,
+    )
+    deadline = time.monotonic() + policy.budget_s
+    last_response: _BufferedResponse | None = None
+    filtered: list[_BufferedResponse] = []
+    attempt = 1
+    while attempt <= policy.attempts:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            LOGGER.warning(
+                "content-filter retry budget exhausted request_id=%s attempts=%s",
+                request_id,
+                attempt - 1,
+            )
+            break
+        try:
+            async with asyncio.timeout(remaining):
+                upstream_reader, upstream_writer, request_target = await _open_upstream(
+                    host,
+                    port,
+                    scheme,
+                    path,
+                    upstream_proxy=upstream_proxy if use_proxy else "",
+                    ssl_context=ssl_context,
+                )
+                try:
+                    request_head, request_header_map = _upstream_request_head(
+                        host,
+                        port,
+                        request_target,
+                        body,
+                        api_key,
+                        request_headers,
+                        extra_headers,
+                    )
+                    upstream_writer.write(request_head)
+                    upstream_writer.write(body)
+                    await upstream_writer.drain()
+                    response = await _read_full_upstream_response(
+                        upstream_reader,
+                        max_bytes=policy.buffer_limit,
+                    )
+                finally:
+                    upstream_writer.close()
+                    with contextlib.suppress(Exception):
+                        await upstream_writer.wait_closed()
+        except (OSError, TimeoutError, asyncio.TimeoutError) as exc:
+            LOGGER.warning(
+                "content-filter retry transport failed request_id=%s attempt=%s/%s "
+                "type=%s error=%s",
+                request_id,
+                attempt,
+                policy.attempts,
+                type(exc).__name__,
+                exc,
+            )
+            break
+
+        if response.status == 200 and _is_content_filter_response(response):
+            filtered.append(response)
+            last_response = response
+            evidence.record_filtered(attempt, response, request_header_map)
+            if debug is not None:
+                with contextlib.suppress(Exception):
+                    debug.publish(
+                        "content_filter_retry",
+                        request_id=request_id,
+                        attempt=attempt,
+                        finish_reason=response.finish_reason,
+                        native_finish_reason=response.native_finish_reason,
+                        response_id=response.response_id,
+                        response_bytes=len(response.body),
+                    )
+            LOGGER.info(
+                "content-filter attempt=%s/%s request_id=%s finish_reason=%s "
+                "native_finish_reason=%s response_id=%s",
+                attempt,
+                policy.attempts,
+                request_id,
+                response.finish_reason,
+                response.native_finish_reason,
+                response.response_id,
+            )
+            if attempt >= policy.attempts:
+                break
+            delay = CONTENT_FILTER_RETRY_DELAYS[
+                min(attempt - 1, len(CONTENT_FILTER_RETRY_DELAYS) - 1)
+            ]
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(delay, remaining))
+            attempt += 1
+            continue
+
+        if filtered:
+            native_reasons = ",".join(
+                str(item.native_finish_reason or item.finish_reason or "unknown")
+                for item in filtered
+            )
+            if response.status == 200:
+                LOGGER.warning(
+                    "content-filter retry succeeded request_id=%s attempts=%s "
+                    "filtered=%s response_id=%s native_finish_reasons=%s evidence=%s",
+                    request_id,
+                    attempt,
+                    len(filtered),
+                    response.response_id,
+                    native_reasons,
+                    evidence.bundle,
+                )
+                evidence.finish_success(attempt, filtered, response)
+            else:
+                LOGGER.warning(
+                    "content-filter retry stopped on upstream status request_id=%s "
+                    "attempts=%s filtered=%s status=%s evidence=%s",
+                    request_id,
+                    attempt,
+                    len(filtered),
+                    response.status,
+                    evidence.bundle,
+                )
+                evidence.finish_upstream_error(response, filtered)
+        await _write_buffered_response(client, response)
+        _debug_response(
+            debug,
+            request_id,
+            response.status,
+            _forwarded_response_headers(response),
+            response.body,
+        )
+        return response.status
+
+    if last_response is not None:
+        LOGGER.warning(
+            "content-filter retry exhausted request_id=%s attempts=%s "
+            "native_finish_reasons=%s evidence=%s",
+            request_id,
+            len(filtered),
+            ",".join(
+                str(item.native_finish_reason or item.finish_reason or "unknown")
+                for item in filtered
+            ),
+            evidence.bundle,
+        )
+        evidence.finish_exhausted(last_response, filtered)
+        await _write_buffered_response(client, last_response)
+        _debug_response(
+            debug,
+            request_id,
+            last_response.status,
+            _forwarded_response_headers(last_response),
+            last_response.body,
+        )
+        return last_response.status
+    raise OSError("content-filter retry failed without an upstream response")
+
+
+async def _read_full_upstream_response(
+    reader: asyncio.StreamReader,
+    *,
+    max_bytes: int,
+) -> _BufferedResponse:
+    head, headers, rest = await _read_upstream_head(reader)
+    status = _status_code(head)
+    body = await _read_upstream_bytes(reader, headers, rest, max_bytes=max_bytes)
+    info = _response_finish_info(headers, body)
+    return _BufferedResponse(
+        status=status,
+        head=head,
+        headers=headers,
+        body=body,
+        finish_reason=info.get("finish_reason"),
+        native_finish_reason=info.get("native_finish_reason"),
+        response_id=info.get("response_id"),
+        usage=info.get("usage"),
+    )
+
+
+def _decode_response_body(headers: Mapping[str, str], body: bytes) -> bytes | None:
+    encoding = headers.get("content-encoding", "").strip().lower()
+    if encoding in ("", "identity"):
+        return body
+    try:
+        if encoding == "gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            for window_bits in (zlib.MAX_WBITS, -zlib.MAX_WBITS):
+                try:
+                    return zlib.decompress(body, window_bits)
+                except zlib.error:
+                    continue
+    except (OSError, EOFError, zlib.error):
+        return None
+    return None
+
+
+def _response_finish_info(
+    headers: Mapping[str, str], body: bytes
+) -> dict[str, object | None]:
+    decoded = _decode_response_body(headers, body)
+    if decoded is None:
+        return {}
+    content_type = headers.get("content-type", "").lower()
+    if "text/event-stream" in content_type or decoded.lstrip().startswith(b"data:"):
+        return _sse_finish_info(decoded)
+    try:
+        payload = json.loads(decoded)
+    except ValueError:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[str, object | None] = {
+        "finish_reason": None,
+        "native_finish_reason": None,
+        "response_id": payload.get("id") if isinstance(payload.get("id"), str) else None,
+        "usage": payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
+    }
+    choices = payload.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if isinstance(choice.get("finish_reason"), str):
+                result["finish_reason"] = choice["finish_reason"]
+            if isinstance(choice.get("native_finish_reason"), str):
+                result["native_finish_reason"] = choice["native_finish_reason"]
+    return result
+
+
+def _sse_finish_info(body: bytes) -> dict[str, object | None]:
+    normalized = body.replace(b"\r\n", b"\n")
+    events, tail = _split_sse(normalized)
+    if tail.strip():
+        events.append(tail)
+    result: dict[str, object | None] = {
+        "finish_reason": None,
+        "native_finish_reason": None,
+        "response_id": None,
+        "usage": None,
+    }
+    for event in events:
+        data = _sse_data(event)
+        if not data or data.strip() == "[DONE]":
+            continue
+        try:
+            payload = json.loads(data)
+        except ValueError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if isinstance(payload.get("id"), str):
+            result["response_id"] = payload["id"]
+        if isinstance(payload.get("usage"), dict):
+            result["usage"] = payload["usage"]
+        choices = payload.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            if isinstance(choice.get("finish_reason"), str):
+                result["finish_reason"] = choice["finish_reason"]
+            if isinstance(choice.get("native_finish_reason"), str):
+                result["native_finish_reason"] = choice["native_finish_reason"]
+    return result
+
+
+def _is_content_filter_response(response: _BufferedResponse) -> bool:
+    finish = (response.finish_reason or "").strip().lower()
+    native = (response.native_finish_reason or "").strip().lower()
+    return finish == "content_filter" or native in CONTENT_FILTER_NATIVE_REASONS
+
+
+def _forwarded_response_headers(response: _BufferedResponse) -> dict[str, str]:
+    headers = {
+        name: value
+        for name, value in response.headers.items()
+        if name not in {"transfer-encoding", "content-length", "connection"}
+    }
+    headers["content-length"] = str(len(response.body))
+    headers["connection"] = "close"
+    return headers
+
+
+def _buffered_response_bytes(response: _BufferedResponse) -> bytes:
+    status_line = response.head.split(b"\r\n", 1)[0].decode("iso-8859-1")
+    headers = _forwarded_response_headers(response)
+    lines = [status_line]
+    lines.extend(f"{name}: {value}" for name, value in headers.items())
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("iso-8859-1") + response.body
+
+
+async def _write_buffered_response(
+    client: asyncio.StreamWriter, response: _BufferedResponse
+) -> None:
+    client.write(_buffered_response_bytes(response))
+    await client.drain()
+
+
+class _ContentFilterEvidence:
+    def __init__(
+        self,
+        policy: ContentFilterRetryPolicy,
+        request_id: str,
+        model: str,
+        upstream_url: str,
+        body: bytes,
+    ) -> None:
+        self.policy = policy
+        self.request_id = request_id
+        self.model = model
+        self.upstream_url = upstream_url
+        self.body = body
+        self.bundle: Path | None = None
+        self._request_written = False
+
+    def _ensure_bundle(self) -> Path | None:
+        if self.policy.evidence_dir is None:
+            return None
+        if self.bundle is not None:
+            return self.bundle
+        try:
+            root = self.policy.evidence_dir.expanduser()
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(root, 0o700)
+            stamp = datetime.datetime.now(datetime.timezone.utc).strftime(
+                "%Y%m%dT%H%M%SZ"
+            )
+            bundle = root / f"{stamp}-{self.request_id}"
+            bundle.mkdir(mode=0o700)
+            os.chmod(bundle, 0o700)
+            self._write_bytes(bundle / "request-body.bin", self.body)
+            self._write_json(
+                bundle / "request-meta.json",
+                {
+                    "request_id": self.request_id,
+                    "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                    "model": self.model,
+                    "upstream_url": self.upstream_url,
+                    "body_bytes": len(self.body),
+                    "body_sha256": hashlib.sha256(self.body).hexdigest(),
+                },
+            )
+            self.bundle = bundle
+            return bundle
+        except OSError as exc:
+            LOGGER.warning("content-filter evidence unavailable: %s", exc)
+            self.bundle = None
+            return None
+
+    def record_filtered(
+        self,
+        attempt: int,
+        response: _BufferedResponse,
+        header_map: Mapping[str, str],
+    ) -> None:
+        bundle = self._ensure_bundle()
+        if bundle is None:
+            return
+        try:
+            if not self._request_written:
+                redacted = {
+                    name: "[redacted]"
+                    if name.lower() in _EVIDENCE_REDACTED_HEADERS
+                    else value
+                    for name, value in header_map.items()
+                }
+                self._write_json(bundle / "request-headers.json", redacted)
+                self._request_written = True
+            raw = _buffered_response_bytes(response)
+            self._write_bytes(bundle / f"attempt-{attempt}.response.bin", raw)
+            self._write_json(
+                bundle / f"attempt-{attempt}.meta.json",
+                {
+                    "attempt": attempt,
+                    "status": response.status,
+                    "finish_reason": response.finish_reason,
+                    "native_finish_reason": response.native_finish_reason,
+                    "response_id": response.response_id,
+                    "usage": response.usage,
+                    "response_bytes": len(raw),
+                    "response_sha256": hashlib.sha256(raw).hexdigest(),
+                },
+            )
+        except OSError as exc:
+            LOGGER.warning("content-filter evidence write failed: %s", exc)
+
+    def finish_success(
+        self,
+        success_attempt: int,
+        filtered: list[_BufferedResponse],
+        response: _BufferedResponse,
+    ) -> None:
+        self._finish(
+            {
+                "outcome": "success",
+                "success_attempt": success_attempt,
+                "success_response_id": response.response_id,
+                "success_finish_reason": response.finish_reason,
+                "success_native_finish_reason": response.native_finish_reason,
+                "filtered_attempts": len(filtered),
+            }
+        )
+
+    def finish_exhausted(
+        self, response: _BufferedResponse, filtered: list[_BufferedResponse]
+    ) -> None:
+        self._finish(
+            {
+                "outcome": "exhausted",
+                "success_attempt": None,
+                "success_response_id": None,
+                "last_response_id": response.response_id,
+                "last_finish_reason": response.finish_reason,
+                "last_native_finish_reason": response.native_finish_reason,
+                "filtered_attempts": len(filtered),
+            }
+        )
+
+    def finish_upstream_error(
+        self, response: _BufferedResponse, filtered: list[_BufferedResponse]
+    ) -> None:
+        self._finish(
+            {
+                "outcome": "upstream_error",
+                "success_attempt": None,
+                "success_response_id": None,
+                "last_status": response.status,
+                "last_response_id": response.response_id,
+                "last_finish_reason": response.finish_reason,
+                "last_native_finish_reason": response.native_finish_reason,
+                "filtered_attempts": len(filtered),
+            }
+        )
+
+    def _finish(self, extra: dict[str, object]) -> None:
+        bundle = self.bundle
+        if bundle is None:
+            return
+        try:
+            summary = {
+                "request_id": self.request_id,
+                "model": self.model,
+                "upstream_url": self.upstream_url,
+                "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                **extra,
+            }
+            self._write_json(bundle / "summary.json", summary)
+            self._write_sha256s(bundle)
+            _prune_evidence(self.policy, keep=bundle)
+        except OSError as exc:
+            LOGGER.warning("content-filter evidence finalize failed: %s", exc)
+
+    @staticmethod
+    def _write_bytes(path: Path, data: bytes) -> None:
+        path.write_bytes(data)
+        os.chmod(path, 0o600)
+
+    @classmethod
+    def _write_json(cls, path: Path, payload: object) -> None:
+        cls._write_bytes(
+            path,
+            (json.dumps(payload, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
+        )
+
+    @staticmethod
+    def _write_sha256s(bundle: Path) -> None:
+        lines: list[str] = []
+        for path in sorted(bundle.iterdir()):
+            if not path.is_file() or path.name == "SHA256SUMS":
+                continue
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            lines.append(f"{digest}  {path.name}\n")
+        (bundle / "SHA256SUMS").write_text("".join(lines), encoding="utf-8")
+        os.chmod(bundle / "SHA256SUMS", 0o600)
+
+
+def _prune_evidence(policy: ContentFilterRetryPolicy, *, keep: Path) -> None:
+    if policy.evidence_dir is None or policy.evidence_max_bytes <= 0:
+        return
+    root = policy.evidence_dir.expanduser()
+    try:
+        bundles = [path for path in root.iterdir() if path.is_dir()]
+        sizes: dict[Path, int] = {}
+        for bundle in bundles:
+            sizes[bundle] = sum(
+                path.stat().st_size
+                for path in bundle.rglob("*")
+                if path.is_file()
+            )
+        total = sum(sizes.values())
+        if total <= policy.evidence_max_bytes:
+            return
+        for bundle in sorted(bundles, key=lambda path: path.stat().st_mtime):
+            if total <= policy.evidence_max_bytes:
+                break
+            if bundle == keep:
+                continue
+            shutil.rmtree(bundle)
+            total -= sizes.get(bundle, 0)
+    except OSError as exc:
+        LOGGER.warning("content-filter evidence prune failed: %s", exc)
 
 
 def _retryable_upstream_connect(exc: OSError) -> bool:
@@ -1398,13 +2048,19 @@ async def _read_upstream_bytes(
     reader: asyncio.StreamReader,
     headers: Mapping[str, str],
     rest: bytes,
+    *,
+    max_bytes: int | None = None,
 ) -> bytes:
     body = _UpstreamBody(reader, headers, rest)
     chunks: list[bytes] = []
+    total = 0
     while True:
         chunk = await body.read(65536)
         if not chunk:
             return b"".join(chunks)
+        total += len(chunk)
+        if max_bytes is not None and total > max_bytes:
+            raise OSError("upstream response too large")
         chunks.append(chunk)
 
 

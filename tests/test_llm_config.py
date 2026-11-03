@@ -117,6 +117,32 @@ class AkiConfigTests(unittest.TestCase):
             "http://192.168.50.100:7890;http://192.168.3.2:7890",
         )
 
+    def test_content_filter_retry_defaults_and_override(self) -> None:
+        atomic_write(self.path, template_text())
+        config = load_config(self.path)
+        self.assertEqual(config.content_filter_retry, 1)
+        self.assertEqual(config.content_filter_retry_budget_s, 240.0)
+        self.assertEqual(config.content_filter_retry_buffer_limit, 32 * 1024 * 1024)
+        self.assertEqual(config.content_filter_evidence_dir, "")
+        self.assertEqual(
+            config.content_filter_evidence_max_bytes, 256 * 1024 * 1024
+        )
+        set_key(self.path, "proxy", "content_filter_retry", "5")
+        set_key(
+            self.path,
+            "proxy",
+            "content_filter_evidence_dir",
+            "~/.aki/evidence/content-filter",
+        )
+        config = load_config(self.path)
+        self.assertEqual(config.content_filter_retry, 5)
+        self.assertEqual(
+            config.content_filter_evidence_dir, "~/.aki/evidence/content-filter"
+        )
+        set_key(self.path, "proxy", "content_filter_retry", "11")
+        with self.assertRaises(ConfigError):
+            load_config(self.path)
+
     def test_late_night_trigger_defaults_off_and_can_be_enabled(self) -> None:
         atomic_write(self.path, template_text())
         self.assertFalse(load_config(self.path).presence_late_night_enabled)

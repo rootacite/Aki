@@ -138,6 +138,28 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 `http://192.168.50.100:7890;http://192.168.3.2:7890`；全部不可达时请求失败，不会绕过代理直连。
 单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连。聊天客户端仍然只走 Unix socket。
 
+### content_filter 透明重试
+
+`akid-proxy` 可以拦截上游 SSE 终止帧里的 `finish_reason: content_filter`（以及
+`native_finish_reason` 为安全类原因）并在代理内部重放同一请求。重试对上层透明：失败
+attempt 的内容不会写入 Letta；只有第一个非 content-filter 的完整响应会转发给上层。
+为了做到这一点，代理会完整缓冲每次 attempt，因此正常回复的逐 token 显示会推迟到该
+attempt 结束。
+
+```ini
+[proxy]
+# 总尝试次数，包含原始请求。1 表示关闭。
+content_filter_retry = 5
+content_filter_retry_budget_s = 240
+content_filter_retry_buffer_limit = 33554432
+content_filter_evidence_dir = ~/.aki/evidence/content-filter
+content_filter_evidence_max_bytes = 268435456
+```
+
+发生 content-filter 时，代理把精确的 upstream request body、脱敏后的请求头、每个失败
+attempt 的原始响应、`summary.json` 和 `SHA256SUMS` 写入 evidence 目录（`0700`/`0600`）。
+重试成功或耗尽时各写一条 warning 日志。仅建议对云端模型启用；本地模型通常不需要。
+
 ### 复用 Grok Build 的 xAI OAuth
 
 如果本机已经用 `grok login` 登录，akid 可以直接复用 `~/.grok/auth.json` 里的 xAI OAuth
@@ -1090,7 +1112,7 @@ bridge 模式下，akid 在每个 turn 真正开始前采集一次桌面快照�
 - Proxy 层：设置 `AKI_PROXY_DEBUG_SOCKET=1`，在
   `/tmp/akid/proxy-debug-<profile>.sock` 提供实时 Unix socket。连接后先收到 `hello`
   与最近事件回放，然后实时收到 `request`、`response_start`、`response_chunk`、
-  `response_end`、`error` 事件。可用
+  `response_end`、`error`、`content_filter_retry` 事件。可用
   `socat -u UNIX-CONNECT:/tmp/akid/proxy-debug-aki.sock -` 查看。
 
 Proxy socket 目录使用 `0700`、socket 使用 `0600`，仅同 uid 可连；事件中的敏感 header 会

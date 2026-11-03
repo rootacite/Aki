@@ -630,6 +630,34 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         proxy_port=proxy_port,
         proxy_token=_require(parser, "proxy", "token").strip(),
         upstream_proxy=parse_upstream_proxy(parser.get("proxy", "upstream_proxy", fallback="")),
+        content_filter_retry=_int_or(
+            parser, "proxy", "content_filter_retry", 1, minimum=1, maximum=10
+        ),
+        content_filter_retry_budget_s=_float_or(
+            parser,
+            "proxy",
+            "content_filter_retry_budget_s",
+            240.0,
+            minimum=1.0,
+            maximum=290.0,
+        ),
+        content_filter_retry_buffer_limit=_int_or(
+            parser,
+            "proxy",
+            "content_filter_retry_buffer_limit",
+            32 * 1024 * 1024,
+            minimum=1024,
+        ),
+        content_filter_evidence_dir=parser.get(
+            "proxy", "content_filter_evidence_dir", fallback=""
+        ).strip(),
+        content_filter_evidence_max_bytes=_int_or(
+            parser,
+            "proxy",
+            "content_filter_evidence_max_bytes",
+            256 * 1024 * 1024,
+            minimum=0,
+        ),
         upstreams=upstreams,
         models=tuple(models),
         channel=ChannelIdentity(
