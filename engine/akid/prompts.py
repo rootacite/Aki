@@ -375,6 +375,8 @@ class PromptsMixin:
 
     async def _status(self) -> dict[str, Any]:
         model, reasoning, context_limit = self._agent_info()
+        if self._solo_session is not None and self.config.aki is not None:
+            model, reasoning, context_limit = self._displayed_model_state()
         tokens, token_error = await self._memory_tokens_cached(allow_error=True)
         active = None
         if self.active is not None:

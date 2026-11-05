@@ -811,6 +811,10 @@ class ModelMixin:
                 "backend_ready": bool(getattr(self.backend, "ready", False)),
             }
         )
+        publish_status = getattr(self, "_publish_channel_status", None)
+        if publish_status is not None:
+            with contextlib.suppress(Exception):
+                await publish_status()
         return status
 
 

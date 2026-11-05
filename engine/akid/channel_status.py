@@ -162,19 +162,23 @@ class ChannelStatusMixin:
         model, reasoning, limit = self._agent_info()
         aki = self.config.aki
         if self._solo_session is not None and aki is not None:
+            solo_effort = str(
+                self._solo_reasoning_status().get("effort")
+                or DEFAULT_REASONING_EFFORT
+            )
             override = self._solo_model_override()
             if override is not None:
                 return (
                     f"{self._provider_id()}/{override.model_id}",
-                    reasoning or DEFAULT_REASONING_EFFORT,
+                    solo_effort,
                     getattr(override, "context_window", limit),
                 )
             if self.solo_backend.configured:
                 route = self.solo_backend.last_route()
                 if route is None:
-                    return "", SOLO_REASONING_EFFORT, None
+                    return "", solo_effort, None
                 handle = f"{self._provider_id()}/{route.model_id}"
-                return handle, SOLO_REASONING_EFFORT, route.context_window
+                return handle, solo_effort, route.context_window
         return (
             model or "",
             reasoning or DEFAULT_REASONING_EFFORT,

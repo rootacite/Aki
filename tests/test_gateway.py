@@ -993,7 +993,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             solo_model="deepseek-flash",
             models=(route,),
             enabled_models=(route,),
+            proxy_host="127.0.0.1",
+            proxy_port=7721,
         )
+        server._solo_session = SoloSession(
+            session_id="solo-reasoning",
+            target_id="test-agent",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-11-05T00:00:00Z",
+            group_magic="magic",
+        )
+        server.channel = FakeChannel()
         client = await self.client()
         await client.hello()
 
@@ -1024,6 +1035,18 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(after["effort"], "low")
         self.assertEqual(after["effort_source"], "conversation")
         self.assertTrue(after["configured"])
+        channel_status = server._channel_control_metadata()
+        self.assertEqual(channel_status["model"], "aki/deepseek-flash")
+        self.assertEqual(channel_status["reasoning"], "low")
+        published = [
+            metadata
+            for _text, metadata in server.channel.control
+            if metadata.get("kind") == "status"
+        ]
+        self.assertEqual(published[-1]["reasoning"], "low")
+        rpc_status = await server._status()
+        self.assertEqual(rpc_status["model"], "aki/deepseek-flash")
+        self.assertEqual(rpc_status["reasoning"], "low")
         reloaded.assert_awaited_once_with(
             conversation_id="solo-test-agent", agent_id="test-agent"
         )
