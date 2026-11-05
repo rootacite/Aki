@@ -338,7 +338,7 @@ def repl(
         "akictl MQTT REPL. Commands: /status /health /history [n] /allow <dir> "
         "/disallow <dir> /allowlist /memory ... /mqtt ... /mcp ... "
         "/model [set <id> [--solo]] "
-        "/reasoning [set <level>] /avatar /username /set-username <name> "
+        "/reasoning [set <level>] [--solo] /avatar /username /set-username <name> "
         "/recompile /compact [mode] [--omit-tool-results] "
         "/soft_reset [--solo] /quit",
         file=sys.stderr,

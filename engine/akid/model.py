@@ -7,6 +7,7 @@ import contextlib
 import json
 import time
 from pathlib import Path
+from typing import Any, Mapping
 from engine.aki_config import (
     atomic_write,
     load_config,
@@ -30,6 +31,8 @@ from engine.solo_memory import (
 )
 from engine.model_privacy import is_local_model_route
 from engine.solo_mode import (
+    SOLO_REASONING_EFFORT,
+    conversation_directory,
     ensure_solo_conversation,
     now_iso as solo_now_iso,
     solo_conversation_id,
@@ -553,14 +556,91 @@ class ModelMixin:
         return None
 
 
-    def _reasoning_status(self) -> dict[str, Any]:
+    def _reasoning_status(
+        self, params: Mapping[str, Any] | None = None
+    ) -> dict[str, Any]:
+        if params is not None and bool(params.get("solo", False)):
+            return self._solo_reasoning_status()
         model, effort, _context = self._agent_info()
         allowed = supported_reasoning_efforts(self._active_model_route(model))
         return {
+            "scope": "group",
             "model": model,
             "effort": effort or DEFAULT_REASONING_EFFORT,
             "default": DEFAULT_REASONING_EFFORT,
             "allowed": list(allowed),
+        }
+
+
+    def _solo_conversation_record_path(self) -> Path:
+        return (
+            conversation_directory(
+                self.config.backend_dir,
+                solo_conversation_id(self.config.agent_id),
+                self.config.agent_id,
+            )
+            / "conversation.json"
+        )
+
+
+    def _solo_reasoning_target(self) -> tuple[str, Any | None, bool]:
+        override = self._solo_model_override()
+        if override is not None:
+            return f"{self._provider_id()}/{override.model_id}", override, False
+        solo_backend = getattr(self, "solo_backend", None)
+        if bool(getattr(solo_backend, "configured", False)):
+            route = solo_backend.last_route()
+            handle = (
+                f"{self._provider_id()}/{route.model_id}" if route is not None else ""
+            )
+            return handle, None, True
+        model, _effort, _context = self._agent_info()
+        return model or "", self._active_model_route(model), False
+
+
+    def _solo_reasoning_status(self) -> dict[str, Any]:
+        model, route, managed_local = self._solo_reasoning_target()
+        configured_effort: str | None = None
+        path = self._solo_conversation_record_path()
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            record = None
+        if isinstance(record, dict):
+            settings = record.get("model_settings")
+            if isinstance(settings, dict):
+                value = settings.get("reasoning_effort")
+                if isinstance(value, str) and value:
+                    configured_effort = value
+                else:
+                    nested = settings.get("reasoning")
+                    if isinstance(nested, dict):
+                        value = nested.get("reasoning_effort")
+                        if isinstance(value, str) and value:
+                            configured_effort = value
+        if managed_local:
+            return {
+                "scope": "solo",
+                "model": model,
+                "effort": SOLO_REASONING_EFFORT,
+                "default": SOLO_REASONING_EFFORT,
+                "allowed": [SOLO_REASONING_EFFORT],
+                "configured": configured_effort is not None,
+                "configured_effort": configured_effort,
+                "managed_local": True,
+                "effort_source": "fixed",
+            }
+        _agent_model, agent_effort, _context = self._agent_info()
+        return {
+            "scope": "solo",
+            "model": model,
+            "effort": configured_effort or agent_effort or DEFAULT_REASONING_EFFORT,
+            "default": DEFAULT_REASONING_EFFORT,
+            "allowed": list(supported_reasoning_efforts(route)),
+            "configured": configured_effort is not None,
+            "configured_effort": configured_effort,
+            "managed_local": False,
+            "effort_source": "conversation" if configured_effort else "agent",
         }
 
 
@@ -585,6 +665,8 @@ class ModelMixin:
 
 
     async def _reasoning_set(self, params: Mapping[str, Any]) -> dict[str, Any]:
+        if bool(params.get("solo", False)):
+            return await self._solo_reasoning_set(params)
         raw = params.get("effort", DEFAULT_REASONING_EFFORT)
         if not isinstance(raw, str) or not raw.strip():
             raise RpcError(ErrorCode.INVALID_PARAMS, "effort must be a string")
@@ -620,6 +702,113 @@ class ModelMixin:
                 "backend_restarted": restart.get("backend_restarted", False),
                 "interrupted_turn_id": restart.get("interrupted_turn_id"),
                 "backend_ready": restart.get("backend_ready", False),
+            }
+        )
+        return status
+
+
+    async def _solo_reasoning_set(
+        self, params: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        raw = params.get("effort", DEFAULT_REASONING_EFFORT)
+        if not isinstance(raw, str) or not raw.strip():
+            raise RpcError(ErrorCode.INVALID_PARAMS, "effort must be a string")
+        effort = raw.strip().lower()
+        model, route, managed_local = self._solo_reasoning_target()
+        if managed_local:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                "managed local solo reasoning is fixed at medium; select a cloud "
+                "solo model with 'akictl model set <id> --solo' first",
+                {
+                    "managed_local": True,
+                    "model": model,
+                    "effort": SOLO_REASONING_EFFORT,
+                },
+            )
+        allowed = supported_reasoning_efforts(route)
+        if effort not in allowed:
+            raise RpcError(
+                ErrorCode.INVALID_PARAMS,
+                f"reasoning effort must be one of: {', '.join(allowed)}",
+                {"allowed": list(allowed), "scope": "solo"},
+            )
+        if self.active is not None or self.queue:
+            raise RpcError(
+                ErrorCode.INVALID_REQUEST,
+                "cannot change solo reasoning while a turn is active or queued",
+            )
+
+        path = self._solo_conversation_record_path()
+        original: str | None = None
+        if path.is_file():
+            try:
+                original = path.read_text(encoding="utf-8")
+                data = json.loads(original)
+            except (OSError, ValueError) as exc:
+                raise RpcError(
+                    ErrorCode.INTERNAL_ERROR,
+                    f"cannot read solo conversation: {exc}",
+                ) from exc
+        else:
+            ensure_solo_conversation(
+                backend_dir=self.config.backend_dir,
+                agent_id=self.config.agent_id,
+                cwd=self.config.cwd,
+                update_model=False,
+            )
+            data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise RpcError(
+                ErrorCode.INTERNAL_ERROR,
+                "solo conversation record is not an object",
+            )
+        settings = data.get("model_settings")
+        if not isinstance(settings, dict):
+            settings = {}
+        previous = settings.get("reasoning_effort")
+        if not isinstance(previous, str):
+            nested = settings.get("reasoning")
+            previous = (
+                nested.get("reasoning_effort")
+                if isinstance(nested, dict)
+                else None
+            )
+        settings["reasoning_effort"] = effort
+        nested = settings.get("reasoning")
+        if not isinstance(nested, dict):
+            nested = {}
+        nested["reasoning_effort"] = effort
+        settings["reasoning"] = nested
+        data["model_settings"] = settings
+        data["updated_at"] = solo_now_iso()
+        atomic_write(
+            path,
+            json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        )
+
+        backend_reloaded = False
+        try:
+            if bool(getattr(self.backend, "ready", False)):
+                await self.backend.reload_conversation(
+                    conversation_id=solo_conversation_id(self.config.agent_id),
+                    agent_id=self.config.agent_id,
+                )
+                backend_reloaded = True
+        except Exception as exc:
+            if original is not None:
+                atomic_write(path, original)
+            raise RpcError(
+                ErrorCode.INTERNAL_ERROR,
+                f"cannot apply solo reasoning: {exc}",
+            ) from exc
+
+        status = self._solo_reasoning_status()
+        status.update(
+            {
+                "changed": previous != effort,
+                "backend_reloaded": backend_reloaded,
+                "backend_ready": bool(getattr(self.backend, "ready", False)),
             }
         )
         return status

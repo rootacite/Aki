@@ -138,10 +138,20 @@ def _model_call(client: GatewayClient, rest: list[str], *, solo: bool = False) -
 
 
 
-def _reasoning_call(client: GatewayClient, rest: list[str]) -> Any:
-    if not rest or rest[0] == "status":
-        return _rpc_call(client, "aki.reasoning.get")
-    if rest[0] != "set":
-        raise ValueError("usage: /reasoning [status] | /reasoning set [low|medium|high]")
-    effort = rest[1] if len(rest) > 1 else "low"
-    return _rpc_call(client, "aki.reasoning.set", {"effort": effort})
+def _reasoning_call(
+    client: GatewayClient, rest: list[str], *, solo: bool = False
+) -> Any:
+    values = [value for value in rest if value != "--solo"]
+    solo = solo or len(values) != len(rest)
+    params: dict[str, Any] = {"solo": True} if solo else {}
+    if not values or values[0] == "status":
+        return _rpc_call(client, "aki.reasoning.get", params)
+    if values[0] != "set":
+        raise ValueError(
+            "usage: /reasoning [status] [--solo] | "
+            "/reasoning set <level> [--solo]"
+        )
+    effort = values[1] if len(values) > 1 else "low"
+    return _rpc_call(
+        client, "aki.reasoning.set", {"effort": effort, **params}
+    )

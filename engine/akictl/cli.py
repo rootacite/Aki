@@ -107,8 +107,9 @@ HELP_TEXT = (
     "  akictl model               list the active model and configured models\n"
     "  akictl model set ID        switch model and restart the backend\n"
     "  akictl model set ID --solo set the solo model; auto restores the default\n"
-    "  akictl reasoning           show reasoning_effort (default low)\n"
-    "  akictl reasoning set LEVEL set reasoning_effort; LEVEL defaults to low\n"
+    "  akictl reasoning [--solo]  show group or solo reasoning_effort (default low)\n"
+    "  akictl reasoning set LEVEL [--solo]\n"
+    "                             set group or solo reasoning_effort; LEVEL defaults to low\n"
     "  akictl avatar              show Aki's avatar asset status\n"
     "  akictl identity show       show this profile's immutable member id\n"
     "  akictl identity rename N   rename this identity; old labels stay aliases\n"
@@ -276,7 +277,7 @@ def _reasoning(args: argparse.Namespace, profile: str = "aki") -> int:
         return 1
     try:
         rest = ([args.reasoning_command] if args.reasoning_command else []) + args.reasoning_values
-        _print_json(_reasoning_call(client, rest))
+        _print_json(_reasoning_call(client, rest, solo=bool(args.solo)))
         return 0
     except (RpcError, ConnectionError, TimeoutError, ValueError) as exc:
         _print_error(exc)
@@ -375,6 +376,11 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     _add_common(parser)
     parser.add_argument("reasoning_command", nargs="?")
     parser.add_argument("reasoning_values", nargs="*")
+    parser.add_argument(
+        "--solo",
+        action="store_true",
+        help="read or write the solo conversation's reasoning effort",
+    )
     parsers["reasoning"] = parser
     parser = argparse.ArgumentParser(prog="akictl model")
     _add_common(parser)

@@ -14,7 +14,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 from engine.akid import _b64url
 from engine.aki_config import template_text
+from engine.akictl.cli import build_parsers
 from engine.akictl.soft_reset import _agent_target
+from engine.akictl.support import _reasoning_call
 
 
 class ClientCliTests(unittest.TestCase):
@@ -112,6 +114,11 @@ class ClientCliTests(unittest.TestCase):
         self.assertIn("usage: akictl model", model_help.stdout)
         self.assertIn("--solo", model_help.stdout)
 
+        reasoning_help = self.run_akictl("help", "reasoning")
+        self.assertEqual(reasoning_help.returncode, 0, reasoning_help.stderr)
+        self.assertIn("usage: akictl reasoning", reasoning_help.stdout)
+        self.assertIn("--solo", reasoning_help.stdout)
+
         compact_help = self.run_akictl("help", "compact")
         self.assertEqual(compact_help.returncode, 0, compact_help.stderr)
         self.assertIn("usage: akictl compact", compact_help.stdout)
@@ -124,6 +131,29 @@ class ClientCliTests(unittest.TestCase):
         retired = self.run_akictl("reset")
         self.assertEqual(retired.returncode, 2)
         self.assertIn("akictl reset was removed", retired.stderr)
+
+    def test_reasoning_solo_argument_reaches_rpc(self) -> None:
+        parser = build_parsers()["reasoning"]
+        parsed = parser.parse_args(["set", "low", "--solo"])
+        self.assertTrue(parsed.solo)
+        self.assertEqual(parsed.reasoning_values, ["low"])
+
+        calls: list[tuple[str, dict[str, object]]] = []
+
+        class Client:
+            def call(self, method, params=None, timeout=30.0):
+                calls.append((method, dict(params or {})))
+                return {}
+
+        _reasoning_call(Client(), ["set", "low"], solo=True)
+        _reasoning_call(Client(), ["status", "--solo"])
+        self.assertEqual(
+            calls,
+            [
+                ("aki.reasoning.set", {"effort": "low", "solo": True}),
+                ("aki.reasoning.get", {"solo": True}),
+            ],
+        )
 
     def test_akictl_status_and_writable_management(self) -> None:
         allowed = Path(tempfile.mkdtemp(prefix="akid-cli-allow-", dir=str(Path.home() / ".local" / "share")))

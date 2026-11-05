@@ -115,7 +115,7 @@ class HealthMixin:
         if method == "aki.avatar.status":
             return self._avatar_health(), None
         if method == "aki.reasoning.get":
-            return self._reasoning_status(), None
+            return self._reasoning_status(request.params), None
         if method == "aki.reasoning.set":
             return await self._reasoning_set(request.params), None
         if method == "aki.model.get":

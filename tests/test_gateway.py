@@ -959,6 +959,116 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RpcError):
             await client.call("aki.reasoning.set", {"effort": "max"})
 
+    async def test_solo_reasoning_set_persists_without_changing_agent(self) -> None:
+        from types import SimpleNamespace
+
+        agents = self.root / "backend" / "agents"
+        agents.mkdir(parents=True)
+        agent_path = agents / "test-agent.json"
+        agent_path.write_text(
+            json.dumps(
+                {
+                    "id": "test-agent",
+                    "model": "aki/gemini-3.8-flash",
+                    "model_settings": {
+                        "provider_type": "aki",
+                        "reasoning_effort": "high",
+                        "reasoning": {"reasoning_effort": "high"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        route = SimpleNamespace(
+            model_id="deepseek-flash",
+            upstream_name="openrouter",
+            upstream_model="deepseek/deepseek-flash",
+            api="openai-completions",
+            context_window=256_000,
+            max_tokens=32_768,
+            auth="",
+        )
+        server = await self.start_server()
+        server.config.aki = SimpleNamespace(
+            solo_model="deepseek-flash",
+            models=(route,),
+            enabled_models=(route,),
+        )
+        client = await self.client()
+        await client.hello()
+
+        current = await client.call("aki.reasoning.get", {"solo": True})
+        self.assertEqual(current["scope"], "solo")
+        self.assertEqual(current["model"], "aki/deepseek-flash")
+        self.assertEqual(current["effort"], "high")
+        self.assertEqual(current["effort_source"], "agent")
+        self.assertFalse(current["configured"])
+        self.assertIn("low", current["allowed"])
+
+        reloaded = mock.AsyncMock(return_value={"reloaded": True})
+        with mock.patch.object(
+            server.backend, "reload_conversation", new=reloaded
+        ):
+            changed = await client.call(
+                "aki.reasoning.set", {"effort": "low", "solo": True}
+            )
+            after = await client.call("aki.reasoning.get", {"solo": True})
+            with self.assertRaises(RpcError):
+                await client.call(
+                    "aki.reasoning.set", {"effort": "max", "solo": True}
+                )
+
+        self.assertTrue(changed["changed"])
+        self.assertTrue(changed["backend_reloaded"])
+        self.assertEqual(changed["effort"], "low")
+        self.assertEqual(after["effort"], "low")
+        self.assertEqual(after["effort_source"], "conversation")
+        self.assertTrue(after["configured"])
+        reloaded.assert_awaited_once_with(
+            conversation_id="solo-test-agent", agent_id="test-agent"
+        )
+
+        saved_agent = json.loads(agent_path.read_text(encoding="utf-8"))
+        self.assertEqual(
+            saved_agent["model_settings"]["reasoning_effort"], "high"
+        )
+        solo_path = (
+            conversation_directory(
+                self.root / "backend",
+                solo_conversation_id("test-agent"),
+                "test-agent",
+            )
+            / "conversation.json"
+        )
+        solo = json.loads(solo_path.read_text(encoding="utf-8"))
+        self.assertEqual(solo["model_settings"]["reasoning_effort"], "low")
+        self.assertEqual(
+            solo["model_settings"]["reasoning"]["reasoning_effort"], "low"
+        )
+
+    async def test_solo_reasoning_rejects_managed_local_backend(self) -> None:
+        from types import SimpleNamespace
+
+        server = await self.start_server()
+        server.config.aki = SimpleNamespace(
+            solo_model="", models=(), enabled_models=()
+        )
+        server.solo_backend = SimpleNamespace(
+            configured=True, last_route=lambda: None
+        )
+        client = await self.client()
+        await client.hello()
+
+        current = await client.call("aki.reasoning.get", {"solo": True})
+        self.assertTrue(current["managed_local"])
+        self.assertEqual(current["effort"], "medium")
+        self.assertEqual(current["allowed"], ["medium"])
+        with self.assertRaises(RpcError) as raised:
+            await client.call(
+                "aki.reasoning.set", {"effort": "low", "solo": True}
+            )
+        self.assertIn("managed local", raised.exception.message)
+
     async def test_mcp_native_local_toggle_persists_and_restarts(self) -> None:
         state_path = self.root / "mcp-native.json"
         server = await self.start_server(

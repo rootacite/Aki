@@ -196,6 +196,8 @@ refresh token 续期，并在 `auth.json.lock` 保护下把轮换后的 refresh 
 akictl model set grok-4.6
 akictl reasoning set low
 akictl model set gemini-3.8-flash --solo
+akictl reasoning set low --solo       # 只改 solo conversation，群聊不受影响
+akictl reasoning --solo               # 查看 solo 当前生效的 reasoning effort
 ```
 
 Fuyu profile 使用独立的 `userdata2/` 人格模板、`aki-fuyu` provider 和 7722 proxy
@@ -829,6 +831,10 @@ idle_timeout = 900
 重新拉起。端点已由非 akid 进程占用时会报错，不会接管。未配置 `startup_script`
 时独处继续使用群聊模型。`[solo] model` 可固定独处路由，例如
 `akictl model set deepseek-flash --solo`；`akictl model set auto --solo` 清除选择。
+选定云端 solo 模型后，可用 `akictl reasoning set low --solo` 单独配置独处思考深度；
+它写入 solo conversation 的 `model_settings` 并让 backend reload，不修改 agent 的群聊
+reasoning。托管本地 solo 路由保持固定的 `medium` / `1536` token 预算，命令会拒绝修改
+并提示先选择云端 solo 模型。
 选择的本地静态路由若与 `[solo] endpoint` 相同，akid 仍会托管启停该服务。
 
 需要测量“现在立刻发起一个 solo turn 时，第一个 API call 有多快”时，可以运行：
