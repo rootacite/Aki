@@ -97,7 +97,7 @@ python3 scripts/build-letta.py --check
 `/usr/bin/node` 启动。运行时缺失或版本不匹配时 akid fail-closed，不会回退到系统
 `letta`。`install-daemon.py` 会自动检查并在缺失时构建运行时。
 
-默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`。`api_key` 为空的模型不会暴露给 Letta。
+默认设置在 `~/.aki/aki.conf`。第一次启动会按模板创建这份文件；如果 `~/.local/share/aki/` 里还有旧的 `mqtt.json`、`writable-dirs.json`、`mcp-native.json`，会把它们迁进去并移到 `~/.aki/migrated/`。上游密钥写在 `[upstream.*] api_key`，也可以用 `api_key_file` 指向本机权限受限的密钥文件。没有可用密钥的模型不会暴露给 Letta。
 
 各 profile 的模板默认不再固定 `temperature` / `top_p` 等 `extra_body`，使用上游模型自身的
 采样参数。需要覆盖时可以在对应的 `[model.*]` 段添加 `extra_body`；`extra_body` 不能覆盖
@@ -138,6 +138,32 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 `http://192.168.50.100:7890;http://192.168.3.2:7890`；全部不可达时请求失败，不会绕过代理直连。
 单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连。聊天客户端仍然只走 Unix socket。
 
+上游还可以声明非 OpenAI 协议。Aki 的 Gemini 路由使用 Interactions API；密钥通过
+`api_key_file` 读取，配置里不保存明文：
+
+```ini
+[upstream.gemini]
+base_url = https://generativelanguage.googleapis.com/v1beta
+api_key_file = /home/acite/security/gemini
+protocol = gemini-interactions
+use_proxy = true
+
+[model.gemini-3.8-flash]
+upstream = gemini
+upstream_model = gemini-3.8-flash
+api = openai-completions
+path = /interactions
+context_window = 1000000
+max_tokens = 65536
+input = text
+```
+
+`gemini-interactions` 由 akid-proxy 在 OpenAI Chat Completions 与 Gemini Interactions
+请求/SSE 之间转换。该路由只承载文本和多轮工具调用，不发送图片，也不启用结构化输出。
+安全过滤对骚扰、仇恨言论、露骨色情和危险内容使用 `threshold = off`。工具结果续轮会在代理
+内存中关联 `function_call` 与对应的 `previous_interaction_id`；代理重启后的旧工具链会降级为
+文本 transcript。
+
 ### content_filter 透明重试
 
 `akid-proxy` 可以拦截上游响应里的 `finish_reason: content_filter`（以及
@@ -148,7 +174,7 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 因此正常回复的逐 token 显示会推迟到该 attempt 结束。
 
 ```ini
-[model.gemini-3.8-flash]
+[model.example]
 # 总尝试次数，包含原始请求。1 表示关闭。
 content_filter_retry = 5
 content_filter_retry_budget_s = 240
@@ -216,7 +242,7 @@ MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日�
 
 Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算；模板不再通过
 `extra_body` 固定 reasoning、temperature 或 top_p。需要调低延迟或加深规划时，可在
-`[model.gemini-3.8-flash]` 中显式添加 `extra_body`。上游是 Aki 共用的本机
+`[model.gemini-3.8-flash]` 中显式添加 `extra_body`。Haru 仍使用本机
 `cli-proxy-api`（`127.0.0.1:8317`），使用 `use_proxy = false` 直连。文生图走独立的
 MiniMax `image-01` API 和本机 ComfyUI；TTS 与视频仍属于后续阶段，Haru 的人格和提示词会明确
 说明这些能力尚未安装。
@@ -228,8 +254,8 @@ python3 scripts/bootstrap-member.py --profile haru
 ```
 
 脚本默认只创建新的 agent/conversation；目标已存在时不做修改。它会调用现有的
-`sync-persona.py` 和 `install-system-prompt.py`。完成后把本机 `cli-proxy-api` 的 key 填进
-`~/.aki/haru.conf` 的 `[upstream.cli-proxy-api] api_key`（通常与 `aki.conf` 相同），把
+`sync-persona.py` 和 `install-system-prompt.py`。完成后把 Haru 使用的本机 `cli-proxy-api`
+key 填进 `~/.aki/haru.conf` 的 `[upstream.cli-proxy-api] api_key`，把
 MiniMax key 填进 `[upstream.minimax] api_key`，再启动
 `akid-proxy@haru.service` 与 `akid@haru.service`。
 
@@ -262,7 +288,7 @@ systemctl --user edit akid@.service   # Environment="AKI_COMPACTION_RATIO=0.5"
 ```
 
 该行为由 `patches/letta-code/0002-aki-compaction-policy.patch` 实现；修改比例后需要重新构建
-并重启对应服务（默认值已内置为 0.5，通常不需要显式设置）。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction。压缩完成后不会单独触发 reflection；当前项目使用 `reflectionTrigger = step-count`（阈值 25），累计 25 个未反思 step 后触发 MemFS 记忆整理，backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式传入。旧的
+并重启对应服务（默认值已内置为 0.5，通常不需要显式设置）。当前 500,000 token 窗口对应在约 250,000 tokens 时触发 compaction。压缩完成后不会单独触发 reflection；当前项目使用 `reflectionTrigger = step-count`（阈值 100），累计 100 个未反思 step 后触发 MemFS 记忆整理，backend 通过 `--reflection-trigger step-count --reflection-step-count 100` 显式传入。旧的
 `scripts/patch-letta-compaction.py` 仅用于尚未迁移的外部 Letta 安装。
 
 也可以随时手动触发同一套流程：

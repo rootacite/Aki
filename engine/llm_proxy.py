@@ -23,6 +23,15 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from engine.aki_config import ModelRoute, parse_upstream_proxy
+from engine.gemini_interactions import (
+    GEMINI_API_REVISION,
+    GeminiProtocolError,
+    GeminiStreamTranslator,
+    GeminiToolContinuationStore,
+    build_interaction_payload,
+    extract_continuation,
+    response_from_interaction,
+)
 from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
 from engine.letta_llm import _compat
 from engine.proxy_debug import DebugResponse, ProxyDebugStream, resolve_debug_socket
@@ -196,6 +205,7 @@ class LlmProxy:
         self.debug_socket = resolve_debug_socket(configured_debug, profile)
         self.debug: ProxyDebugStream | None = None
         self._server: asyncio.Server | None = None
+        self._gemini_continuations = GeminiToolContinuationStore()
 
     def set_configured_routes(
         self, routes: tuple[ModelRoute, ...] | list[ModelRoute]
@@ -454,7 +464,22 @@ class LlmProxy:
                 payload["reasoning_budget_tokens"] = requested_reasoning_budget
             else:
                 payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
-        forwarded = json.dumps(payload).encode("utf-8")
+        continuation = None
+        interaction_payload: dict[str, object] | None = None
+        if route.upstream_protocol == "gemini-interactions":
+            continuation = extract_continuation(
+                payload, self._gemini_continuations
+            )
+            interaction_payload = build_interaction_payload(
+                payload,
+                route.upstream_model,
+                continuation,
+            )
+            forwarded = json.dumps(interaction_payload).encode("utf-8")
+            debug_payload: dict[str, object] = interaction_payload
+        else:
+            forwarded = json.dumps(payload).encode("utf-8")
+            debug_payload = payload
         if self.debug is not None:
             self.debug.publish_request(
                 request_id,
@@ -462,7 +487,7 @@ class LlmProxy:
                 requested_model=model_id,
                 upstream_model=route.upstream_model,
                 upstream_url=route.url,
-                payload=payload,
+                payload=debug_payload,
                 forwarded=forwarded,
             )
         parsed = urlsplit(route.url)
@@ -492,26 +517,42 @@ class LlmProxy:
                 self._solo_activity_heartbeat(), name="solo-proxy-activity"
             )
         try:
-            status = await _forward(
-                parsed,
-                headers,
-                forwarded,
-                api_key,
-                writer,
-                upstream_proxy=self.upstream_proxy,
-                ssl_context=self.ssl_context,
-                use_proxy=route.use_proxy,
-                extra_headers=extra_headers,
-                debug=self.debug,
-                request_id=request_id,
-                solo_think_close=(
-                    route.solo
-                    and path == "/v1/chat/completions"
-                    and "continue_final_message" not in payload
-                ),
-                request_payload=payload,
-                content_filter_retry=content_filter_retry_policy(route),
-            )
+            if route.upstream_protocol == "gemini-interactions":
+                assert interaction_payload is not None
+                status = await _forward_gemini_interactions(
+                    parsed,
+                    interaction_payload,
+                    api_key,
+                    writer,
+                    upstream_proxy=self.upstream_proxy,
+                    ssl_context=self.ssl_context,
+                    use_proxy=route.use_proxy,
+                    debug=self.debug,
+                    request_id=request_id,
+                    requested_model=model_id,
+                    continuation_store=self._gemini_continuations,
+                )
+            else:
+                status = await _forward(
+                    parsed,
+                    headers,
+                    forwarded,
+                    api_key,
+                    writer,
+                    upstream_proxy=self.upstream_proxy,
+                    ssl_context=self.ssl_context,
+                    use_proxy=route.use_proxy,
+                    extra_headers=extra_headers,
+                    debug=self.debug,
+                    request_id=request_id,
+                    solo_think_close=(
+                        route.solo
+                        and path == "/v1/chat/completions"
+                        and "continue_final_message" not in payload
+                    ),
+                    request_payload=payload,
+                    content_filter_retry=content_filter_retry_policy(route),
+                )
         except OSError as exc:
             LOGGER.warning(
                 "upstream connect failed host=%s type=%s error=%s",
@@ -594,6 +635,257 @@ def _models_response(routes: dict[str, ModelRoute]) -> bytes:
         "Connection: close\r\n\r\n"
     ).encode("ascii")
     return head + body
+
+
+def _gemini_request_head(
+    host: str,
+    port: int,
+    request_target: str,
+    body: bytes,
+    api_key: str,
+) -> bytes:
+    header_lines = [
+        f"POST {request_target} HTTP/1.1",
+        f"Host: {host if port in (80, 443) else f'{host}:{port}'}",
+        "Content-Type: application/json",
+        f"Content-Length: {len(body)}",
+        "Connection: close",
+        f"x-goog-api-key: {api_key}",
+        f"Api-Revision: {GEMINI_API_REVISION}",
+    ]
+    return ("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1")
+
+
+def _gemini_error_body(status: int, raw: bytes) -> bytes:
+    message = f"Gemini upstream returned HTTP {status}"
+    code = "upstream_error"
+    try:
+        payload = json.loads(raw)
+    except ValueError:
+        payload = None
+    if isinstance(payload, Mapping):
+        error = payload.get("error")
+        if isinstance(error, Mapping):
+            message = str(error.get("message") or message)
+            code = str(error.get("code") or code)
+    return json.dumps(
+        {"error": {"message": message, "type": code, "code": code}},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+def _error_response_bytes(status: int, message: str, code: str = "upstream_error") -> bytes:
+    return json.dumps(
+        {"error": {"message": message, "type": code, "code": code}},
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+
+async def _forward_gemini_interactions(
+    parsed,
+    payload: Mapping[str, object],
+    api_key: str,
+    client: asyncio.StreamWriter,
+    *,
+    upstream_proxy: str,
+    ssl_context: ssl.SSLContext | None,
+    use_proxy: bool,
+    debug: ProxyDebugStream | None,
+    request_id: str,
+    requested_model: str,
+    continuation_store: GeminiToolContinuationStore,
+) -> int:
+    host = parsed.hostname
+    if not host:
+        raise OSError("missing upstream host")
+    scheme = parsed.scheme
+    port = parsed.port or (443 if scheme == "https" else 80)
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    reader, writer, request_target = await _open_upstream(
+        host,
+        port,
+        scheme,
+        path,
+        upstream_proxy=upstream_proxy if use_proxy else "",
+        ssl_context=ssl_context,
+    )
+    try:
+        writer.write(_gemini_request_head(host, port, request_target, body, api_key))
+        writer.write(body)
+        await writer.drain()
+        raw_head, headers, rest = await _read_upstream_head(reader)
+        status = _status_code(raw_head)
+        if status != 200:
+            raw = await _read_upstream_bytes(reader, headers, rest)
+            error_body = _gemini_error_body(status, raw)
+            _write_json_response(client, status, error_body)
+            _debug_response(
+                debug,
+                request_id,
+                status,
+                {"content-type": "application/json"},
+                error_body,
+            )
+            return status
+        if payload.get("stream") is True:
+            return await _relay_gemini_stream(
+                reader,
+                client,
+                headers,
+                rest,
+                debug=debug,
+                request_id=request_id,
+                requested_model=requested_model,
+                continuation_store=continuation_store,
+            )
+        raw = await _read_upstream_bytes(reader, headers, rest)
+        try:
+            interaction = json.loads(raw)
+        except ValueError:
+            interaction = None
+        if not isinstance(interaction, Mapping):
+            error_body = _error_response_bytes(502, "Gemini response is not JSON")
+            _write_json_response(client, 502, error_body)
+            _debug_response(
+                debug,
+                request_id,
+                502,
+                {"content-type": "application/json"},
+                error_body,
+            )
+            return 502
+        response = response_from_interaction(
+            interaction, model=requested_model
+        )
+        call_ids: list[str] = []
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+            message = choices[0].get("message")
+            if isinstance(message, Mapping):
+                calls = message.get("tool_calls")
+                if isinstance(calls, list):
+                    call_ids = [
+                        str(call.get("id") or "")
+                        for call in calls
+                        if isinstance(call, Mapping)
+                    ]
+        continuation_store.remember(
+            str(interaction.get("id") or ""), call_ids
+        )
+        response_body = json.dumps(response, ensure_ascii=False).encode("utf-8")
+        _write_json_response(client, 200, response_body)
+        _debug_response(
+            debug,
+            request_id,
+            200,
+            {"content-type": "application/json"},
+            response_body,
+        )
+        return 200
+    finally:
+        writer.close()
+        with contextlib.suppress(Exception):
+            await writer.wait_closed()
+
+
+async def _relay_gemini_stream(
+    upstream: asyncio.StreamReader,
+    client: asyncio.StreamWriter,
+    headers: Mapping[str, str],
+    rest: bytes,
+    *,
+    debug: ProxyDebugStream | None,
+    request_id: str,
+    requested_model: str,
+    continuation_store: GeminiToolContinuationStore,
+) -> int:
+    client.write(
+        b"HTTP/1.1 200 OK\r\n"
+        b"Content-Type: text/event-stream\r\n"
+        b"Cache-Control: no-cache\r\n"
+        b"Connection: close\r\n\r\n"
+    )
+    await client.drain()
+    response_debug = _debug_begin(
+        debug,
+        request_id,
+        200,
+        {"content-type": "text/event-stream"},
+    )
+    translator = GeminiStreamTranslator(requested_model)
+    body = _UpstreamBody(upstream, headers, rest)
+    buffer = b""
+    try:
+        while True:
+            chunk = await body.read(4096)
+            if chunk:
+                buffer += chunk
+            events, buffer = _split_sse(buffer)
+            for event in events:
+                await _translate_gemini_event(
+                    client, translator, event, response_debug
+                )
+            if not chunk:
+                if buffer.strip():
+                    await _translate_gemini_event(
+                        client, translator, buffer, response_debug
+                    )
+                break
+        for payload in translator.finalize():
+            await _write_sse(
+                client,
+                json.dumps(payload, ensure_ascii=False),
+                response_debug,
+            )
+        await _write_sse(client, "[DONE]", response_debug)
+        continuation_store.remember(translator.interaction_id, translator.call_ids)
+        return 200
+    finally:
+        if response_debug is not None:
+            try:
+                response_debug.end(truncated=False)
+            except Exception:
+                LOGGER.exception("proxy debug response end failed")
+
+
+async def _translate_gemini_event(
+    client: asyncio.StreamWriter,
+    translator: GeminiStreamTranslator,
+    event: bytes,
+    response_debug: DebugResponse | None,
+) -> None:
+    data = _sse_data(event)
+    if not data or data.strip() == "[DONE]":
+        return
+    try:
+        payload = json.loads(data)
+    except ValueError:
+        LOGGER.warning("gemini stream returned non-json data")
+        return
+    if not isinstance(payload, Mapping):
+        return
+    try:
+        chunks = translator.feed(payload)
+    except GeminiProtocolError as exc:
+        LOGGER.warning("gemini stream error: %s", exc)
+        chunks = [
+            {
+                "error": {
+                    "message": str(exc),
+                    "type": "upstream_error",
+                    "code": "upstream_error",
+                }
+            }
+        ]
+    for chunk in chunks:
+        await _write_sse(
+            client,
+            json.dumps(chunk, ensure_ascii=False),
+            response_debug,
+        )
 
 
 async def _forward(

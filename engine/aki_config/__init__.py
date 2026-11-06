@@ -37,6 +37,7 @@ from .models import (
     _EXTRA_BODY_RESERVED,
     _KNOWN_SECTIONS,
     _TOOLSETS,
+    _UPSTREAM_PROTOCOLS,
     default_config_path,
     default_socket_path,
     default_username_path,

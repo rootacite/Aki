@@ -104,6 +104,14 @@ def _model_literal(route: ModelRoute) -> str:
 
 
 def _compat(route: ModelRoute) -> dict[str, object] | None:
+    if getattr(route, "upstream_protocol", "openai") == "gemini-interactions":
+        return {
+            "supportsStore": False,
+            "supportsDeveloperRole": False,
+            "supportsReasoningEffort": True,
+            "maxTokensField": "max_tokens",
+            "supportsStrictMode": False,
+        }
     if route.upstream_name == "deepseek" and route.api == "openai-completions":
         return {
             "supportsStore": False,
@@ -173,6 +181,16 @@ def supported_reasoning_efforts(route: ModelRoute | None) -> tuple[str, ...]:
 
 
 def _thinking_level_map(route: ModelRoute) -> dict[str, str | None] | None:
+    if getattr(route, "upstream_protocol", "openai") == "gemini-interactions":
+        return {
+            "off": None,
+            "minimal": "low",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": None,
+            "max": None,
+        }
     if _is_xai(route) and route.api == "openai-responses":
         return {
             "off": None,

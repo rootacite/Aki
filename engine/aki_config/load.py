@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import tempfile
+from pathlib import Path
 from urllib.parse import urlsplit
 from engine.member_profile import truncate_member_description
 from .models import (
@@ -26,6 +27,7 @@ from .models import (
     _EXTRA_BODY_RESERVED,
     _KNOWN_SECTIONS,
     _TOOLSETS,
+    _UPSTREAM_PROTOCOLS,
     profile_from_config_path,
     read_agent_identity,
     validate_profile_name,
@@ -384,12 +386,32 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
                 f"[{section}] auth must be empty or grok-oauth"
             )
         api_key = parser.get(section, "api_key", fallback="").strip()
+        api_key_file = parser.get(section, "api_key_file", fallback="").strip()
+        if not api_key and api_key_file:
+            try:
+                api_key = Path(api_key_file).expanduser().read_text(
+                    encoding="utf-8"
+                ).strip()
+            except (OSError, UnicodeError) as exc:
+                raise ConfigError(
+                    f"[{section}] cannot read api_key_file"
+                ) from exc
+            if not api_key:
+                raise ConfigError(f"[{section}] api_key_file is empty")
+        protocol = (
+            parser.get(section, "protocol", fallback="").strip() or "openai"
+        )
+        if protocol not in _UPSTREAM_PROTOCOLS:
+            raise ConfigError(
+                f"[{section}] protocol must be openai or gemini-interactions"
+            )
         upstreams[name] = Upstream(
             name=name,
             base_url=base_url,
             api_key=api_key,
             use_proxy=_bool_or(parser, section, "use_proxy", True),
             auth=auth,
+            protocol=protocol,
         )
 
     models: list[ModelRoute] = []
@@ -423,6 +445,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
                 api_key=upstream.api_key,
                 use_proxy=upstream.use_proxy,
                 auth=upstream.auth,
+                upstream_protocol=upstream.protocol,
                 extra_body=_json_object(
                     parser,
                     section,

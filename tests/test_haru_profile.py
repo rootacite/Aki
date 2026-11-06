@@ -196,7 +196,7 @@ class HaruConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             base[base.index("--reflection-step-count") + 1],
-            "25",
+            "100",
         )
 
 

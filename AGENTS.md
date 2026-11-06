@@ -338,7 +338,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：当前是 `aki/gemini-3.8-flash`（cli-proxy-api，上下文 1,000,000，`max_tokens=65536`）；
+- 模型：当前是 `aki/gemini-3.8-flash`（Gemini Interactions API 直连，上下文 1,000,000，
+  `max_tokens=65536`，纯文本输入）；上游协议由 `[upstream.gemini] protocol =
+  gemini-interactions` 启用，密钥从 `/home/acite/security/gemini` 读取，不写入配置；
   其他已启用模型可在 `aki/deepseek-flash`、`aki/gemma-4-26b-a4b-it` 和 `aki/grok-4.6`
   之间切换。Gemma 本地模型的采样参数仍保留在 `[model.gemma-4-26b-a4b-it]`。
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
@@ -531,7 +533,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
   唯一对话入口是 MQTT 频道；
   `akictl chat` 只是 MQTT 客户端，通过唯一 `kind=user` 身份发送消息，
   `aki.chat.*` 本地 RPC、`bin/aki` 和 GUI bridge 已移除。
-- 记忆整理：`reflectionTrigger = step-count`，阈值 25；累计 25 个未反思 step 后由 reflection 将稳定信息写入 MemFS。backend 通过 `--reflection-trigger step-count --reflection-step-count 25` 显式生效。
+- 记忆整理：`reflectionTrigger = step-count`，阈值 100；累计 100 个未反思 step 后由 reflection 将稳定信息写入 MemFS。backend 通过 `--reflection-trigger step-count --reflection-step-count 100` 显式生效。
 - Compaction：默认 `sliding_window`，优先总结最早的消息，保留最近上下文。
 - 桌面实况：每个 turn 采集一次桌面快照。`# live-context` 只作为 user-role overlay
   注入实际 API 请求，不写回持久 system prompt。关闭时仍输出最小 `# runtime-context`，

@@ -40,6 +40,8 @@ _KNOWN_SECTIONS = {
 
 _APIS = {"openai-completions", "openai-responses"}
 
+_UPSTREAM_PROTOCOLS = {"openai", "gemini-interactions"}
+
 _AUTH_PROVIDERS = {"", "grok-oauth"}
 
 _TOOLSETS = {"auto", "letta", "none", "default", "codex"}
@@ -82,6 +84,7 @@ class Upstream:
     api_key: str
     use_proxy: bool = True
     auth: str = ""
+    protocol: str = "openai"
 
 
 
@@ -176,6 +179,7 @@ class ModelRoute:
     content_filter_retry_buffer_limit: int = 32 * 1024 * 1024
     content_filter_evidence_dir: str = ""
     content_filter_evidence_max_bytes: int = 256 * 1024 * 1024
+    upstream_protocol: str = "openai"
 
     @property
     def enabled(self) -> bool:

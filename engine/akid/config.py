@@ -40,7 +40,7 @@ from .paths import default_backend_dir
 
 
 REFLECTION_TRIGGER = "step-count"
-REFLECTION_STEP_COUNT = 25
+REFLECTION_STEP_COUNT = 100
 
 
 @dataclass
