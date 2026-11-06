@@ -21,6 +21,7 @@ from engine.live_context import (
 )
 from engine.tokifactor import ImageEnvelope
 from engine.protocol import encode_message
+from .chat_text import sanitize_chat_text
 from .constants import (
     CHANNEL_EVENT_QUEUE_MAX,
     LOGGER,
@@ -218,6 +219,7 @@ class ChannelConnection:
         wake = ""
         wake_ids = ""
         if phase == "final":
+            cleaned_text = sanitize_chat_text(cleaned_text)
             if self.server._solo_session is not None:
                 text = strip_channel_mentions(cleaned_text, members)
                 wake = CHANNEL_WAKE_USER

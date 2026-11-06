@@ -32,6 +32,7 @@ from engine.schedule_store import (
     now_utc,
     parse_datetime,
 )
+from .chat_text import sanitize_chat_text
 from .constants import LOGGER
 from .no_reply import contains_no_reply_marker
 from .paths import now_iso
@@ -369,7 +370,7 @@ class ProactiveMixin:
 
 
     async def _publish_proactive_text(self, turn: Turn, text: str) -> None:
-        cleaned = text.strip()
+        cleaned = sanitize_chat_text(text.strip())
         if not cleaned or contains_no_reply_marker(cleaned):
             return
         channel = self.channel

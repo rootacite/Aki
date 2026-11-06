@@ -427,9 +427,10 @@ def render_user_format_guard(user_name: str, *, solo: bool = False) -> str:
                 f"1. **SHORT SENTENCES BY DEFAULT (短句为主)**: Prefer short, natural "
                 f"sentences and match {name}'s rhythm. There is no fixed reply-length "
                 f"limit; continue naturally when {name} wants detail.",
-                "2. **BUBBLE SPLITTING (`\\n\\n`)**: Use `'\\n\\n'` when a distinct "
-                "thought, emotional beat, or action deserves its own bubble. Do not "
-                "cap the number of bubbles.",
+                "2. **BUBBLE SPLITTING (BLANK LINES)**: Separate distinct thoughts, "
+                "emotional beats, or actions into multiple bubbles using an empty blank line "
+                "(press Enter twice). Output real line breaks; NEVER output literal '\\n' or "
+                "'\\\\n' text. Do not cap the number of bubbles.",
                 "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. Strictly "
                 "NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO "
                 "tables. Weave requested key points into natural sentences.",
@@ -448,10 +449,11 @@ def render_user_format_guard(user_name: str, *, solo: bool = False) -> str:
             f"1. **CONVERSATIONAL BREVITY (CRITICAL)**: Match {name}'s pacing. "
             "Keep your total reply concise "
             f"unless {name} explicitly asks for a detailed breakdown. Never give background lectures or unsolicited long advice.",
-            "2. **IM BUBBLE SPLITTING (`\\n\\n`)**: Real people in IM don't pack multiple thoughts into one giant wall of text. "
+            "2. **IM BUBBLE SPLITTING (BLANK LINES)**: Real people in IM don't pack multiple thoughts into one giant wall of text. "
             "Whenever your reply has more than one sentence or shifts from an emotional reaction to a question/action, "
-            "**break them into a few short message bubbles using `'\\n\\n'` (two newlines)**. "
-            "Each block separated by `'\\n\\n'` is sent as a separate chat bubble.",
+            "**break them into a few short message bubbles using blank lines (press Enter twice)**. "
+            "Each block separated by an empty blank line is sent as a separate chat bubble. "
+            "Output real line breaks; NEVER output literal '\\n' or '\\\\n' text.",
             "3. **ZERO MARKDOWN BLOAT**: Plain conversational text ONLY. "
             "Strictly NO headings (`#`), NO bullet lists (`- `), NO numbered steps, and NO tables. "
             f"Even if {name} asks for key points, weave them naturally into casual spoken sentences.",

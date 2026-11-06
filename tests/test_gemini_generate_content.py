@@ -62,6 +62,12 @@ class GenerateContentConfigTests(unittest.TestCase):
                 "path",
                 "/models/{model}:generateContent",
             )
+            set_key(
+                conf,
+                "model.gemini-3.5-flash-lite",
+                "path",
+                "/models/{model}:generateContent",
+            )
             set_key(conf, "model.gemini-3.8-flash", "input", "text")
             config = load_config(conf)
             route = next(
