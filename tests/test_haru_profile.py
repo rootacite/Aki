@@ -76,12 +76,22 @@ class HaruConfigTests(unittest.TestCase):
         route = next(
             model for model in config.models if model.model_id == "gemini-3.8-flash"
         )
+        self.assertEqual(route.upstream_name, "gemini")
         self.assertEqual(route.upstream_model, "gemini-3.8-flash")
-        self.assertEqual(route.path, "/chat/completions")
+        self.assertEqual(
+            route.path, "/models/gemini-3.8-flash:generateContent"
+        )
+        self.assertEqual(
+            route.upstream_protocol, "gemini-generate-content"
+        )
         self.assertEqual(route.context_window, 1_000_000)
         self.assertEqual(route.max_tokens, 65536)
-        self.assertEqual(route.inputs, ("text", "image"))
+        self.assertEqual(route.inputs, ("text",))
         self.assertEqual(route.extra_body, {})
+        self.assertEqual(
+            config.upstream_proxy,
+            "http://192.168.50.100:7890;http://192.168.4.1:7890",
+        )
         self.assertEqual(config.enabled_models, ())
 
     def test_tool_policy_is_parsed_and_defaults_for_other_profiles(self) -> None:
@@ -120,8 +130,9 @@ class HaruConfigTests(unittest.TestCase):
     def test_extra_body_cannot_override_routing_fields(self) -> None:
         atomic_write(self.path, template_text("agent-haru", profile="haru"))
         text = self.path.read_text(encoding="utf-8").replace(
-            "input = text,image\n",
-            'input = text,image\nextra_body = {"model": "evil"}\n',
+            "path = /models/{model}:generateContent\ncontext_window = 1000000\nmax_tokens = 65536\ninput = text\n",
+            "path = /models/{model}:generateContent\ncontext_window = 1000000\nmax_tokens = 65536\n"
+            'input = text\nextra_body = {"model": "evil"}\n',
             1,
         )
         atomic_write(self.path, text)

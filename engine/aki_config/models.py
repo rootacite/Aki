@@ -40,7 +40,7 @@ _KNOWN_SECTIONS = {
 
 _APIS = {"openai-completions", "openai-responses"}
 
-_UPSTREAM_PROTOCOLS = {"openai", "gemini-interactions"}
+_UPSTREAM_PROTOCOLS = {"openai", "gemini-generate-content"}
 
 _AUTH_PROVIDERS = {"", "grok-oauth"}
 

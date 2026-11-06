@@ -236,7 +236,11 @@ class ChannelContextTests(unittest.TestCase):
         self.assertEqual(match_channel_mentions("@qq. 请回答", members), {"qq"})
         self.assertEqual(match_channel_mentions("@qq。请回答", members), {"qq"})
         self.assertEqual(match_channel_mentions("@qq! 请回答", members), {"qq"})
-        self.assertEqual(match_channel_mentions("@qq", members), set())
+        self.assertEqual(match_channel_mentions("@qq", members), {"qq"})
+        self.assertEqual(
+            match_channel_mentions("怎么说？很期待吗？@Aki", members),
+            {"aki"},
+        )
         self.assertEqual(match_channel_mentions("@AkiChan", members), set())
 
     def test_guidance_covers_self_other_and_no_mentions(self) -> None:
@@ -648,7 +652,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         self.assertIn("message-19", block)
         self.assertNotIn("message-0-", block)
 
-    def test_channel_and_solo_default_budgets_are_32k_and_64k(self) -> None:
+    def test_channel_and_solo_default_budgets_are_16k_and_64k(self) -> None:
         entries = [
             ChannelTranscriptEntry(
                 seq=index,
@@ -662,7 +666,7 @@ class ChannelTranscriptTests(unittest.TestCase):
         channel = render_channel_transcript(entries, budget_tokens=10**9)
         self.assertIn("## Content", channel)
         self.assertNotIn("budget_tokens=", channel)
-        self.assertLessEqual(estimate_tokens(channel), 32 * 1024)
+        self.assertLessEqual(estimate_tokens(channel), 16 * 1024)
         self.assertNotIn("dropped=", channel)
         self.assertNotIn("message-0-", channel)
         solo = render_solo_transcript(entries, budget_tokens=10**9)

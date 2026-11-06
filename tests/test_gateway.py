@@ -4933,7 +4933,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         await wait_until(lambda: bool(fake_channel.events))
         self.assertTrue(fake_channel.events)
 
-    async def test_user_at_without_trailing_space_does_not_filter_turns(self) -> None:
+    async def test_user_at_without_trailing_space_filters_turns_for_other_agents(self) -> None:
         fake_channel = FakeChannel()
         server = await self.start_server(channel=fake_channel)
         server._channel_members["fuyu"] = {
@@ -4944,6 +4944,12 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             "last_seen": time.monotonic(),
         }
         await server._on_channel_text("alice", "alice-1", "@Fuyu")
+        await asyncio.sleep(0.1)
+        self.assertIsNone(server.active)
+        self.assertEqual(server.queue, [])
+        self.assertEqual(fake_channel.events, [])
+
+        await server._on_channel_text("alice", "alice-1", "怎么说？很期待吗？@秋")
         await wait_until(lambda: bool(fake_channel.events))
         self.assertTrue(fake_channel.events)
 

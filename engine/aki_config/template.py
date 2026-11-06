@@ -318,25 +318,26 @@ path = assets/small/haru.jpg
 listen = 127.0.0.1:7723
 token =
 # 多个代理用 ; 分隔，每次新建上游连接时按顺序选择第一个端口开放的代理；留空则直连。
-upstream_proxy = http://192.168.3.2:7890
+upstream_proxy = http://192.168.50.100:7890;http://192.168.4.1:7890
 
-[upstream.cli-proxy-api]
-base_url = http://127.0.0.1:8317/v1
+[upstream.gemini]
+base_url = https://generativelanguage.googleapis.com/v1beta
 api_key =
-use_proxy = false
+protocol = gemini-generate-content
+use_proxy = true
 
 [upstream.minimax]
 base_url = https://api.minimaxi.com/v1
 api_key =
 
 [model.gemini-3.8-flash]
-upstream = cli-proxy-api
+upstream = gemini
 upstream_model = gemini-3.8-flash
 api = openai-completions
-path = /chat/completions
+path = /models/{{model}}:generateContent
 context_window = 1000000
 max_tokens = 65536
-input = text,image
+input = text
 """
 
 

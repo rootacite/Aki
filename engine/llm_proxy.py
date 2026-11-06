@@ -23,14 +23,11 @@ from typing import Mapping
 from urllib.parse import urlsplit
 
 from engine.aki_config import ModelRoute, parse_upstream_proxy
-from engine.gemini_interactions import (
-    GEMINI_API_REVISION,
+from engine.gemini_generate_content import (
     GeminiProtocolError,
-    GeminiStreamTranslator,
-    GeminiToolContinuationStore,
-    build_interaction_payload,
-    extract_continuation,
-    response_from_interaction,
+    GenerateContentStreamTranslator,
+    build_generate_content_payload,
+    response_from_generate_content,
 )
 from engine.grok_oauth import GrokOAuthError, GrokOAuthProvider
 from engine.letta_llm import _compat
@@ -205,7 +202,6 @@ class LlmProxy:
         self.debug_socket = resolve_debug_socket(configured_debug, profile)
         self.debug: ProxyDebugStream | None = None
         self._server: asyncio.Server | None = None
-        self._gemini_continuations = GeminiToolContinuationStore()
 
     def set_configured_routes(
         self, routes: tuple[ModelRoute, ...] | list[ModelRoute]
@@ -464,19 +460,14 @@ class LlmProxy:
                 payload["reasoning_budget_tokens"] = requested_reasoning_budget
             else:
                 payload["reasoning_budget_tokens"] = SOLO_REASONING_BUDGET_TOKENS
-        continuation = None
-        interaction_payload: dict[str, object] | None = None
-        if route.upstream_protocol == "gemini-interactions":
-            continuation = extract_continuation(
-                payload, self._gemini_continuations
-            )
-            interaction_payload = build_interaction_payload(
+        generate_content_payload: dict[str, object] | None = None
+        if route.upstream_protocol == "gemini-generate-content":
+            generate_content_payload = build_generate_content_payload(
                 payload,
                 route.upstream_model,
-                continuation,
             )
-            forwarded = json.dumps(interaction_payload).encode("utf-8")
-            debug_payload: dict[str, object] = interaction_payload
+            forwarded = json.dumps(generate_content_payload).encode("utf-8")
+            debug_payload: dict[str, object] = generate_content_payload
         else:
             forwarded = json.dumps(payload).encode("utf-8")
             debug_payload = payload
@@ -517,11 +508,11 @@ class LlmProxy:
                 self._solo_activity_heartbeat(), name="solo-proxy-activity"
             )
         try:
-            if route.upstream_protocol == "gemini-interactions":
-                assert interaction_payload is not None
-                status = await _forward_gemini_interactions(
+            if route.upstream_protocol == "gemini-generate-content":
+                assert generate_content_payload is not None
+                status = await _forward_gemini_generate_content(
                     parsed,
-                    interaction_payload,
+                    generate_content_payload,
                     api_key,
                     writer,
                     upstream_proxy=self.upstream_proxy,
@@ -530,7 +521,7 @@ class LlmProxy:
                     debug=self.debug,
                     request_id=request_id,
                     requested_model=model_id,
-                    continuation_store=self._gemini_continuations,
+                    stream=payload.get("stream") is True,
                 )
             else:
                 status = await _forward(
@@ -651,7 +642,6 @@ def _gemini_request_head(
         f"Content-Length: {len(body)}",
         "Connection: close",
         f"x-goog-api-key: {api_key}",
-        f"Api-Revision: {GEMINI_API_REVISION}",
     ]
     return ("\r\n".join(header_lines) + "\r\n\r\n").encode("iso-8859-1")
 
@@ -681,7 +671,7 @@ def _error_response_bytes(status: int, message: str, code: str = "upstream_error
     ).encode("utf-8")
 
 
-async def _forward_gemini_interactions(
+async def _forward_gemini_generate_content(
     parsed,
     payload: Mapping[str, object],
     api_key: str,
@@ -693,7 +683,7 @@ async def _forward_gemini_interactions(
     debug: ProxyDebugStream | None,
     request_id: str,
     requested_model: str,
-    continuation_store: GeminiToolContinuationStore,
+    stream: bool,
 ) -> int:
     host = parsed.hostname
     if not host:
@@ -701,7 +691,15 @@ async def _forward_gemini_interactions(
     scheme = parsed.scheme
     port = parsed.port or (443 if scheme == "https" else 80)
     path = parsed.path or "/"
-    if parsed.query:
+    if stream:
+        path = path.replace(
+            ":generateContent", ":streamGenerateContent"
+        )
+        query = parsed.query
+        if "alt=" not in query:
+            query = f"{query}&alt=sse" if query else "alt=sse"
+        path = f"{path}?{query}"
+    elif parsed.query:
         path = f"{path}?{parsed.query}"
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     reader, writer, request_target = await _open_upstream(
@@ -730,8 +728,8 @@ async def _forward_gemini_interactions(
                 error_body,
             )
             return status
-        if payload.get("stream") is True:
-            return await _relay_gemini_stream(
+        if stream:
+            return await _relay_generate_content_stream(
                 reader,
                 client,
                 headers,
@@ -739,14 +737,13 @@ async def _forward_gemini_interactions(
                 debug=debug,
                 request_id=request_id,
                 requested_model=requested_model,
-                continuation_store=continuation_store,
             )
         raw = await _read_upstream_bytes(reader, headers, rest)
         try:
-            interaction = json.loads(raw)
+            response_payload = json.loads(raw)
         except ValueError:
-            interaction = None
-        if not isinstance(interaction, Mapping):
+            response_payload = None
+        if not isinstance(response_payload, Mapping):
             error_body = _error_response_bytes(502, "Gemini response is not JSON")
             _write_json_response(client, 502, error_body)
             _debug_response(
@@ -757,23 +754,8 @@ async def _forward_gemini_interactions(
                 error_body,
             )
             return 502
-        response = response_from_interaction(
-            interaction, model=requested_model
-        )
-        call_ids: list[str] = []
-        choices = response.get("choices")
-        if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-            message = choices[0].get("message")
-            if isinstance(message, Mapping):
-                calls = message.get("tool_calls")
-                if isinstance(calls, list):
-                    call_ids = [
-                        str(call.get("id") or "")
-                        for call in calls
-                        if isinstance(call, Mapping)
-                    ]
-        continuation_store.remember(
-            str(interaction.get("id") or ""), call_ids
+        response = response_from_generate_content(
+            response_payload, model=requested_model
         )
         response_body = json.dumps(response, ensure_ascii=False).encode("utf-8")
         _write_json_response(client, 200, response_body)
@@ -791,7 +773,7 @@ async def _forward_gemini_interactions(
             await writer.wait_closed()
 
 
-async def _relay_gemini_stream(
+async def _relay_generate_content_stream(
     upstream: asyncio.StreamReader,
     client: asyncio.StreamWriter,
     headers: Mapping[str, str],
@@ -800,7 +782,6 @@ async def _relay_gemini_stream(
     debug: ProxyDebugStream | None,
     request_id: str,
     requested_model: str,
-    continuation_store: GeminiToolContinuationStore,
 ) -> int:
     client.write(
         b"HTTP/1.1 200 OK\r\n"
@@ -815,7 +796,7 @@ async def _relay_gemini_stream(
         200,
         {"content-type": "text/event-stream"},
     )
-    translator = GeminiStreamTranslator(requested_model)
+    translator = GenerateContentStreamTranslator(requested_model)
     body = _UpstreamBody(upstream, headers, rest)
     buffer = b""
     try:
@@ -823,14 +804,15 @@ async def _relay_gemini_stream(
             chunk = await body.read(4096)
             if chunk:
                 buffer += chunk
+            buffer = buffer.replace(b"\r\n", b"\n")
             events, buffer = _split_sse(buffer)
             for event in events:
-                await _translate_gemini_event(
+                await _translate_generate_content_event(
                     client, translator, event, response_debug
                 )
             if not chunk:
                 if buffer.strip():
-                    await _translate_gemini_event(
+                    await _translate_generate_content_event(
                         client, translator, buffer, response_debug
                     )
                 break
@@ -841,7 +823,6 @@ async def _relay_gemini_stream(
                 response_debug,
             )
         await _write_sse(client, "[DONE]", response_debug)
-        continuation_store.remember(translator.interaction_id, translator.call_ids)
         return 200
     finally:
         if response_debug is not None:
@@ -851,9 +832,9 @@ async def _relay_gemini_stream(
                 LOGGER.exception("proxy debug response end failed")
 
 
-async def _translate_gemini_event(
+async def _translate_generate_content_event(
     client: asyncio.StreamWriter,
-    translator: GeminiStreamTranslator,
+    translator: GenerateContentStreamTranslator,
     event: bytes,
     response_debug: DebugResponse | None,
 ) -> None:
@@ -867,6 +848,11 @@ async def _translate_gemini_event(
         return
     if not isinstance(payload, Mapping):
         return
+    if isinstance(payload.get("error"), Mapping):
+        error = payload["error"]
+        raise GeminiProtocolError(
+            str(error.get("message") or "Gemini generateContent failed")
+        )
     try:
         chunks = translator.feed(payload)
     except GeminiProtocolError as exc:

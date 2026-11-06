@@ -338,9 +338,9 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 
 - 运行时：Letta Code 0.34.16，本地后端。
 - Agent：`agent-local-d9c5a47d-1c4e-4a21-a9ae-a93beb462efc`。
-- 模型：当前是 `aki/gemini-3.8-flash`（Gemini Interactions API 直连，上下文 1,000,000，
+- 模型：当前是 `aki/gemini-3.8-flash`（Gemini GenerateContent API 直连，上下文 1,000,000，
   `max_tokens=65536`，纯文本输入）；上游协议由 `[upstream.gemini] protocol =
-  gemini-interactions` 启用，密钥从 `/home/acite/security/gemini` 读取，不写入配置；
+  gemini-generate-content` 启用，密钥从 `/home/acite/security/gemini` 读取，不写入配置；
   其他已启用模型可在 `aki/deepseek-flash`、`aki/gemma-4-26b-a4b-it` 和 `aki/grok-4.6`
   之间切换。Gemma 本地模型的采样参数仍保留在 `[model.gemma-4-26b-a4b-it]`。
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
@@ -349,7 +349,8 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 设置：每个 profile 使用 `~/.aki/<profile>.conf`；`aki.conf` 是默认 profile。
   Letta 只保存对应 profile 的回环代理地址和回环令牌。
 - 成员：Aki（7721）、Fuyu（7722）、Haru（7723）、Natsu（7724）均已上线。
-  Haru 使用 `userdata3/`、`aki-haru` provider 和 Gemini 3.8 Flash 文本模型，
+  Haru 使用 `userdata3/`、`aki-haru` provider 和 Gemini 3.8 Flash 文本模型
+  （Gemini GenerateContent 直连，纯文本输入），
   `[gateway] username = 哥哥`，并用 `[channel] wait_for = Aki,Fuyu` 固定前序发言顺序。
 - Natsu 使用 `userdata4/`、`aki-natsu` provider 和 7724 proxy 端口，默认模型为
   `aki-natsu/deepseek-flash`，同时保留 `grok-4.6` 路由；`[gateway] username = 人类`，
@@ -554,7 +555,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
     tag 检查）。独处复用同一个块名，直接替换为宽松规则，不设固定长度或气泡数量，也不得
     再引入 `solo-format-guard` 或“覆盖静态 Format Guard”的表述。
   - 群聊 user prefix：`# channel-transcript →
-    # live-context / # runtime-context → # turn-control → # format-guard`。
+    # live-context / # runtime-context → # turn-control → # format-guard`。群聊记录最多 16K token（与 solo 模式同步）。
     独处 user prefix 只留会变的
     `# live-context / # runtime-context → # format-guard → # wait-user`。当前独处原文在 `solo`
     conversation 里，不再另贴 `# solo-transcript`。

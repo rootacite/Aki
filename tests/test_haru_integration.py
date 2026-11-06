@@ -288,12 +288,24 @@ class HaruLettaIntegrationTests(unittest.TestCase):
             f"path = {ROOT / 'assets' / 'small' / 'haru.jpg'}",
         )
         text = text.replace(
-            "base_url = http://127.0.0.1:8317/v1",
-            f"base_url = http://127.0.0.1:{self.upstream.port}/v1",
+            "[upstream.gemini]\n"
+            "base_url = https://generativelanguage.googleapis.com/v1beta\n"
+            "api_key =\n"
+            "protocol = gemini-generate-content\n"
+            "use_proxy = true\n",
+            "[upstream.gemini]\n"
+            f"base_url = http://127.0.0.1:{self.upstream.port}/v1\n"
+            "api_key = fake-upstream-key\n"
+            "protocol = openai\n"
+            "use_proxy = false\n",
         )
         text = text.replace(
-            "api_key =\nuse_proxy = false\n\n[upstream.minimax]",
-            "api_key = fake-upstream-key\nuse_proxy = false\n\n[upstream.minimax]",
+            "path = /models/{model}:generateContent",
+            "path = /chat/completions",
+        )
+        text = text.replace(
+            "upstream_proxy = http://192.168.50.100:7890;http://192.168.4.1:7890",
+            "upstream_proxy =",
         )
         probe = socket.socket()
         probe.bind(("127.0.0.1", 0))
@@ -505,7 +517,18 @@ class HaruLettaIntegrationTests(unittest.TestCase):
             parts = last_user.get("content")
             self.assertIsInstance(parts, list, last_user)
             self.assertTrue(
-                any(part.get("type") in ("image_url", "input_image") for part in parts),
+                any(
+                    part.get("type") == "text"
+                    and "image omitted" in str(part.get("text") or "")
+                    for part in parts
+                ),
+                parts,
+            )
+            self.assertFalse(
+                any(
+                    part.get("type") in ("image_url", "input_image")
+                    for part in parts
+                ),
                 parts,
             )
             system_text = "\n".join(

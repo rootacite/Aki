@@ -104,11 +104,12 @@ def _model_literal(route: ModelRoute) -> str:
 
 
 def _compat(route: ModelRoute) -> dict[str, object] | None:
-    if getattr(route, "upstream_protocol", "openai") == "gemini-interactions":
+    if getattr(route, "upstream_protocol", "openai") == "gemini-generate-content":
         return {
             "supportsStore": False,
             "supportsDeveloperRole": False,
             "supportsReasoningEffort": True,
+            "requiresToolResultName": True,
             "maxTokensField": "max_tokens",
             "supportsStrictMode": False,
         }
@@ -181,7 +182,7 @@ def supported_reasoning_efforts(route: ModelRoute | None) -> tuple[str, ...]:
 
 
 def _thinking_level_map(route: ModelRoute) -> dict[str, str | None] | None:
-    if getattr(route, "upstream_protocol", "openai") == "gemini-interactions":
+    if getattr(route, "upstream_protocol", "openai") == "gemini-generate-content":
         return {
             "off": None,
             "minimal": "low",

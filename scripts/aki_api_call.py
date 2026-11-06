@@ -107,7 +107,7 @@ Use this analysis to answer correctly. Do not quote it, summarize it, or mention
 <analysis>
 {analysis}
 </analysis>"""
-CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 32 * 1024
+CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 16 * 1024
 SOLO_CHANNEL_TRANSCRIPT_BUDGET_TOKENS = 16 * 1024
 LIVE_CONTEXT_BUDGET_TOKENS = 64 * 1024
 MAX_ANALYSIS_CHARS = 6000

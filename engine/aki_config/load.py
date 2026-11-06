@@ -403,7 +403,7 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         )
         if protocol not in _UPSTREAM_PROTOCOLS:
             raise ConfigError(
-                f"[{section}] protocol must be openai or gemini-interactions"
+                f"[{section}] protocol must be openai or gemini-generate-content"
             )
         upstreams[name] = Upstream(
             name=name,
@@ -426,8 +426,26 @@ def load_config(path: Path, *, profile: str | None = None) -> AkiConfig:
         api = _require(parser, section, "api").strip()
         if api not in _APIS:
             raise ConfigError(f"[{section}] api must be openai-completions or openai-responses")
-        route_path = _require(parser, section, "path").strip()
         upstream_model = parser.get(section, "upstream_model", fallback="").strip() or model_id
+        route_path = _require(parser, section, "path").strip()
+        if "{model}" in route_path:
+            if upstream.protocol != "gemini-generate-content":
+                raise ConfigError(
+                    f"[{section}] path {{model}} placeholder requires gemini-generate-content"
+                )
+            if "/" in upstream_model:
+                raise ConfigError(
+                    f"[{section}] upstream_model must not contain /"
+                )
+            route_path = route_path.replace("{model}", upstream_model)
+        if upstream.protocol == "gemini-generate-content":
+            if (
+                not route_path.startswith("/models/")
+                or ":generateContent" not in route_path
+            ):
+                raise ConfigError(
+                    f"[{section}] gemini-generate-content path must target /models/...:generateContent"
+                )
         inputs = _list(parser.get(section, "input", fallback="text"))
         if not inputs or any(item not in ("text", "image") for item in inputs):
             raise ConfigError(f"[{section}] input must be text and/or image")

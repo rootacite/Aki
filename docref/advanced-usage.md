@@ -138,31 +138,32 @@ akictl fuyu down                 # 停止服务，不删除配置/记忆/历史
 `http://192.168.50.100:7890;http://192.168.3.2:7890`；全部不可达时请求失败，不会绕过代理直连。
 单个上游可在自己的 `[upstream.*]` 段设置 `use_proxy = false` 直连。聊天客户端仍然只走 Unix socket。
 
-上游还可以声明非 OpenAI 协议。Aki 的 Gemini 路由使用 Interactions API；密钥通过
+上游还可以声明非 OpenAI 协议。Aki 的 Gemini 路由使用 GenerateContent API；密钥通过
 `api_key_file` 读取，配置里不保存明文：
 
 ```ini
 [upstream.gemini]
 base_url = https://generativelanguage.googleapis.com/v1beta
 api_key_file = /home/acite/security/gemini
-protocol = gemini-interactions
+protocol = gemini-generate-content
 use_proxy = true
 
 [model.gemini-3.8-flash]
 upstream = gemini
 upstream_model = gemini-3.8-flash
 api = openai-completions
-path = /interactions
+path = /models/{model}:generateContent
 context_window = 1000000
 max_tokens = 65536
 input = text
 ```
 
-`gemini-interactions` 由 akid-proxy 在 OpenAI Chat Completions 与 Gemini Interactions
-请求/SSE 之间转换。该路由只承载文本和多轮工具调用，不发送图片，也不启用结构化输出。
-安全过滤对骚扰、仇恨言论、露骨色情和危险内容使用 `threshold = off`。工具结果续轮会在代理
-内存中关联 `function_call` 与对应的 `previous_interaction_id`；代理重启后的旧工具链会降级为
-文本 transcript。
+`gemini-generate-content` 由 akid-proxy 在 OpenAI Chat Completions 与 Gemini
+GenerateContent 请求/SSE 之间转换。`path` 中的 `{model}` 会替换为 `upstream_model`；
+流式请求自动改用 `:streamGenerateContent?alt=sse`。该路由只承载文本和多轮工具调用，
+不发送图片，也不启用结构化输出。历史工具调用使用原生 `functionCall` /
+`functionResponse`，不会退化为文本标记。安全过滤对骚扰、仇恨言论、露骨色情和危险内容
+使用 `threshold = OFF`。缓存统计读取 `usageMetadata.cachedContentTokenCount`。
 
 ### content_filter 透明重试
 
@@ -238,12 +239,14 @@ Memory,Skill,acquire_execution_lock,wait_other,wait_user,desktop_take_screenshot
 从 schema 中移除。写入只允许 `/tmp` 与 `~/.local/share/tmp`；`[writable] dirs` 保持为空，
 bubblewrap 是第二层边界。`Read` 也被限制在 `/tmp`、`~/.local/share/tmp` 和 Letta 自己的
 MemFS/工具归档目录，不能用来翻仓库代码、测试、配置或日志；代码问题会直接转交。第一版接入
-本机 `cli-proxy-api` 提供的 Gemini 3.8 Flash 文本 API；key 未填写时模型不会暴露给 Letta。
+Gemini GenerateContent API 提供的 Gemini 3.8 Flash 文本能力；`[upstream.gemini]` 使用
+`protocol = gemini-generate-content` 和 `api_key_file`，没有可用密钥时模型不会暴露给 Letta。
 
 Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算；模板不再通过
 `extra_body` 固定 reasoning、temperature 或 top_p。需要调低延迟或加深规划时，可在
-`[model.gemini-3.8-flash]` 中显式添加 `extra_body`。Haru 仍使用本机
-`cli-proxy-api`（`127.0.0.1:8317`），使用 `use_proxy = false` 直连。文生图走独立的
+`[model.gemini-3.8-flash]` 中显式添加 `extra_body`。Haru 通过 `[upstream.gemini]` 直连，
+并走 `[proxy] upstream_proxy` 的 akid 层优先级路由。该 Gemini 路由只发送文本；频道图片
+仍保存在本地并把路径写入 transcript，但不会作为多模态输入直接发送给 Gemini。文生图走独立的
 MiniMax `image-01` API 和本机 ComfyUI；TTS 与视频仍属于后续阶段，Haru 的人格和提示词会明确
 说明这些能力尚未安装。
 
@@ -254,8 +257,8 @@ python3 scripts/bootstrap-member.py --profile haru
 ```
 
 脚本默认只创建新的 agent/conversation；目标已存在时不做修改。它会调用现有的
-`sync-persona.py` 和 `install-system-prompt.py`。完成后把 Haru 使用的本机 `cli-proxy-api`
-key 填进 `~/.aki/haru.conf` 的 `[upstream.cli-proxy-api] api_key`，把
+`sync-persona.py` 和 `install-system-prompt.py`。完成后把 Gemini key 文件写到
+`[upstream.gemini] api_key_file` 指向的位置（或直接填写 `api_key`），把
 MiniMax key 填进 `[upstream.minimax] api_key`，再启动
 `akid-proxy@haru.service` 与 `akid@haru.service`。
 

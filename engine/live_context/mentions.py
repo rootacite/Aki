@@ -254,7 +254,7 @@ def _valid_mention_boundaries(text: str, start: int, end: int) -> bool:
         if previous.isalnum() or previous in embedded_prefixes:
             return False
     if end >= len(text):
-        return False
+        return True
     following = text[end]
     if following.isspace():
         return True

@@ -153,7 +153,7 @@ turn 的 guidance、initiation budget、execution responder、`wait_other` 目�
 和 `scripts/migrate-channel-prompts.py` 只用于迁移历史记录。
 
 最近频道文本会作为频道 turn 的 `# channel-transcript` 注入实际 API 请求的 user-message prefix，
-默认最多 32K **token**（不是 32K 字节），按时间保留历史消息，不包含当前消息和 `new` 标记。bridge 模式下
+默认最多 16K **token**（不是 16K 字节），按时间保留历史消息，不包含当前消息和 `new` 标记。bridge 模式下
 该块只存在于 turn overlay，不写入持久 system prompt；群聊消息本身仍永久保存在
 `~/.aki/channel-history`。记录包含智能体的中间
 回复和最终回复，但不包含 CoT、tool call、tool 结果和审批事件。用户消息仍会作为 user
@@ -198,7 +198,7 @@ Agent 最终正文可写 `#[/absolute/path/to/image]` 把本地图片变成同�
 `<channel-transcript>` 的最近消息按 MQTT 频道持久化：`broker host:port + topic +
 magic` 相同视为同一个群聊，每个 profile 在
 `~/.aki/channel-history/<channel-key>/<profile>.jsonl` 保存自己看到的记录。重启后会重新
-加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 32K token
+加载，并继续递增消息序号；记录上限仍是最近 512 条，渲染进 system prompt 时再受 16K token
 预算约束。
 
 所有 profile 还注册对用户隐藏的只读工具 `search_chat_history(query, limit, scope)`，只搜索

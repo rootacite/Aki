@@ -457,7 +457,7 @@ sender (source, at timestamp, seq=N): "JSON-escaped text" attachments=[...]
 - 每行是 JSON 转义文本，避免历史内容伪造结构。
 - 附件只记录 `name` 和本地 `path`，不记录 base64。
 - 明确的不可信声明，防止历史消息里的 prompt injection。
-- 群聊历史默认预算 32K tokens；solo 中冻结群聊历史 16K；solo memories 32K（整段会话淘汰）；
+- 群聊历史默认预算 16K tokens（与 solo 模式同步）；solo 中冻结群聊历史 16K；solo memories 32K（整段会话淘汰）；
   solo transcript 可用到 64K。CJK 使用保守估算，非 ASCII 字符约按 1 token/字符计算。
 - 当前用户消息会按 `exclude_seq` 排除，避免和真正的 user message 重复。
 
