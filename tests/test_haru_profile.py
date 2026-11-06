@@ -88,6 +88,20 @@ class HaruConfigTests(unittest.TestCase):
         self.assertEqual(route.max_tokens, 65536)
         self.assertEqual(route.inputs, ("text",))
         self.assertEqual(route.extra_body, {})
+        lite_route = next(
+            model for model in config.models if model.model_id == "gemini-3.5-flash-lite"
+        )
+        self.assertEqual(lite_route.upstream_name, "gemini")
+        self.assertEqual(lite_route.upstream_model, "gemini-3.5-flash-lite")
+        self.assertEqual(
+            lite_route.path, "/models/gemini-3.5-flash-lite:generateContent"
+        )
+        self.assertEqual(
+            lite_route.upstream_protocol, "gemini-generate-content"
+        )
+        self.assertEqual(lite_route.context_window, 1_000_000)
+        self.assertEqual(lite_route.max_tokens, 65536)
+        self.assertEqual(lite_route.inputs, ("text",))
         self.assertEqual(
             config.upstream_proxy,
             "http://192.168.50.100:7890;http://192.168.4.1:7890",

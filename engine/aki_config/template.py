@@ -179,6 +179,15 @@ context_window = 1048576
 max_tokens = 65536
 input = text,image
 
+[model.gemini-3.5-flash-lite]
+upstream = gemini
+upstream_model = gemini-3.5-flash-lite
+api = openai-completions
+path = /chat/completions
+context_window = 1048576
+max_tokens = 65536
+input = text,image
+
 [model.gemini-3.8-flash]
 upstream = openrouter
 upstream_model = google/gemini-3.8-flash
@@ -333,6 +342,15 @@ api_key =
 [model.gemini-3.8-flash]
 upstream = gemini
 upstream_model = gemini-3.8-flash
+api = openai-completions
+path = /models/{{model}}:generateContent
+context_window = 1000000
+max_tokens = 65536
+input = text
+
+[model.gemini-3.5-flash-lite]
+upstream = gemini
+upstream_model = gemini-3.5-flash-lite
 api = openai-completions
 path = /models/{{model}}:generateContent
 context_window = 1000000

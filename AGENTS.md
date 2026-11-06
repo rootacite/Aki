@@ -341,7 +341,7 @@ Aki 是一个有持续身份、能自主整理记忆、可长期陪伴用户的 
 - 模型：当前是 `aki/gemini-3.8-flash`（Gemini GenerateContent API 直连，上下文 1,000,000，
   `max_tokens=65536`，纯文本输入）；上游协议由 `[upstream.gemini] protocol =
   gemini-generate-content` 启用，密钥从 `/home/acite/security/gemini` 读取，不写入配置；
-  其他已启用模型可在 `aki/deepseek-flash`、`aki/gemma-4-26b-a4b-it` 和 `aki/grok-4.6`
+  其他已启用模型可在 `aki/deepseek-flash`、`aki/gemini-3.5-flash-lite`、`aki/gemma-4-26b-a4b-it` 和 `aki/grok-4.6`
   之间切换。Gemma 本地模型的采样参数仍保留在 `[model.gemma-4-26b-a4b-it]`。
   akid 在 `127.0.0.1:7721` 把请求转到 `~/.aki/aki.conf` 里启用的上游。
 - 基础 system prompt：`prompts/aki-system.md`，由
