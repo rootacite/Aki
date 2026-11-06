@@ -447,6 +447,24 @@ class ConversationMixin:
         return self.config.backend_dir.parent / "backups"
 
 
+    def _backup_conversation(
+        self, conversation_dir: Path, *, suffix: str = "reset"
+    ) -> Path:
+        root = self._conversation_backup_root()
+        root.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            os.chmod(root, 0o700)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        name = f"aki-{self._active_conversation_id()}-{suffix}-{stamp}"
+        candidate = root / name
+        counter = 1
+        while candidate.exists():
+            candidate = root / f"{name}-{counter}"
+            counter += 1
+        shutil.copytree(conversation_dir, candidate, symlinks=True)
+        return candidate
+
+
     def _reflection_dir_for(self, conversation_id: str) -> Path:
         _transcript, state = reflection_transcript_paths(
             os.environ, self.config.agent_id, conversation_id
