@@ -9,7 +9,11 @@ Item {
     property int bubbleWidth: 460
     property bool hoverPaused: false
     property int nextId: 1
+    property int maxActiveCount: 5
     property int maxMissedCount: 50
+    property alias activeCount: activeModel.count
+    property alias missedCount: missedModel.count
+    property alias missedRightMargin: missedRegion.anchors.rightMargin
     property int missedPeekEdgeHeight: 8
     property int missedPeekLayerStep: 5
     property int missedPeekMaxLayers: 3
@@ -45,12 +49,33 @@ Item {
     }
 
     function pushMessageWithId(text, bubbleId, character) {
+        while (activeModel.count >= maxActiveCount) {
+            collapseBubble(activeModel.get(0).bubbleId)
+        }
         activeModel.append({
             "bubbleId": bubbleId || ("bubble-" + nextId++),
             "messageText": text,
             "character": character || "Aki",
             "timeText": formatBubbleTime(Date.now())
         })
+        scheduleInputRegionRefresh()
+    }
+
+    function clearAllNotifications() {
+        while (activeModel.count > 0) {
+            const id = activeModel.get(0).bubbleId
+            activeModel.remove(0)
+            bubbleDismissed(id)
+        }
+        while (missedModel.count > 0) {
+            const id = missedModel.get(0).bubbleId
+            missedModel.remove(0)
+            bubbleDismissed(id)
+        }
+        hoveredBubbles = ({})
+        missedExpanded = false
+        missedHovered = false
+        refreshHoverPause()
         scheduleInputRegionRefresh()
     }
 
@@ -164,8 +189,8 @@ Item {
         anchors.top: parent.top
         anchors.right: parent.right
         anchors.topMargin: 0
-        anchors.rightMargin: 8
-        width: bubbleStack.bubbleWidth + 32
+        anchors.rightMargin: bubbleStack.missedExpanded ? 8 : 72
+        width: bubbleStack.missedExpanded ? bubbleStack.bubbleWidth + 32 : bubbleStack.bubbleWidth - 32
         height: bubbleStack.missedExpanded
                 ? 24 + missedDrawer.height + 10
                 : bubbleStack.missedPeekHeight + 6
@@ -177,6 +202,7 @@ Item {
         }
 
         onHeightChanged: bubbleStack.scheduleInputRegionRefresh()
+        onWidthChanged: bubbleStack.scheduleInputRegionRefresh()
 
         // A thin layered card edge remains at the top when bubbles are folded
         // away. Each recent missed message contributes one edge.
@@ -184,25 +210,33 @@ Item {
             id: missedPeekStack
             anchors.top: parent.top
             anchors.topMargin: 0
+            anchors.left: parent.left
             anchors.right: parent.right
-            anchors.rightMargin: 16
-            width: bubbleStack.bubbleWidth
             height: bubbleStack.missedPeekHeight
             visible: !bubbleStack.missedExpanded
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: {
+                    bubbleStack.missedExpanded = !bubbleStack.missedExpanded
+                    bubbleStack.scheduleInputRegionRefresh()
+                }
+            }
 
             Repeater {
                 model: bubbleStack.missedPeekLayers
 
                 Rectangle {
-                    readonly property int sourceIndex: bubbleStack.missedModel.count - 1 - index
+                    readonly property int sourceIndex: missedModel.count - 1 - index
                     readonly property var entry: sourceIndex >= 0
-                            ? bubbleStack.missedModel.get(sourceIndex)
+                            ? missedModel.get(sourceIndex)
                             : ({ "character": "Aki" })
                     readonly property var layerTheme: Themes.get(entry.character)
 
-                    width: bubbleStack.bubbleWidth - index * 14
+                    width: parent.width - index * 14
                     height: bubbleStack.missedPeekEdgeHeight
-                    x: (bubbleStack.bubbleWidth - width) / 2
+                    x: (parent.width - width) / 2
                     y: index * bubbleStack.missedPeekLayerStep
                     radius: height / 2
                     color: layerTheme.gradientMid
@@ -222,7 +256,7 @@ Item {
             width: bubbleStack.bubbleWidth
             height: missedModel.count === 0
                     ? 0
-                    : Math.min(missedList.contentHeight, bubbleStack.missedExpandedMaxHeight)
+                    : Math.min(drawerHeader.height + 8 + missedList.contentHeight, bubbleStack.missedExpandedMaxHeight)
             y: bubbleStack.missedExpanded ? 24 : -height - 12
             clip: true
             property bool blocksInput: bubbleStack.missedExpanded
@@ -238,10 +272,63 @@ Item {
             onYChanged: bubbleStack.scheduleInputRegionRefresh()
             onHeightChanged: bubbleStack.scheduleInputRegionRefresh()
 
+            Item {
+                id: drawerHeader
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 28
+
+                Text {
+                    anchors.left: parent.left
+                    anchors.verticalCenter: parent.verticalCenter
+                    text: "折叠通知 (" + missedModel.count + ")"
+                    color: "#A53A61"
+                    font.pixelSize: 13
+                    font.weight: Font.DemiBold
+                }
+
+                Rectangle {
+                    id: clearMissedBtn
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    implicitWidth: clearMissedRow.implicitWidth + 18
+                    implicitHeight: 24
+                    radius: 12
+                    color: clearMissedArea.containsMouse ? "#E8FBF2F6" : "#CCFBF2F6"
+                    border.width: 1
+                    border.color: clearMissedArea.containsMouse ? "#C9F07FA6" : "#78F3A9C0"
+                    property bool blocksInput: bubbleStack.missedExpanded
+
+                    Row {
+                        id: clearMissedRow
+                        anchors.centerIn: parent
+                        spacing: 4
+                        Text {
+                            text: "一键清空"
+                            color: "#A53A61"
+                            font.pixelSize: 11
+                            font.weight: Font.Medium
+                        }
+                    }
+
+                    MouseArea {
+                        id: clearMissedArea
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: bubbleStack.clearAllNotifications()
+                    }
+                }
+            }
+
             ListView {
                 id: missedList
-                width: parent.width
-                height: missedDrawer.height
+                anchors.top: drawerHeader.bottom
+                anchors.topMargin: 8
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
                 clip: true
                 model: missedModel
                 spacing: 8
@@ -261,6 +348,7 @@ Item {
                     activeNotification: false
                     autoDismiss: false
                     showDismiss: true
+                    blocksInput: bubbleStack.missedExpanded
                     stack: bubbleStack
 
                     onDismissRequested: bubbleStack.removeBubble(bubbleId)
@@ -278,6 +366,46 @@ Item {
         anchors.rightMargin: 24
         width: bubbleStack.bubbleWidth
         spacing: 10
+
+        Item {
+            id: activeHeader
+            width: activeColumn.width
+            height: visible ? 24 : 0
+            visible: activeModel.count >= 2 || (activeModel.count > 0 && bubbleStack.anyBubbleHovered())
+
+            onVisibleChanged: bubbleStack.scheduleInputRegionRefresh()
+
+            Rectangle {
+                anchors.right: parent.right
+                implicitWidth: clearActiveRow.implicitWidth + 18
+                implicitHeight: 24
+                radius: 12
+                color: clearActiveArea.containsMouse ? "#E8FBF2F6" : "#CCFBF2F6"
+                border.width: 1
+                border.color: clearActiveArea.containsMouse ? "#C9F07FA6" : "#78F3A9C0"
+                property bool blocksInput: parent.visible
+
+                Row {
+                    id: clearActiveRow
+                    anchors.centerIn: parent
+                    spacing: 4
+                    Text {
+                        text: "一键清空 (" + activeModel.count + ")"
+                        color: "#A53A61"
+                        font.pixelSize: 11
+                        font.weight: Font.Medium
+                    }
+                }
+
+                MouseArea {
+                    id: clearActiveArea
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: bubbleStack.clearAllNotifications()
+                }
+            }
+        }
 
         Repeater {
             model: activeModel
@@ -326,6 +454,9 @@ Item {
     Timer {
         id: inputRegionRefresh
         interval: 0
-        onTriggered: inputRegionController.refresh()
+        onTriggered: {
+            if (typeof inputRegionController !== "undefined" && inputRegionController)
+                inputRegionController.refresh()
+        }
     }
 }
