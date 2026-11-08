@@ -181,10 +181,72 @@ class GenerateContentPayloadTests(unittest.TestCase):
             {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "OFF"},
         )
         serialized = json.dumps(body, ensure_ascii=False)
-        self.assertIn("[image omitted: Gemini text-only route]", serialized)
+        self.assertEqual(
+            contents[3]["parts"][1],
+            {"inlineData": {"mimeType": "image/png", "data": "AA=="}},
+        )
         self.assertNotIn("[tool_call", serialized)
         self.assertNotIn("previous_interaction_id", serialized)
         self.assertNotIn("function_result", serialized)
+
+    def test_multimodal_image_formats_converted_to_inline_data(self) -> None:
+        payload = {
+            "model": "gemini-3.8-flash",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": "/9j/4AAQSkZJRg==",
+                            },
+                        },
+                        {
+                            "type": "image",
+                            "mimeType": "image/webp",
+                            "data": "UklGR==",
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/test.png"},
+                        },
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": "data:image/gif;base64,R0lGODlh",
+                        }
+                    ],
+                },
+            ],
+        }
+        body = build_generate_content_payload(payload, "gemini-3.8-flash")
+        contents = body["contents"]
+        self.assertEqual(len(contents), 2)
+        parts_1 = contents[0]["parts"]
+        self.assertEqual(
+            parts_1[0],
+            {"inlineData": {"mimeType": "image/jpeg", "data": "/9j/4AAQSkZJRg=="}},
+        )
+        self.assertEqual(
+            parts_1[1],
+            {"inlineData": {"mimeType": "image/webp", "data": "UklGR=="}},
+        )
+        self.assertEqual(
+            parts_1[2],
+            {"text": "[image omitted: remote url not supported]"},
+        )
+        parts_2 = contents[1]["parts"]
+        self.assertEqual(
+            parts_2[0],
+            {"inlineData": {"mimeType": "image/gif", "data": "R0lGODlh"}},
+        )
 
     def test_clean_gemini_schema_normalizes_tools(self) -> None:
         payload = {

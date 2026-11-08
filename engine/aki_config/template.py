@@ -346,7 +346,7 @@ api = openai-completions
 path = /models/{{model}}:generateContent
 context_window = 1000000
 max_tokens = 65536
-input = text
+input = text,image
 
 [model.gemini-3.5-flash-lite]
 upstream = gemini
@@ -355,7 +355,7 @@ api = openai-completions
 path = /models/{{model}}:generateContent
 context_window = 1000000
 max_tokens = 65536
-input = text
+input = text,image
 """
 
 

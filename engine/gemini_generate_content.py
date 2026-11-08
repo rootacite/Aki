@@ -49,9 +49,88 @@ def _openai_text(content: object) -> str:
         kind = item.get("type")
         if kind == "text":
             parts.append(str(item.get("text") or ""))
-        elif kind in ("image_url", "image"):
-            parts.append("[image omitted: Gemini text-only route]")
+        elif kind in ("image_url", "image", "input_image"):
+            parts.append("[image omitted: text-only context]")
     return "\n".join(part for part in parts if part)
+
+
+def _parse_image_part(item: Mapping[str, object]) -> dict[str, object] | None:
+    url_val = item.get("image_url") or item.get("imageUrl")
+    if isinstance(url_val, Mapping):
+        url_val = url_val.get("url")
+    if isinstance(url_val, str) and url_val.strip():
+        url_str = url_val.strip()
+        if url_str.startswith("data:"):
+            header, _, b64_data = url_str.partition(",")
+            mime = "image/png"
+            meta = header[5:].split(";")
+            if meta and meta[0].strip():
+                mime = meta[0].strip()
+            data_clean = b64_data.strip()
+            if data_clean:
+                return {
+                    "inlineData": {
+                        "mimeType": mime,
+                        "data": data_clean,
+                    }
+                }
+        return {"text": f"[image omitted: remote url not supported]"}
+
+    source = item.get("source")
+    if isinstance(source, Mapping):
+        data = source.get("data")
+        mime = source.get("media_type") or source.get("mime_type") or "image/png"
+        if isinstance(data, str) and data.strip():
+            return {
+                "inlineData": {
+                    "mimeType": str(mime).strip(),
+                    "data": data.strip(),
+                }
+            }
+
+    data = item.get("data")
+    if isinstance(data, str) and data.strip():
+        mime = (
+            item.get("mimeType")
+            or item.get("mime_type")
+            or item.get("media_type")
+            or "image/png"
+        )
+        return {
+            "inlineData": {
+                "mimeType": str(mime).strip(),
+                "data": data.strip(),
+            }
+        }
+
+    return None
+
+
+def _convert_user_content(content: object) -> list[dict[str, object]]:
+    if isinstance(content, str):
+        return [{"text": content}] if content else []
+    if not isinstance(content, list):
+        return []
+    parts: list[dict[str, object]] = []
+    for item in content:
+        if isinstance(item, str):
+            if item:
+                parts.append({"text": item})
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        kind = item.get("type")
+        if kind == "text":
+            text = str(item.get("text") or "")
+            if text:
+                parts.append({"text": text})
+        elif kind in ("image_url", "image", "input_image"):
+            image_part = _parse_image_part(item)
+            if image_part is not None:
+                parts.append(image_part)
+            else:
+                parts.append({"text": "[image omitted: invalid image data]"})
+    return parts
 
 
 def _parse_arguments(value: object) -> dict[str, object]:
@@ -225,10 +304,10 @@ def _convert_messages(
             continue
         if role == "user":
             flush_results()
-            text = _openai_text(content)
-            if text:
+            user_parts = _convert_user_content(content)
+            if user_parts:
                 contents.append(
-                    {"role": "user", "parts": [{"text": text}]}
+                    {"role": "user", "parts": user_parts}
                 )
             continue
         if role == "assistant":

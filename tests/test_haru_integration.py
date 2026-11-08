@@ -518,14 +518,6 @@ class HaruLettaIntegrationTests(unittest.TestCase):
             self.assertIsInstance(parts, list, last_user)
             self.assertTrue(
                 any(
-                    part.get("type") == "text"
-                    and "image omitted" in str(part.get("text") or "")
-                    for part in parts
-                ),
-                parts,
-            )
-            self.assertFalse(
-                any(
                     part.get("type") in ("image_url", "input_image")
                     for part in parts
                 ),

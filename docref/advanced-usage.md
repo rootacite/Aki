@@ -155,14 +155,14 @@ api = openai-completions
 path = /models/{model}:generateContent
 context_window = 1000000
 max_tokens = 65536
-input = text
+input = text,image
 ```
 
 `gemini-generate-content` 由 akid-proxy 在 OpenAI Chat Completions 与 Gemini
 GenerateContent 请求/SSE 之间转换。`path` 中的 `{model}` 会替换为 `upstream_model`；
-流式请求自动改用 `:streamGenerateContent?alt=sse`。该路由只承载文本和多轮工具调用，
-不发送图片，也不启用结构化输出。历史工具调用使用原生 `functionCall` /
-`functionResponse`，不会退化为文本标记。安全过滤对骚扰、仇恨言论、露骨色情和危险内容
+流式请求自动改用 `:streamGenerateContent?alt=sse`。该路由原生承载文本、多模态图片和多轮工具调用，
+历史工具调用使用原生 `functionCall` /
+`functionResponse`，多模态输入自动映射为 `inlineData`。安全过滤对骚扰、仇恨言论、露骨色情和危险内容
 使用 `threshold = OFF`。缓存统计读取 `usageMetadata.cachedContentTokenCount`。
 
 ### content_filter 透明重试
@@ -245,8 +245,7 @@ Gemini GenerateContent API 提供的 Gemini 3.8 Flash 文本能力；`[upstream.
 Gemini 3.8 Flash 路由默认使用 1,000,000 上下文和 65,536 输出预算；模板不再通过
 `extra_body` 固定 reasoning、temperature 或 top_p。需要调低延迟或加深规划时，可在
 `[model.gemini-3.8-flash]` 中显式添加 `extra_body`。Haru 通过 `[upstream.gemini]` 直连，
-并走 `[proxy] upstream_proxy` 的 akid 层优先级路由。该 Gemini 路由只发送文本；频道图片
-仍保存在本地并把路径写入 transcript，但不会作为多模态输入直接发送给 Gemini。文生图走独立的
+并走 `[proxy] upstream_proxy` 的 akid 层优先级路由。文生图走独立的
 MiniMax `image-01` API 和本机 ComfyUI；TTS 与视频仍属于后续阶段，Haru 的人格和提示词会明确
 说明这些能力尚未安装。
 

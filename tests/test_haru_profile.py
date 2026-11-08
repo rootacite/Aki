@@ -86,7 +86,7 @@ class HaruConfigTests(unittest.TestCase):
         )
         self.assertEqual(route.context_window, 1_000_000)
         self.assertEqual(route.max_tokens, 65536)
-        self.assertEqual(route.inputs, ("text",))
+        self.assertEqual(route.inputs, ("text", "image"))
         self.assertEqual(route.extra_body, {})
         lite_route = next(
             model for model in config.models if model.model_id == "gemini-3.5-flash-lite"
@@ -101,7 +101,7 @@ class HaruConfigTests(unittest.TestCase):
         )
         self.assertEqual(lite_route.context_window, 1_000_000)
         self.assertEqual(lite_route.max_tokens, 65536)
-        self.assertEqual(lite_route.inputs, ("text",))
+        self.assertEqual(lite_route.inputs, ("text", "image"))
         self.assertEqual(
             config.upstream_proxy,
             "http://192.168.50.100:7890;http://192.168.4.1:7890",
@@ -144,9 +144,9 @@ class HaruConfigTests(unittest.TestCase):
     def test_extra_body_cannot_override_routing_fields(self) -> None:
         atomic_write(self.path, template_text("agent-haru", profile="haru"))
         text = self.path.read_text(encoding="utf-8").replace(
-            "path = /models/{model}:generateContent\ncontext_window = 1000000\nmax_tokens = 65536\ninput = text\n",
+            "path = /models/{model}:generateContent\ncontext_window = 1000000\nmax_tokens = 65536\ninput = text,image\n",
             "path = /models/{model}:generateContent\ncontext_window = 1000000\nmax_tokens = 65536\n"
-            'input = text\nextra_body = {"model": "evil"}\n',
+            'input = text,image\nextra_body = {"model": "evil"}\n',
             1,
         )
         atomic_write(self.path, text)
