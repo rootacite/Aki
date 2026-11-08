@@ -67,6 +67,7 @@ COMMANDS = {
     "model",
     "solo",
     "nighttalk",
+    "monitor",
     "help",
 }
 
@@ -126,6 +127,7 @@ HELP_TEXT = (
     "  akictl solo status         show the active solo session\n"
     "  akictl solo off            end solo mode\n"
     "  akictl nighttalk           immediately activate one random night talk\n"
+    "  akictl monitor             TUI monitor dashboard for live API calls and agents\n"
     "  akictl up | down | restart manage the default profile service\n"
     "  akictl logs                show profile service logs\n"
     "\nUse 'akictl <command> --help' for command-specific options."
@@ -470,6 +472,12 @@ def build_parsers() -> dict[str, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(prog="akictl help")
     parser.add_argument("help_command", nargs="?")
     parsers["help"] = parser
+    parser = argparse.ArgumentParser(
+        prog="akictl monitor",
+        description="TUI dashboard for live API calls, KV cache, and agent monitoring",
+    )
+    _add_common(parser)
+    parsers["monitor"] = parser
     return parsers
 
 
@@ -631,6 +639,9 @@ def main(argv: list[str] | None = None, *, default_command: str = "chat") -> int
         return pkg()._management(args, "aki.conversation.recompile", profile=profile)
     if command == "compact":
         return _compact(args, profile)
+    if command == "monitor":
+        from .monitor import launch_monitor
+        return launch_monitor(initial_profile=profile)
     if command == "help":
         if not args.help_command:
             _print_help()
