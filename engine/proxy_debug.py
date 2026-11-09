@@ -354,7 +354,7 @@ class ProxyDebugStream:
 
     async def _send(self, client: _Client, line: bytes) -> None:
         client.writer.write(line)
-        await client.writer.drain()
+        await asyncio.wait_for(client.writer.drain(), timeout=5.0)
 
     def _hello_line(self, snapshot: list[tuple[int, bytes]]) -> bytes:
         ring_start = snapshot[0][0] if snapshot else self._seq + 1
@@ -410,8 +410,10 @@ class ProxyDebugStream:
         try:
             await self._send(client, self._hello_line(snapshot))
             for _seq, line in snapshot:
+                if disconnect.done():
+                    break
                 await self._send(client, line)
-            while True:
+            while not disconnect.done():
                 getter = asyncio.create_task(client.queue.get())
                 done, _pending = await asyncio.wait(
                     {getter, disconnect}, return_when=asyncio.FIRST_COMPLETED
@@ -421,19 +423,19 @@ class ProxyDebugStream:
                     break
                 line = getter.result()
                 await self._send(client, line)
-        except (asyncio.CancelledError, ConnectionError, OSError):
+        except (asyncio.CancelledError, ConnectionError, OSError, TimeoutError):
             pass
         finally:
-            disconnect.cancel()
-            with contextlib.suppress(Exception):
-                await disconnect
             self._clients.discard(client)
+            disconnect.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await disconnect
             with contextlib.suppress(Exception):
                 writer.close()
                 await writer.wait_closed()
 
     async def _wait_disconnect(self, reader: asyncio.StreamReader) -> None:
-        with contextlib.suppress(Exception):
+        with contextlib.suppress(asyncio.CancelledError, Exception):
             while await reader.read(4096):
                 pass
 

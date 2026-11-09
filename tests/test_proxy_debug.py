@@ -115,6 +115,44 @@ class ProxyDebugStreamTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError):
             await self.stream.start()
 
+    async def test_client_disconnect_does_not_leak_clients(self) -> None:
+        # Connect and immediately disconnect 12 times (more than default 8 max_clients)
+        for _ in range(12):
+            reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+            await _read_event(reader)
+            writer.close()
+            await writer.wait_closed()
+            await asyncio.sleep(0.02)
+
+        self.assertEqual(len(self.stream._clients), 0)
+
+        # Ensure a 13th client can connect normally without 'too many debug clients' error
+        reader, writer = await asyncio.open_unix_connection(str(self.socket_path))
+        try:
+            hello = await _read_event(reader)
+            self.assertEqual(hello.get("event"), "hello")
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_large_payload_streaming(self) -> None:
+        large_text = "x" * 200_000
+        self.stream.publish("request", request_id="large-1", payload={"prompt": large_text})
+
+        reader, writer = await asyncio.open_unix_connection(
+            str(self.socket_path), limit=16 * 1024 * 1024
+        )
+        try:
+            hello = await _read_event(reader)
+            self.assertEqual(hello["event"], "hello")
+            ev = await _read_event(reader)
+            self.assertEqual(ev["event"], "request")
+            self.assertEqual(ev["request_id"], "large-1")
+            self.assertEqual(len(ev["payload"]["prompt"]), 200_000)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
 
 if __name__ == "__main__":
     unittest.main()

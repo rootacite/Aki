@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.formatted_text import ANSI, split_lines, to_plain_text
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.layout.containers import (
     Float,
@@ -17,13 +18,19 @@ from prompt_toolkit.layout.containers import (
 )
 from prompt_toolkit.layout.controls import FormattedTextControl
 from prompt_toolkit.layout.layout import Layout
-from prompt_toolkit.formatted_text import ANSI
+from prompt_toolkit.mouse_events import MouseEvent
 
 from engine.akictl.chat import _connect
 from engine.akictl.support import _rpc_call
 from engine.client import default_socket_path
 
 from .analysis import detect_fork
+from .mouse import (
+    handle_content_mouse,
+    handle_modal_mouse,
+    handle_sidebar_mouse,
+    handle_status_mouse,
+)
 from .socket_listener import SocketListener
 from .state import MonitorState
 from .theme import PT_STYLE, render_rich_to_ansi
@@ -43,6 +50,26 @@ from .views.page_tools_mcp import render_tools_mcp_page
 from .views.sidebar import render_sidebar
 
 
+class ClickableControl(FormattedTextControl):
+    """FormattedTextControl with mouse handler dispatch."""
+
+    def __init__(
+        self,
+        text: Any,
+        mouse_handler: Callable[[MouseEvent], Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(text, **kwargs)
+        self._custom_mouse_handler = mouse_handler
+
+    def mouse_handler(self, mouse_event: MouseEvent) -> Any:
+        if self._custom_mouse_handler:
+            res = self._custom_mouse_handler(mouse_event)
+            if res is not NotImplemented:
+                return res
+        return super().mouse_handler(mouse_event)
+
+
 class MonitorApp:
     """TUI Application for akictl monitor."""
 
@@ -52,17 +79,52 @@ class MonitorApp:
         self.listener = SocketListener(self.state)
         self.app: Application[None] | None = None
 
-        # Build prompt_toolkit UI
-        self._sidebar_control = FormattedTextControl(self._get_sidebar_text)
-        self._content_control = FormattedTextControl(self._get_content_text)
-        self._status_control = FormattedTextControl(self._get_status_text)
-        self._modal_control = FormattedTextControl(self._get_modal_text)
+        self._sidebar_plain_lines: list[str] = []
+        self._content_plain_lines: list[str] = []
+        self._status_plain_lines: list[str] = []
+        self._modal_plain_lines: list[str] = []
+
+        # Build prompt_toolkit UI with mouse handlers
+        self._sidebar_control = ClickableControl(
+            self._get_sidebar_text,
+            mouse_handler=self._on_sidebar_mouse,
+        )
+        self._content_control = ClickableControl(
+            self._get_content_text,
+            mouse_handler=self._on_content_mouse,
+        )
+        self._status_control = ClickableControl(
+            self._get_status_text,
+            mouse_handler=self._on_status_mouse,
+        )
+        self._modal_control = ClickableControl(
+            self._get_modal_text,
+            mouse_handler=self._on_modal_mouse,
+        )
 
         self.key_bindings = self._create_key_bindings()
 
+    def _on_sidebar_mouse(self, mouse_event: MouseEvent) -> Any:
+        handle_sidebar_mouse(self.state, mouse_event, self._sidebar_plain_lines)
+        return None
+
+    def _on_content_mouse(self, mouse_event: MouseEvent) -> Any:
+        handle_content_mouse(self, mouse_event, self._content_plain_lines)
+        return None
+
+    def _on_status_mouse(self, mouse_event: MouseEvent) -> Any:
+        handle_status_mouse(self, mouse_event, self._status_plain_lines)
+        return None
+
+    def _on_modal_mouse(self, mouse_event: MouseEvent) -> Any:
+        handle_modal_mouse(self, mouse_event, self._modal_plain_lines)
+        return None
+
     def _get_sidebar_text(self) -> ANSI:
         panel = render_sidebar(self.state)
-        return render_rich_to_ansi(panel, width=18)
+        ansi = render_rich_to_ansi(panel, width=18)
+        self._sidebar_plain_lines = [to_plain_text(l) for l in split_lines(ansi._formatted_text)]
+        return ansi
 
     def _get_content_text(self) -> ANSI:
         page = self.state.active_page
@@ -85,7 +147,9 @@ class MonitorApp:
         else:
             panel = render_api_calls_page(self.state, width=width)
 
-        return render_rich_to_ansi(panel, width=width)
+        ansi = render_rich_to_ansi(panel, width=width)
+        self._content_plain_lines = [to_plain_text(l) for l in split_lines(ansi._formatted_text)]
+        return ansi
 
     def _get_status_text(self) -> ANSI:
         status_msg = self.state.get_status()
@@ -95,13 +159,18 @@ class MonitorApp:
             msg = "  [1-6] 切换侧栏页面 | [Tab] 切换焦点 | [M]换模型 | [R]Reasoning | [C]Compact | [S]SoftReset | [Q]退出"
         from rich.text import Text
         text = Text(msg, style="dim #a6adc8")
-        return render_rich_to_ansi(text, width=120)
+        ansi = render_rich_to_ansi(text, width=120)
+        self._status_plain_lines = [to_plain_text(l) for l in split_lines(ansi._formatted_text)]
+        return ansi
 
     def _get_modal_text(self) -> ANSI:
         if not self.state.active_modal:
+            self._modal_plain_lines = []
             return ANSI("")
         rendered = self.state.active_modal.render()
-        return render_rich_to_ansi(rendered, width=72)
+        ansi = render_rich_to_ansi(rendered, width=72)
+        self._modal_plain_lines = [to_plain_text(l) for l in split_lines(ansi._formatted_text)]
+        return ansi
 
     def _create_layout(self) -> Layout:
         sidebar_window = Window(
@@ -125,7 +194,11 @@ class MonitorApp:
         ])
 
         modal_float = Float(
-            content=Window(content=self._modal_control),
+            content=Window(
+                content=self._modal_control,
+                dont_extend_width=True,
+                dont_extend_height=True,
+            ),
             transparent=True,
         )
 
@@ -293,72 +366,31 @@ class MonitorApp:
         @kb.add("m")
         @kb.add("M")
         def _modal_model(event: KeyPressEvent) -> None:
-            if self.state.active_modal:
-                return
-            profile = self.state.selected_agent_profile
-            current_model = self.state.agents.get(profile, {}).group_model if profile in self.state.agents else ""
-            self.state.active_modal = ModelSwitchDialog(
-                profile=profile,
-                current_model=current_model,
-                on_confirm=lambda m, solo: self._do_switch_model(profile, m, solo),
-            )
-            self.state.notify_change()
+            self.open_model_switch()
 
         # Action: Reasoning (R)
         @kb.add("r")
         @kb.add("R")
         def _modal_reasoning(event: KeyPressEvent) -> None:
-            if self.state.active_modal:
-                return
-            profile = self.state.selected_agent_profile
-            current_effort = self.state.agents.get(profile, {}).reasoning_effort if profile in self.state.agents else "low"
-            self.state.active_modal = ReasoningDialog(
-                profile=profile,
-                current_effort=current_effort,
-                on_confirm=lambda eff, solo: self._do_set_reasoning(profile, eff, solo),
-            )
-            self.state.notify_change()
+            self.open_reasoning()
 
         # Action: Compact (C)
         @kb.add("c")
         @kb.add("C")
         def _modal_compact(event: KeyPressEvent) -> None:
-            if self.state.active_modal:
-                return
-            profile = self.state.selected_agent_profile
-            self.state.active_modal = CompactConfirmDialog(
-                profile=profile,
-                on_confirm=lambda omit: self._do_compact(profile, omit),
-            )
-            self.state.notify_change()
+            self.open_compact()
 
         # Action: Soft Reset (S)
         @kb.add("s")
         @kb.add("S")
         def _modal_soft_reset(event: KeyPressEvent) -> None:
-            if self.state.active_modal:
-                return
-            profile = self.state.selected_agent_profile
-            self.state.active_modal = SoftResetWarningDialog(
-                profile=profile,
-                on_confirm=lambda solo: self._do_soft_reset(profile, solo),
-            )
-            self.state.notify_change()
+            self.open_soft_reset()
 
         # Action: NSFW Toggle (N)
         @kb.add("n")
         @kb.add("N")
         def _modal_nsfw(event: KeyPressEvent) -> None:
-            if self.state.active_modal:
-                return
-            if not self.state.nsfw_unlocked:
-                self.state.active_modal = NsfwAdultConfirmDialog(
-                    on_confirm=self._unlock_nsfw,
-                )
-            else:
-                self.state.nsfw_unlocked = False
-                self.state.set_status("已重新隐藏 NSFW 独处回忆")
-            self.state.notify_change()
+            self.toggle_nsfw()
 
         # Enter key for modals
         @kb.add("enter")
@@ -370,6 +402,67 @@ class MonitorApp:
                 self.state.notify_change()
 
         return kb
+
+    def open_model_switch(self) -> None:
+        """Open the model switch dialog."""
+        if self.state.active_modal:
+            return
+        profile = self.state.selected_agent_profile
+        current_model = self.state.agents.get(profile, {}).group_model if profile in self.state.agents else ""
+        self.state.active_modal = ModelSwitchDialog(
+            profile=profile,
+            current_model=current_model,
+            on_confirm=lambda m, solo: self._do_switch_model(profile, m, solo),
+        )
+        self.state.notify_change()
+
+    def open_reasoning(self) -> None:
+        """Open the reasoning effort setting dialog."""
+        if self.state.active_modal:
+            return
+        profile = self.state.selected_agent_profile
+        current_effort = self.state.agents.get(profile, {}).reasoning_effort if profile in self.state.agents else "low"
+        self.state.active_modal = ReasoningDialog(
+            profile=profile,
+            current_effort=current_effort,
+            on_confirm=lambda eff, solo: self._do_set_reasoning(profile, eff, solo),
+        )
+        self.state.notify_change()
+
+    def open_compact(self) -> None:
+        """Open the conversation compaction confirm dialog."""
+        if self.state.active_modal:
+            return
+        profile = self.state.selected_agent_profile
+        self.state.active_modal = CompactConfirmDialog(
+            profile=profile,
+            on_confirm=lambda omit: self._do_compact(profile, omit),
+        )
+        self.state.notify_change()
+
+    def open_soft_reset(self) -> None:
+        """Open the soft reset warning dialog."""
+        if self.state.active_modal:
+            return
+        profile = self.state.selected_agent_profile
+        self.state.active_modal = SoftResetWarningDialog(
+            profile=profile,
+            on_confirm=lambda solo: self._do_soft_reset(profile, solo),
+        )
+        self.state.notify_change()
+
+    def toggle_nsfw(self) -> None:
+        """Toggle or unlock NSFW private memories."""
+        if self.state.active_modal:
+            return
+        if not self.state.nsfw_unlocked:
+            self.state.active_modal = NsfwAdultConfirmDialog(
+                on_confirm=self._unlock_nsfw,
+            )
+        else:
+            self.state.nsfw_unlocked = False
+            self.state.set_status("已重新隐藏 NSFW 独处回忆")
+        self.state.notify_change()
 
     def _unlock_nsfw(self) -> None:
         self.state.nsfw_unlocked = True

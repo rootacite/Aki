@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Any, Callable
+from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.align import Align
 from rich.panel import Panel
 from rich.text import Text
@@ -20,6 +21,10 @@ class BaseModal:
         """Handle key event. Return True if dialog should close."""
         if key in ("escape", "q"):
             return True
+        return False
+
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        """Handle mouse event. Return True if dialog should close."""
         return False
 
 
@@ -50,6 +55,17 @@ class NsfwAdultConfirmDialog(BaseModal):
             return True
         if key in ("escape", "n", "N", "q"):
             return True
+        return False
+
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            y = mouse_event.position.y
+            if 0 <= y < len(lines):
+                line = lines[y]
+                if "确认解锁" in line or "[Enter]" in line or "[Y]" in line:
+                    return self.handle_key("enter")
+                if "取消保持隐藏" in line or "[Esc]" in line or "[N]" in line:
+                    return self.handle_key("escape")
         return False
 
 
@@ -87,6 +103,20 @@ class CompactConfirmDialog(BaseModal):
             return True
         if key in ("escape", "n", "N", "q"):
             return True
+        return False
+
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            y = mouse_event.position.y
+            if 0 <= y < len(lines):
+                line = lines[y]
+                if "剔除工具结果" in line or "[x]" in line or "[ ]" in line:
+                    self.omit_tool_results = not self.omit_tool_results
+                    return False
+                if "确认执行" in line or "[Enter]" in line:
+                    return self.handle_key("enter")
+                if "取消" in line or "[Esc]" in line:
+                    return self.handle_key("escape")
         return False
 
 
@@ -130,6 +160,20 @@ class SoftResetWarningDialog(BaseModal):
             return True
         if key in ("escape", "n", "N", "q"):
             return True
+        return False
+
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            y = mouse_event.position.y
+            if 0 <= y < len(lines):
+                line = lines[y]
+                if "重置目标" in line or "独处" in line or "群聊" in line or "[Tab]" in line:
+                    self.solo_target = not self.solo_target
+                    return False
+                if "确认执行" in line or "[Enter]" in line:
+                    return self.handle_key("enter")
+                if "取消" in line or "[Esc]" in line:
+                    return self.handle_key("escape")
         return False
 
 
@@ -194,6 +238,33 @@ class ModelSwitchDialog(BaseModal):
             return True
         return False
 
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self.handle_key("up")
+            return False
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self.handle_key("down")
+            return False
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            y = mouse_event.position.y
+            if 0 <= y < len(lines):
+                line = lines[y]
+                if "作用目标" in line or "[*]" in line or "[Tab]" in line:
+                    self.solo_mode = not self.solo_mode
+                    return False
+                for idx, m in enumerate(self.AVAILABLE_MODELS):
+                    if m in line:
+                        if self.selected_idx == idx:
+                            return self.handle_key("enter")
+                        else:
+                            self.selected_idx = idx
+                            return False
+                if "确认" in line or "[Enter]" in line:
+                    return self.handle_key("enter")
+                if "取消" in line or "[Esc]" in line:
+                    return self.handle_key("escape")
+        return False
+
 
 class ReasoningDialog(BaseModal):
     title = "设置 Reasoning 深度"
@@ -247,4 +318,31 @@ class ReasoningDialog(BaseModal):
             return True
         if key in ("escape", "q"):
             return True
+        return False
+
+    def handle_mouse(self, mouse_event: MouseEvent, lines: list[str]) -> bool:
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self.handle_key("up")
+            return False
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self.handle_key("down")
+            return False
+        if mouse_event.event_type == MouseEventType.MOUSE_DOWN and mouse_event.button == MouseButton.LEFT:
+            y = mouse_event.position.y
+            if 0 <= y < len(lines):
+                line = lines[y]
+                if "作用目标" in line or "[*]" in line or "[Tab]" in line:
+                    self.solo_mode = not self.solo_mode
+                    return False
+                for idx, lvl in enumerate(self.LEVELS):
+                    if lvl.upper() in line.upper():
+                        if self.selected_idx == idx:
+                            return self.handle_key("enter")
+                        else:
+                            self.selected_idx = idx
+                            return False
+                if "确认" in line or "[Enter]" in line:
+                    return self.handle_key("enter")
+                if "取消" in line or "[Esc]" in line:
+                    return self.handle_key("escape")
         return False

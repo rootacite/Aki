@@ -98,7 +98,10 @@ class PromptsMixin:
                 if limit is None
                 else self._frozen_group_history[: max(0, limit)]
             )
-            group_entries = without_current(group_entries)
+            # The frozen group history is an immutable snapshot before entering solo mode.
+            # Do not filter it with without_current()! Filtering it with the solo turn's
+            # exclude_seq would cause group messages with matching seq to disappear and
+            # reappear across turns, busting prompt prefix stability and KV cache.
             group_block = render_channel_transcript(
                 group_entries,
                 budget_tokens=min(

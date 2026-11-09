@@ -74,6 +74,43 @@ def test_segment_prompt_and_calibration():
         assert s.percentage > 0.0
 
 
+def test_solo_prompt_segmentation():
+    sys_content = (
+        "You are Aki.\n"
+        "<human>\n关于Master的记忆\n</human>\n"
+        "<persona>\nAki的人设\n</persona>\n"
+        "<memory-policy>\n记忆策略\n</memory-policy>\n"
+        "# solo-mode\n## Notice\n独处模式生效中\n"
+        "# solo-memories\n过去独处的摘要记录\n"
+        "# solo-transcript\n独处历史消息\n"
+    )
+    user_content = (
+        "# live-context\n当前正在打开终端窗口\n\n"
+        "# format-guard\n不要输出多余的标记\n\n"
+        "小秋，今天辛苦啦！"
+    )
+    payload = {
+        "messages": [
+            {"role": "system", "content": sys_content},
+            {"role": "user", "content": user_content},
+        ],
+        "tools": [{"name": f"tool_{i}"} for i in range(10)],
+    }
+    segments = segment_prompt(payload)
+    names = [s.name for s in segments]
+
+    assert any("Core Memory" in n for n in names)
+    assert any("Solo State & Memories" in n for n in names)
+    assert any("Live Desktop Context" in n for n in names)
+    assert any("Turn Control & Guards" in n for n in names)
+    assert any("Current Input" in n for n in names)
+
+    # Check zero tokens handling
+    calibrated_zero = calibrate_tokens(segments, 0)
+    assert sum(s.calibrated_tokens for s in calibrated_zero) > 0
+    assert any(s.percentage > 0.0 for s in calibrated_zero)
+
+
 def test_detect_fork_initial_call():
     record = ApiCallRecord(request_id="req1", profile="aki", payload={"messages": [{"role": "user", "content": "hi"}]})
     fork = detect_fork(None, record)
@@ -215,3 +252,217 @@ def test_inspectors():
         assert "profile" in r0
         assert "conv_type" in r0
         assert r0["agent_name"] in ("Aki", "Fuyu", "Haru", "Natsu")
+
+
+def test_mouse_sidebar_and_status():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from engine.akictl.monitor.app import MonitorApp
+    from engine.akictl.monitor.mouse import handle_sidebar_mouse, handle_status_mouse
+
+    app = MonitorApp()
+    state = app.state
+
+    # 1. Sidebar scroll
+    state.active_page = 1
+    handle_sidebar_mouse(state, MouseEvent(Point(0, 0), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset()), [])
+    assert state.active_page == 2
+    handle_sidebar_mouse(state, MouseEvent(Point(0, 0), MouseEventType.SCROLL_UP, MouseButton.NONE, frozenset()), [])
+    assert state.active_page == 1
+
+    # 2. Sidebar click
+    sidebar_lines = [
+        "│ ❖ AKI MONITOR  │",
+        "│ ─────────────… │",
+        "│  [1]  📡 API   │",
+        "│   2   👥       │",
+        "│ 智能中枢       │",
+        "│   3   🧠       │",
+        "│ 状态: ▶ 实时   │",
+    ]
+    # Click page 2
+    handle_sidebar_mouse(state, MouseEvent(Point(5, 3), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), sidebar_lines)
+    assert state.active_page == 2
+    assert state.active_focus == "sidebar"
+
+    # Click pause toggle
+    assert state.paused is False
+    handle_sidebar_mouse(state, MouseEvent(Point(5, 6), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), sidebar_lines)
+    assert state.paused is True
+
+    # 3. Status bar click
+    status_lines = [
+        "  [1-6] 切换侧栏页面 | [Tab] 切换焦点 | [M]换模型 | [R]Reasoning | [C]Compact | [S]SoftReset | [Q]退出"
+    ]
+    # Click [Tab] (x around 25)
+    tab_x = status_lines[0].find("[Tab]")
+    handle_status_mouse(app, MouseEvent(Point(tab_x, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), status_lines)
+    assert state.active_focus in ("list", "detail", "sidebar")
+
+    # Click [M]换模型 -> opens ModelSwitchDialog
+    model_x = status_lines[0].find("[M]")
+    handle_status_mouse(app, MouseEvent(Point(model_x, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), status_lines)
+    assert state.active_modal is not None
+    assert isinstance(state.active_modal, ModelSwitchDialog)
+
+
+def test_mouse_page1_and_page2():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from engine.akictl.monitor.app import MonitorApp
+    from engine.akictl.monitor.mouse import handle_content_mouse
+
+    app = MonitorApp()
+    state = app.state
+
+    # Setup 3 dummy calls
+    r1 = ApiCallRecord(request_id="c1", profile="aki", seq=1)
+    r2 = ApiCallRecord(request_id="c2", profile="aki", seq=2)
+    state.add_or_update_call(r1)
+    state.add_or_update_call(r2)
+    state.selected_call_id = "c1"
+
+    # Page 1: Left list click and scroll
+    state.active_page = 1
+    content_lines_page1 = [
+        "top border",
+        "sub header",
+        "table header",
+        "row 1: c1",
+        "row 2: c2",
+    ]
+    # Click row 2 (y=4, x=10 -> left side)
+    handle_content_mouse(app, MouseEvent(Point(10, 4), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), content_lines_page1)
+    assert state.selected_call_id == "c2"
+    assert state.active_focus == "list"
+
+    # Scroll up on left side
+    handle_content_mouse(app, MouseEvent(Point(10, 4), MouseEventType.SCROLL_UP, MouseButton.NONE, frozenset()), content_lines_page1)
+    assert state.selected_call_id == "c1"
+
+    # Right detail subtab click
+    subtab_line = "│  [1.分块校准]   2.分叉 Diff    3.Cache/性能    4.网络增量    5.响应工具流    6.Raw JSON"
+    content_lines_with_subtab = ["b0", "b1", subtab_line]
+    cache_tab_x = subtab_line.find("Cache/性能")
+    handle_content_mouse(app, MouseEvent(Point(cache_tab_x, 2), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), content_lines_with_subtab)
+    assert state.selected_detail_tab == 2
+    assert state.active_focus == "detail"
+
+    # Right detail subtab scroll
+    handle_content_mouse(app, MouseEvent(Point(50, 5), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset()), content_lines_with_subtab)
+    assert state.selected_detail_tab == 3
+
+    # Page 2: Agent Hub
+    state.active_page = 2
+    from engine.akictl.monitor.agent_inspector import AgentSnapshot
+    state.agents = {
+        "aki": AgentSnapshot("aki", "Aki", "group"),
+        "fuyu": AgentSnapshot("fuyu", "Fuyu", "solo"),
+    }
+    state.selected_agent_profile = "aki"
+    # Left list click: y=4 corresponds to fuyu (idx=1)
+    handle_content_mouse(app, MouseEvent(Point(10, 4), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), ["b0", "b1", "b2", "aki", "fuyu"])
+    assert state.selected_agent_profile == "fuyu"
+
+    # Subtab 0 quick action click: [M] 切换上游模型
+    state.selected_agent_tab = 0
+    lines_p2 = [
+        "b0", "b1", "subtabs",
+        "...", "...", "...", "...", "...",
+        "❖ 核心快捷控制指令 (按对应键即可触发):",
+        "  [M] 切换上游模型 (独处/群聊)",
+    ]
+    m_y = 9
+    handle_content_mouse(app, MouseEvent(Point(40, m_y), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), lines_p2)
+    assert state.active_modal is not None
+    assert isinstance(state.active_modal, ModelSwitchDialog)
+
+
+def test_modal_mouse_interaction():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+
+    # 1. Compact dialog mouse click
+    compact_opts = []
+    dlg_compact = CompactConfirmDialog(profile="aki", on_confirm=lambda omit: compact_opts.append(omit))
+    compact_lines = [
+        "确认对智能体 [AKI] 执行上下文压缩？",
+        "选项: [x] 剔除工具结果 (omit-tool-results)",
+        "按 [Space] 切换勾选  |  按 [Enter] 确认执行  |  按 [Esc] 取消",
+    ]
+    assert dlg_compact.omit_tool_results is True
+    # Click checkbox row
+    dlg_compact.handle_mouse(MouseEvent(Point(10, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), compact_lines)
+    assert dlg_compact.omit_tool_results is False
+    # Click confirm row
+    close = dlg_compact.handle_mouse(MouseEvent(Point(15, 2), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), compact_lines)
+    assert close is True
+    assert compact_opts == [False]
+
+    # 2. Model switch dialog mouse click
+    model_opts = []
+    dlg_model = ModelSwitchDialog(profile="aki", current_model="aki/gemini-3.8-flash", on_confirm=lambda m, s: model_opts.append((m, s)))
+    model_lines = [
+        "切换智能体 [AKI] 上游模型",
+        "作用目标: [*] 群聊模型 (Group) (按 [Tab] 切换群聊/独处)",
+        "",
+        " ❯ aki/gemini-3.8-flash",
+        "   aki/gemini-3.5-flash-lite",
+        "   aki/deepseek-flash",
+    ]
+    # Click scope toggle row
+    dlg_model.handle_mouse(MouseEvent(Point(10, 1), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), model_lines)
+    assert dlg_model.solo_mode is True
+
+    # Click second model (aki/gemini-3.5-flash-lite)
+    dlg_model.handle_mouse(MouseEvent(Point(10, 4), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), model_lines)
+    assert dlg_model.selected_idx == 1
+
+    # Click it again to confirm
+    close = dlg_model.handle_mouse(MouseEvent(Point(10, 4), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset()), model_lines)
+    assert close is True
+    assert model_opts == [("aki/gemini-3.5-flash-lite", True)]
+
+
+def test_monitor_app_mouse_control_dispatch():
+    from prompt_toolkit.data_structures import Point
+    from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
+    from engine.akictl.monitor.app import MonitorApp
+
+    app = MonitorApp()
+    # Trigger initial text generation to populate _*_plain_lines
+    app._get_sidebar_text()
+    app._get_content_text()
+    app._get_status_text()
+
+    # 1. Sidebar control receives scroll down
+    app.state.active_page = 1
+    res = app._sidebar_control.mouse_handler(
+        MouseEvent(Point(5, 5), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset())
+    )
+    assert res is None
+    assert app.state.active_page == 2
+
+    # 2. Content control receives scroll on right detail
+    app.state.selected_agent_tab = 0
+    res = app._content_control.mouse_handler(
+        MouseEvent(Point(50, 5), MouseEventType.SCROLL_DOWN, MouseButton.NONE, frozenset())
+    )
+    assert res is None
+    assert app.state.selected_agent_tab == 1
+
+    # 3. Status control receives click on [M]
+    res = app._status_control.mouse_handler(
+        MouseEvent(Point(40, 0), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    assert res is None
+    assert app.state.active_modal is not None
+
+    # 4. Clicking content area while modal is open closes the modal
+    res = app._content_control.mouse_handler(
+        MouseEvent(Point(10, 10), MouseEventType.MOUSE_DOWN, MouseButton.LEFT, frozenset())
+    )
+    assert res is None
+    assert app.state.active_modal is None
+
+

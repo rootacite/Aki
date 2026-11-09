@@ -42,7 +42,7 @@ def render_api_calls_page(state: MonitorState, width: int = 120) -> Panel:
     right_panel = _render_detail_panel(state, width=max(50, width - 42))
 
     outer_table = Table.grid(expand=True)
-    outer_table.add_column("Left", width=38)
+    outer_table.add_column("Left", width=35)
     outer_table.add_column("Right")
     outer_table.add_row(left_table, right_panel)
 
@@ -58,12 +58,12 @@ def render_api_calls_page(state: MonitorState, width: int = 120) -> Panel:
 def _render_calls_table(state: MonitorState) -> Panel:
     """Render the left list of captured API calls."""
     calls = state.filtered_calls()
-    table = Table(box=None, expand=True, padding=(0, 0), show_header=True)
-    table.add_column("#", width=3, justify="right", style="dim")
-    table.add_column("Agent", width=6)
-    table.add_column("Tokens", width=7, justify="right")
-    table.add_column("Cache", width=5, justify="right")
-    table.add_column("Status", width=6, justify="center")
+    table = Table(box=None, expand=True, padding=(0, 1), show_header=True)
+    table.add_column("#", width=3, justify="right", style="dim", no_wrap=True)
+    table.add_column("Agent", width=5, no_wrap=True)
+    table.add_column("Tokens", width=7, justify="right", no_wrap=True)
+    table.add_column("Cache", width=5, justify="right", no_wrap=True)
+    table.add_column("Status", width=6, justify="center", no_wrap=True)
 
     if not calls:
         table.add_row("", "[dim]暂无捕获...[/]", "", "", "")
@@ -161,13 +161,16 @@ def _view_calibration(record: ApiCallRecord) -> Table:
     segments = segment_prompt(record.payload)
     calibrated = calibrate_tokens(segments, record.prompt_tokens)
 
+    token_header = "校准Token" if record.prompt_tokens > 0 else "预估Token"
+    token_style = "bold green" if record.prompt_tokens > 0 else "bold yellow"
+
     table = Table(expand=True, box=None, padding=(0, 1))
-    table.add_column("分块名称 (Block)", style="cyan", ratio=3)
-    table.add_column("分类", style="dim", ratio=1)
-    table.add_column("字符数", justify="right", ratio=1)
-    table.add_column("校准 Token", justify="right", style="bold green", ratio=1)
-    table.add_column("占比", justify="right", style="yellow", ratio=1)
-    table.add_column("分布条", ratio=2)
+    table.add_column("分块名称 (Block)", style="cyan", min_width=15, ratio=3, no_wrap=True)
+    table.add_column("分类", style="dim", width=6, no_wrap=True)
+    table.add_column("字符数", justify="right", width=7, no_wrap=True)
+    table.add_column(token_header, justify="right", style=token_style, width=9, no_wrap=True)
+    table.add_column("占比", justify="right", style="yellow", width=6, no_wrap=True)
+    table.add_column("分布条", min_width=8, ratio=2)
 
     total_tokens = record.prompt_tokens or sum(s.estimated_tokens for s in segments)
 
@@ -183,11 +186,12 @@ def _view_calibration(record: ApiCallRecord) -> Table:
         )
 
     table.add_section()
+    token_summary = f"{total_tokens:,}" if record.prompt_tokens > 0 else f"{total_tokens:,}*"
     table.add_row(
         Text("总上下文 (Total Prompt)", style="bold white"),
         "",
         Text(f"{sum(s.chars for s in calibrated):,}", style="bold white"),
-        Text(f"{total_tokens:,}", style="bold green"),
+        Text(token_summary, style=token_style),
         Text("100.0%", style="bold yellow"),
         "",
     )

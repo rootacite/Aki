@@ -42,13 +42,35 @@ def estimate_tokens(text: str) -> int:
     return max(1, int(cjk_count / 1.5 + other_count / 3.8))
 
 
-def _extract_tagged_section(text: str, tag: str) -> tuple[str, str]:
-    pattern = re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.DOTALL)
-    match = pattern.search(text)
+def _extract_section(text: str, tag: str, stop_at_paragraph: bool = False) -> tuple[str, str]:
+    """Extract either XML <tag>...</tag> or Markdown '# tag...' block."""
+    if not text:
+        return "", ""
+    # 1. XML pattern
+    xml_pattern = re.compile(rf"<{tag}\b[^>]*>.*?</{tag}>", re.DOTALL)
+    match = xml_pattern.search(text)
     if match:
         matched_str = match.group(0)
         remaining = text[:match.start()] + text[match.end():]
         return matched_str, remaining
+
+    # 2. Markdown pattern: ^# tag\b[^\n]*\n.*?(?=^# [^\n]+|\Z)
+    if stop_at_paragraph:
+        md_pattern = re.compile(
+            rf"(?:^|\n)# (?:{re.escape(tag)})\b[^\n]*\n.*?(?=\n# [^\n]+|\n\n|\Z)",
+            re.DOTALL,
+        )
+    else:
+        md_pattern = re.compile(
+            rf"(?:^|\n)# (?:{re.escape(tag)})\b[^\n]*\n.*?(?=\n# [^\n]+|\Z)",
+            re.DOTALL,
+        )
+    match = md_pattern.search(text)
+    if match:
+        matched_str = match.group(0).strip()
+        remaining = text[:match.start()] + text[match.end():]
+        return matched_str, remaining
+
     return "", text
 
 
@@ -64,41 +86,121 @@ def segment_prompt(payload: Mapping[str, Any]) -> list[PromptSegment]:
     if isinstance(first_msg, Mapping) and first_msg.get("role") == "system":
         raw_sys = first_msg.get("content")
         sys_text = raw_sys if isinstance(raw_sys, str) else json.dumps(raw_sys, ensure_ascii=False)
+        sys_rem = sys_text
 
-        # Extract Core Memory tags
-        human_block, sys_rem = _extract_tagged_section(sys_text, "human")
-        persona_block, sys_rem = _extract_tagged_section(sys_rem, "persona")
-        if human_block or persona_block:
-            core_text = human_block + ("\n" if human_block and persona_block else "") + persona_block
-            segments.append(PromptSegment("Core Memory (<human>, <persona>)", "Memory", len(core_text), estimate_tokens(core_text)))
+        # Extract Core Memory tags (human, persona, memory-policy, memory)
+        core_parts: list[str] = []
+        for tag in ("human", "persona", "memory-policy", "memory"):
+            block, sys_rem = _extract_section(sys_rem, tag)
+            if block:
+                core_parts.append(block)
+        if core_parts:
+            core_text = "\n\n".join(core_parts)
+            segments.append(
+                PromptSegment(
+                    "Core Memory",
+                    "Memory",
+                    len(core_text),
+                    estimate_tokens(core_text),
+                )
+            )
 
-        # Extract Channel Routing
-        ch_ctx, sys_rem = _extract_tagged_section(sys_rem, "channel-context")
-        ch_route, sys_rem = _extract_tagged_section(sys_rem, "channel-wake-routing")
-        ch_wait, sys_rem = _extract_tagged_section(sys_rem, "channel-wait-for")
-        ch_owner, sys_rem = _extract_tagged_section(sys_rem, "tool-ownership")
-        routing_text = "\n".join(filter(None, [ch_ctx, ch_route, ch_wait, ch_owner]))
-        if routing_text:
-            segments.append(PromptSegment("Channel Context & Routing", "Routing", len(routing_text), estimate_tokens(routing_text)))
+        # Extract Solo Blocks (solo-mode, solo-memories, solo-transcript)
+        solo_parts: list[str] = []
+        for tag in ("solo-mode", "solo-memories", "solo-transcript", "solo"):
+            block, sys_rem = _extract_section(sys_rem, tag)
+            if block:
+                solo_parts.append(block)
+        if solo_parts:
+            solo_text = "\n\n".join(solo_parts)
+            segments.append(
+                PromptSegment(
+                    "Solo State & Memories",
+                    "Solo",
+                    len(solo_text),
+                    estimate_tokens(solo_text),
+                )
+            )
 
-        # Extract Solo Blocks
-        solo_mode, sys_rem = _extract_tagged_section(sys_rem, "solo")
-        solo_mem, sys_rem = _extract_tagged_section(sys_rem, "solo-memories")
-        solo_trans, sys_rem = _extract_tagged_section(sys_rem, "solo-transcript")
-        solo_text = "\n".join(filter(None, [solo_mode, solo_mem, solo_trans]))
-        if solo_text:
-            segments.append(PromptSegment("Solo State & Memories", "Solo", len(solo_text), estimate_tokens(solo_text)))
+        # Extract Channel Transcript if present in system message
+        ch_trans, sys_rem = _extract_section(sys_rem, "channel-transcript")
+        if ch_trans:
+            segments.append(
+                PromptSegment(
+                    "Channel Transcript",
+                    "Channel",
+                    len(ch_trans),
+                    estimate_tokens(ch_trans),
+                )
+            )
 
-        # Extract MemFS block
-        memfs_match = re.search(r"(?:^|\n)## MemFS\b.*?(?=\n# |\Z)", sys_rem, re.DOTALL)
+        # Extract Channel Context & Routing
+        routing_parts: list[str] = []
+        for tag in (
+            "channel-context",
+            "channel-wake-routing",
+            "channel-wait-for",
+            "tool-ownership",
+            "channel-identity",
+            "channel-policy",
+            "nighttalk",
+        ):
+            block, sys_rem = _extract_section(sys_rem, tag)
+            if block:
+                routing_parts.append(block)
+        if routing_parts:
+            routing_text = "\n\n".join(routing_parts)
+            segments.append(
+                PromptSegment(
+                    "Channel Context & Routing",
+                    "Routing",
+                    len(routing_text),
+                    estimate_tokens(routing_text),
+                )
+            )
+
+        # Extract Live Context if injected in system prompt
+        live_sys, sys_rem = _extract_section(sys_rem, "live-context")
+        if not live_sys:
+            live_sys, sys_rem = _extract_section(sys_rem, "runtime-context")
+        if live_sys:
+            segments.append(
+                PromptSegment(
+                    "Live Desktop Context",
+                    "Context",
+                    len(live_sys),
+                    estimate_tokens(live_sys),
+                )
+            )
+
+        # Extract MemFS / Deferred Memory block
+        memfs_match = re.search(
+            r"(?:^|\n)(?:## MemFS\b.*?(?=\n# |\Z)|<deferred-memory\b.*?</deferred-memory>)",
+            sys_rem,
+            re.DOTALL,
+        )
         if memfs_match:
-            memfs_text = memfs_match.group(0)
+            memfs_text = memfs_match.group(0).strip()
             sys_rem = sys_rem[:memfs_match.start()] + sys_rem[memfs_match.end():]
-            segments.append(PromptSegment("MemFS Injected Files", "MemFS", len(memfs_text), estimate_tokens(memfs_text)))
+            segments.append(
+                PromptSegment(
+                    "MemFS Injected Files",
+                    "MemFS",
+                    len(memfs_text),
+                    estimate_tokens(memfs_text),
+                )
+            )
 
-        # Base System Persona
+        # Base System Persona & Runtime Rules
         if sys_rem.strip():
-            segments.append(PromptSegment("Base Persona & Runtime Rules", "System", len(sys_rem), estimate_tokens(sys_rem)))
+            segments.append(
+                PromptSegment(
+                    "Base Persona & Runtime Rules",
+                    "System",
+                    len(sys_rem),
+                    estimate_tokens(sys_rem),
+                )
+            )
 
         # Subsequent messages
         history_msgs = messages[1:-1]
@@ -111,7 +213,14 @@ def segment_prompt(payload: Mapping[str, Any]) -> list[PromptSegment]:
     tools = payload.get("tools")
     if isinstance(tools, Sequence) and tools:
         tools_json = json.dumps(tools, ensure_ascii=False)
-        segments.append(PromptSegment(f"Tools Schema ({len(tools)} tools)", "Tools", len(tools_json), estimate_tokens(tools_json)))
+        segments.append(
+            PromptSegment(
+                f"Tools Schema ({len(tools)} tools)",
+                "Tools",
+                len(tools_json),
+                estimate_tokens(tools_json),
+            )
+        )
 
     # 3. History Messages
     if history_msgs:
@@ -135,12 +244,54 @@ def segment_prompt(payload: Mapping[str, Any]) -> list[PromptSegment]:
         label = f"History Messages ({len(history_msgs)} turns: {user_count}u/{asst_count}a/{tool_count}t)"
         segments.append(PromptSegment(label, "History", total_hist_chars, estimate_tokens(" " * total_hist_chars)))
 
-    # 4. Current Input
+    # 4. Current Input (with Live Context overlay extraction if present)
     if final_msg and isinstance(final_msg, Mapping):
         f_role = final_msg.get("role", "user")
         f_content = final_msg.get("content", "")
         f_text = f_content if isinstance(f_content, str) else json.dumps(f_content, ensure_ascii=False)
-        segments.append(PromptSegment(f"Current Input [{f_role}]", "Input", len(f_text), estimate_tokens(f_text)))
+        f_rem = f_text
+
+        # Extract live desktop context prepended to user message
+        live_usr, f_rem = _extract_section(f_rem, "live-context", stop_at_paragraph=True)
+        if not live_usr:
+            live_usr, f_rem = _extract_section(f_rem, "runtime-context", stop_at_paragraph=True)
+        if live_usr:
+            segments.append(
+                PromptSegment(
+                    "Live Desktop Context",
+                    "Context",
+                    len(live_usr),
+                    estimate_tokens(live_usr),
+                )
+            )
+
+        # Extract format guards / turn controls prepended to user message
+        guard_parts: list[str] = []
+        for g_tag in ("format-guard", "turn-control", "channel-turn", "solo-wait-user"):
+            g_blk, f_rem = _extract_section(f_rem, g_tag, stop_at_paragraph=True)
+            if g_blk:
+                guard_parts.append(g_blk)
+        if guard_parts:
+            guard_text = "\n\n".join(guard_parts)
+            segments.append(
+                PromptSegment(
+                    "Turn Control & Guards",
+                    "Guard",
+                    len(guard_text),
+                    estimate_tokens(guard_text),
+                )
+            )
+
+        clean_user = f_rem.strip()
+        if clean_user or not segments:
+            segments.append(
+                PromptSegment(
+                    f"Current Input [{f_role}]",
+                    "Input",
+                    len(clean_user or f_text),
+                    estimate_tokens(clean_user or f_text),
+                )
+            )
 
     return segments
 

@@ -49,7 +49,7 @@ def render_rich_to_ansi(renderable: Any, width: int = 100) -> ANSI:
         file=output,
         force_terminal=True,
         color_system="truecolor",
-        width=max(40, width),
+        width=max(16, width),
         highlight=False,
     )
     console.print(renderable)

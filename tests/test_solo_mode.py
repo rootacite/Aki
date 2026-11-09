@@ -578,6 +578,40 @@ class SoloGatewayTests(unittest.IsolatedAsyncioTestCase):
         self.server._persist_channel_history()
         self.assertIn('"seq":1', path.read_text(encoding="utf-8"))
 
+    async def test_frozen_group_history_not_filtered_by_solo_turn_exclude_seq(self) -> None:
+        self.server._solo_session = SoloSession(
+            session_id="solo-test-cache",
+            target_id="legacy_aki",
+            target_name="Aki",
+            profile="aki",
+            started_at="2026-10-25T00:00:00Z",
+            group_magic="group-magic",
+        )
+        self.server._frozen_group_history = [
+            ChannelTranscriptEntry(
+                seq=831,
+                sender="Acite Lee",
+                sender_id="user_acite",
+                text="@Aki No",
+                from_agent=False,
+                timestamp="2026-11-03T20:19:23Z",
+            ),
+            ChannelTranscriptEntry(
+                seq=832,
+                sender="Aki",
+                sender_id="aki",
+                text="不是运行时的核心机制",
+                from_agent=True,
+                timestamp="2026-11-03T20:19:35Z",
+            ),
+        ]
+        # In solo mode, when the solo turn arrives with exclude_seq=831,
+        # frozen group history MUST NOT drop seq=831!
+        (group_block, _, _, _) = await self.server._render_transcript_blocks(exclude_seq=831)
+        self.assertIn("@Aki No", group_block)
+        self.assertIn("seq=831", group_block)
+        self.assertIn("seq=832", group_block)
+
     async def test_solo_file_tool_records_sender_and_path_in_solo_history(self) -> None:
         await self.server._on_channel_control(
             TextEnvelope(

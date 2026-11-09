@@ -56,7 +56,9 @@ class SocketListener:
         """Connect to one debug socket and stream records."""
         while self._running:
             try:
-                reader, writer = await asyncio.open_unix_connection(str(sock_path))
+                reader, writer = await asyncio.open_unix_connection(
+                    str(sock_path), limit=16 * 1024 * 1024
+                )
                 LOGGER.debug("connected to debug socket: %s", sock_path)
                 try:
                     while self._running:
@@ -175,7 +177,17 @@ class SocketListener:
             self._accumulators.pop(request_id, None)
 
     def _parse_sse_data(self, chunk_text: str, acc: dict[str, Any]) -> None:
-        """Parse SSE data lines to capture streamed content, tool calls, and usage/timings."""
+        """Parse SSE data lines or full JSON to capture content, tool calls, and usage/timings."""
+        stripped = chunk_text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                data = json.loads(stripped)
+                if isinstance(data, dict):
+                    self._extract_json_chunk_data(data, acc)
+                    return
+            except Exception:
+                pass
+
         for line in chunk_text.splitlines():
             line = line.strip()
             if not line.startswith("data:"):
@@ -188,28 +200,28 @@ class SocketListener:
             except Exception:
                 continue
 
-            if not isinstance(data, dict):
-                continue
+            if isinstance(data, dict):
+                self._extract_json_chunk_data(data, acc)
 
-            # Extract usage / timings
-            if "usage" in data and isinstance(data["usage"], dict):
-                acc["usage"].update(data["usage"])
-            if "timings" in data and isinstance(data["timings"], dict):
-                acc["timings"].update(data["timings"])
+    def _extract_json_chunk_data(self, data: dict[str, Any], acc: dict[str, Any]) -> None:
+        # Extract usage / timings
+        if "usage" in data and isinstance(data["usage"], dict):
+            acc["usage"].update(data["usage"])
+        if "timings" in data and isinstance(data["timings"], dict):
+            acc["timings"].update(data["timings"])
 
-            # Extract text choices
-            choices = data.get("choices")
-            if isinstance(choices, list) and choices:
-                c0 = choices[0]
-                if isinstance(c0, dict):
-                    delta = c0.get("delta")
-                    if isinstance(delta, dict):
-                        content = delta.get("content")
-                        if isinstance(content, str):
-                            acc["chunks_text"].append(content)
-                        # Tool calls
-                        tc = delta.get("tool_calls")
-                        if isinstance(tc, list):
-                            for call in tc:
-                                if isinstance(call, dict):
-                                    acc["tool_calls"].append(call)
+        # Extract text choices
+        choices = data.get("choices")
+        if isinstance(choices, list) and choices:
+            c0 = choices[0]
+            if isinstance(c0, dict):
+                delta = c0.get("delta") or c0.get("message")
+                if isinstance(delta, dict):
+                    content = delta.get("content")
+                    if isinstance(content, str):
+                        acc["chunks_text"].append(content)
+                    tc = delta.get("tool_calls")
+                    if isinstance(tc, list):
+                        for call in tc:
+                            if isinstance(call, dict):
+                                acc["tool_calls"].append(call)
